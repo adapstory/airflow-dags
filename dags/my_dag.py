@@ -1,31 +1,45 @@
-from datetime import datetime
-from time import sleep
+from datetime import datetime, timezone
 
-from airflow import DAG
-from airflow.operators.python_operator import PythonOperator
+from airflow.sdk import DAG
+from airflow.providers.standard.operators.empty import EmptyOperator
+from airflow.providers.standard.operators.python import PythonOperator
 
 
-def my_task():
-    print("Hello, Airflow!")
-    sleep(10)
-    print("Task completed.")
+def report_airflow_smoke() -> str:
+    timestamp = datetime.now(timezone.utc).isoformat()
+    print(f"Airflow smoke DAG executed at {timestamp}")
+    return timestamp
 
 
 default_args = {
-    'owner': 'airflow',
-    'start_date': datetime(2025, 11, 29),
-    'retries': 1,
+    "owner": "platform",
+    "start_date": datetime(2026, 7, 1, tzinfo=timezone.utc),
+    "retries": 1,
 }
 
 dag = DAG(
-    'my_dag',
+    "platform_airflow_smoke",
     default_args=default_args,
-    description='A simple tutorial DAG',
-    schedule_interval='@daily',  # "0 9 * * *" – cron expression for daily at midnight
+    description="Minimal production-safe smoke DAG for the Adapstory Airflow runtime",
+    schedule="@daily",
+    catchup=False,
+    tags=["platform", "smoke"],
 )
 
-task = PythonOperator(
-    task_id='my_task',
-    python_callable=my_task,
+start = EmptyOperator(
+    task_id="start",
     dag=dag,
 )
+
+report = PythonOperator(
+    task_id="report_airflow_smoke",
+    python_callable=report_airflow_smoke,
+    dag=dag,
+)
+
+end = EmptyOperator(
+    task_id="end",
+    dag=dag,
+)
+
+start >> report >> end
