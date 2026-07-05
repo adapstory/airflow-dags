@@ -209,6 +209,8 @@ def test_nightly_d6_airflow_path_writes_gate_export_and_dry_run_receipts(
     )
     assert all(item["benchmarkResultId"] for item in export_payload["items"])
     assert all(item["evidenceBundleId"] for item in export_payload["items"])
+    assert all(item["runId"] for item in export_payload["items"])
+    assert all(item["sourceEvidenceBundleId"] for item in export_payload["items"])
 
     stored_export = json.loads(export_path.read_text(encoding="utf-8"))
     assert stored_export == export_payload

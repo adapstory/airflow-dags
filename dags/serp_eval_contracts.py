@@ -325,6 +325,9 @@ def write_nightly_registry_submissions_artifact(
                 "normalizedScore": _required_str(item, "normalizedScore"),
                 "registryResourceId": _required_str(item, "registryResourceId"),
                 "registryResourceType": _required_str(item, "registryResourceType"),
+                "sourceEvidenceBundleId": _required_str(
+                    item, "sourceEvidenceBundleId"
+                ),
                 "suiteCode": _required_str(item, "suiteCode"),
             }
             for item in _required_object_list(export_payload, "items")
@@ -371,6 +374,9 @@ def write_nightly_registry_receipts_artifact(
                         f"{_required_str(item, 'suiteCode')}|"
                         f"{_required_str(item, 'benchmarkResultId')}",
                     )
+                ),
+                "sourceEvidenceBundleId": _required_str(
+                    item, "sourceEvidenceBundleId"
                 ),
                 "statusCode": 202,
                 "suiteCode": _required_str(item, "suiteCode"),
@@ -709,6 +715,7 @@ def _benchmark_export_payload(report: Mapping[str, Any]) -> dict[str, Any]:
                     report, "registry_resource_type"
                 ),
                 "runId": operation_id,
+                "sourceEvidenceBundleId": evidence_bundle_id,
                 "suiteCode": suite_id,
                 "suiteVersion": _required_str(suite, "suite_version"),
                 "tenantId": _required_str(report, "tenant_id"),
