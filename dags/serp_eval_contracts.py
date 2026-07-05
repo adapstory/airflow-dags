@@ -90,6 +90,7 @@ def build_nightly_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
                 ("airflow_plan", "airflow-plan.json"),
                 ("suite_plan", "suite-plan.json"),
                 ("nightly_report", "nightly-report.json"),
+                ("benchmark_gate_export", "benchmark-gate-export.json"),
                 (
                     "nightly_registry_submissions",
                     "nightly-registry-submissions.json",
@@ -112,6 +113,7 @@ def build_nightly_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
             (
                 "validate_nightly_regression_plan",
                 "run_mandatory_benchmark_suites",
+                "build_c1_benchmark_gate_export",
                 "build_bc21_benchmark_run_submissions",
                 "notify_governance_eval_surfaces",
             )
@@ -214,6 +216,18 @@ def build_nightly_registry_cli_spec(plan_json: str) -> dict[str, Any]:
         command="nightly-registry-submissions",
         input_path_keys=("airflow_plan", "nightly_report"),
         output_path_key="nightly_registry_submissions",
+        option_names=("--airflow-plan", "--nightly-report"),
+    )
+
+
+def build_nightly_benchmark_export_cli_spec(plan_json: str) -> dict[str, Any]:
+    return _gateway_cli_spec(
+        plan_json,
+        dag_id="serp_nightly_regression_suite",
+        task_id="build_c1_benchmark_gate_export",
+        command="nightly-benchmark-export",
+        input_path_keys=("airflow_plan", "nightly_report"),
+        output_path_key="benchmark_gate_export",
         option_names=("--airflow-plan", "--nightly-report"),
     )
 

@@ -7,6 +7,7 @@ from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
 
 from serp_eval_contracts import (
+    build_nightly_benchmark_export_cli_spec,
     build_nightly_registry_cli_spec,
     build_nightly_regression_plan,
     build_nightly_runner_cli_spec,
@@ -49,6 +50,13 @@ run_suites = PythonOperator(
     dag=dag,
 )
 
+build_benchmark_export = PythonOperator(
+    task_id="build_c1_benchmark_gate_export",
+    python_callable=build_nightly_benchmark_export_cli_spec,
+    op_args=["{{ ti.xcom_pull(task_ids='validate_nightly_regression_plan') }}"],
+    dag=dag,
+)
+
 build_submissions = PythonOperator(
     task_id="build_bc21_benchmark_run_submissions",
     python_callable=build_nightly_registry_cli_spec,
@@ -63,4 +71,4 @@ notify_governance = PythonOperator(
     dag=dag,
 )
 
-validate_plan >> run_suites >> build_submissions >> notify_governance
+validate_plan >> run_suites >> build_benchmark_export >> build_submissions >> notify_governance

@@ -9,6 +9,7 @@ import pytest
 from dags.serp_eval_contracts import (
     MANDATORY_SERP_BENCHMARK_SUITES,
     SERP_NORMALIZED_GATE_FLOOR,
+    build_nightly_benchmark_export_cli_spec,
     build_nightly_registry_cli_spec,
     build_nightly_regression_plan,
     build_nightly_runner_cli_spec,
@@ -45,6 +46,10 @@ def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:
             "/var/opt/adapstory/serp-evals/"
             f"{plan.payload['operation_id']}/nightly-report.json"
         ),
+        "benchmark_gate_export": (
+            "/var/opt/adapstory/serp-evals/"
+            f"{plan.payload['operation_id']}/benchmark-gate-export.json"
+        ),
         "suite_plan": (
             "/var/opt/adapstory/serp-evals/"
             f"{plan.payload['operation_id']}/suite-plan.json"
@@ -54,6 +59,7 @@ def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:
     assert [task["task_id"] for task in plan.payload["tasks"]] == [
         "validate_nightly_regression_plan",
         "run_mandatory_benchmark_suites",
+        "build_c1_benchmark_gate_export",
         "build_bc21_benchmark_run_submissions",
         "notify_governance_eval_surfaces",
     ]
@@ -76,6 +82,7 @@ def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:
 def test_build_nightly_gateway_cli_specs_are_file_based_and_deterministic() -> None:
     plan = build_nightly_regression_plan(_nightly_conf())
     runner = build_nightly_runner_cli_spec(plan.to_canonical_json())
+    benchmark_export = build_nightly_benchmark_export_cli_spec(plan.to_canonical_json())
     submissions = build_nightly_registry_cli_spec(plan.to_canonical_json())
 
     assert runner["status"] == "ready_for_gateway_cli_runner"
@@ -94,6 +101,27 @@ def test_build_nightly_gateway_cli_specs_are_file_based_and_deterministic() -> N
     assert runner["input_paths"] == [
         plan.payload["artifact_paths"]["airflow_plan"],
         plan.payload["artifact_paths"]["suite_plan"],
+    ]
+
+    assert benchmark_export["status"] == "ready_for_gateway_cli_runner"
+    assert benchmark_export["task_id"] == "build_c1_benchmark_gate_export"
+    assert benchmark_export["argv"] == [
+        "python",
+        "-m",
+        "adapstory_serp_mcp_gateway.airflow_eval_cli",
+        "nightly-benchmark-export",
+        "--airflow-plan",
+        plan.payload["artifact_paths"]["airflow_plan"],
+        "--nightly-report",
+        plan.payload["artifact_paths"]["nightly_report"],
+    ]
+    assert (
+        benchmark_export["stdout_path"]
+        == plan.payload["artifact_paths"]["benchmark_gate_export"]
+    )
+    assert benchmark_export["input_paths"] == [
+        plan.payload["artifact_paths"]["airflow_plan"],
+        plan.payload["artifact_paths"]["nightly_report"],
     ]
 
     assert submissions["status"] == "ready_for_gateway_cli_runner"
@@ -274,6 +302,7 @@ def test_evaluate_tenant_golden_gate_blocks_failed_metric_results() -> None:
             [
                 "validate_nightly_regression_plan",
                 "run_mandatory_benchmark_suites",
+                "build_c1_benchmark_gate_export",
                 "build_bc21_benchmark_run_submissions",
                 "notify_governance_eval_surfaces",
             ],

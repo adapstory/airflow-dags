@@ -17,8 +17,9 @@ SERP eval DAG contracts:
   registry resource identity, approved actor id, generated timestamp, and every
   mandatory SERP benchmark suite id. It must also provide an absolute local
   `artifact_root_path`; the DAG derives `airflow-plan.json`, `suite-plan.json`,
-  `nightly-report.json`, and `nightly-registry-submissions.json` under a
-  deterministic operation directory. Missing or partial suite lists fail closed.
+  `nightly-report.json`, `benchmark-gate-export.json`, and
+  `nightly-registry-submissions.json` under a deterministic operation
+  directory. Missing or partial suite lists fail closed.
 - `serp_tenant_golden_set_regression` is the D13 contract DAG. Its
   `dag_run.conf` must provide tenant id, workflow id, golden set id/version,
   changed pack version ids, registry resource identity, approved actor id, and
@@ -28,7 +29,7 @@ SERP eval DAG contracts:
   under a deterministic operation directory. Missing workflow or golden-set
   provenance fails closed.
 - These DAGs intentionally emit local handoff artifacts and gateway CLI argv
-  specs only. The runner/submission tasks return deterministic
+  specs only. The runner/export/submission tasks return deterministic
   `python -m adapstory_serp_mcp_gateway.airflow_eval_cli ...` arguments plus a
   `stdout_path`; the executor must run the argv without shell expansion and
   write stdout to that path. Live runner images, BC-21 submission endpoints,
