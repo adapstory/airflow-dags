@@ -488,6 +488,35 @@ def test_serp_dag_files_declare_expected_airflow_contracts(
     assert "https://" not in source
 
 
+def test_serp_dag_files_import_helpers_from_packaged_dags_namespace() -> None:
+    for dag_file in (
+        "serp_nightly_regression_suite.py",
+        "serp_tenant_golden_set_regression.py",
+        "serp_benchmark_improvement_wave.py",
+    ):
+        source = (REPO_ROOT / "dags" / dag_file).read_text(encoding="utf-8")
+
+        assert "from dags.serp_eval_contracts import" in source
+        assert "from serp_eval_contracts import" not in source
+
+
+def test_airflowignore_excludes_non_dag_test_modules() -> None:
+    airflowignore = REPO_ROOT / ".airflowignore"
+    tests_airflowignore = REPO_ROOT / "tests" / ".airflowignore"
+
+    assert airflowignore.exists()
+    ignored_patterns = set(airflowignore.read_text(encoding="utf-8").splitlines())
+    assert "tests/*" in ignored_patterns
+    assert "tests/**" in ignored_patterns
+    assert "**/tests/**" in ignored_patterns
+    assert "tests/test_*.py" in ignored_patterns
+    assert "**/test_*.py" in ignored_patterns
+    assert ".*test_.*" in ignored_patterns
+    assert "tests/.*" in ignored_patterns
+    assert tests_airflowignore.exists()
+    assert "*" in tests_airflowignore.read_text(encoding="utf-8").splitlines()
+
+
 def _call_string_args(tree: ast.AST, function_name: str) -> list[str]:
     values: list[str] = []
     for node in ast.walk(tree):

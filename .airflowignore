@@ -1,0 +1,7 @@
+tests/*
+tests/**
+**/tests/**
+tests/test_*.py
+**/test_*.py
+.*test_.*
+tests/.*

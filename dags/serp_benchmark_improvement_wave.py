@@ -6,7 +6,7 @@ from typing import Any
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
 
-from serp_eval_contracts import (
+from dags.serp_eval_contracts import (
     build_benchmark_improvement_decision_cli_spec,
     build_benchmark_improvement_scoreboard_cli_spec,
     build_benchmark_improvement_wave_plan,

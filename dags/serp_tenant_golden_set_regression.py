@@ -6,7 +6,7 @@ from typing import Any
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
 
-from serp_eval_contracts import (
+from dags.serp_eval_contracts import (
     build_tenant_golden_registry_cli_spec,
     build_tenant_golden_regression_plan,
     build_tenant_golden_runner_cli_spec,
