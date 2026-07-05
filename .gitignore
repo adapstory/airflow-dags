@@ -11,6 +11,7 @@ out/
 .mypy_cache/
 .ruff_cache/
 node_modules/
+__pycache__/
 
 ## Shared generated artifacts and local tooling
 /.output/
