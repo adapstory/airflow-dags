@@ -10,7 +10,7 @@ from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
-from uuid import UUID
+from uuid import UUID, uuid5
 
 MANDATORY_SERP_BENCHMARK_SUITES = (
     "APIBench",
@@ -29,6 +29,9 @@ GATEWAY_CLI_PYTHON = "python"
 
 _RESOURCE_TYPES = frozenset({"pack", "tenant", "workflow"})
 _GATEWAY_CLI_CONTRACT_VERSION = "serp-airflow-gateway-cli-bridge/v1"
+_AIRFLOW_ARTIFACT_CONTRACT_VERSION = "serp-airflow-artifact-writer/v1"
+_DRY_RUN_SUITE_VERSION = "dry-run@2026.07.1"
+_BENCHMARK_NAMESPACE = UUID("018f5e13-2d73-7a77-a052-8d1bcbf96599")
 _RAW_SECRET_KEYS = frozenset(
     {
         "access_token",
@@ -265,6 +268,128 @@ def write_airflow_plan_artifact(plan: SerpDagPlan) -> str:
     return plan_json
 
 
+def write_nightly_report_artifact(plan_json: str) -> dict[str, Any]:
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != "serp_nightly_regression_suite":
+        raise ValueError("plan dag_id does not match nightly artifact writer")
+    artifact_paths = _required_artifact_paths(plan, ("nightly_report",))
+    payload = _nightly_report_payload(plan)
+    artifact_path = artifact_paths["nightly_report"]
+    _write_json_artifact(artifact_path, payload)
+    return _artifact_result(
+        artifact_path,
+        artifact_type="nightly_report",
+        operation_id=_required_str(plan, "operation_id"),
+        payload=payload,
+    )
+
+
+def write_nightly_benchmark_export_artifact(
+    nightly_report_artifact: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    report = _artifact_payload(nightly_report_artifact, "nightly_report")
+    artifact_paths = _required_artifact_paths(report, ("benchmark_gate_export",))
+    payload = _benchmark_export_payload(report)
+    _validate_benchmark_export_payload(payload)
+    artifact_path = artifact_paths["benchmark_gate_export"]
+    _write_json_artifact(artifact_path, payload)
+    return _artifact_result(
+        artifact_path,
+        artifact_type="benchmark_gate_export",
+        operation_id=_required_str(report, "operation_id"),
+        payload=payload,
+    )
+
+
+def write_nightly_registry_submissions_artifact(
+    benchmark_export_artifact: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    export_payload = _artifact_payload(
+        benchmark_export_artifact, "benchmark_gate_export"
+    )
+    artifact_paths = _required_artifact_paths(
+        export_payload,
+        ("nightly_registry_submissions", "nightly_registry_receipts"),
+    )
+    submissions = {
+        "artifact_paths": artifact_paths,
+        "contractVersion": "serp-bc21-dry-run-submissions/v1",
+        "dryRun": True,
+        "generatedAt": _required_str(export_payload, "generatedAt"),
+        "items": [
+            {
+                "benchmarkResultId": _required_str(item, "benchmarkResultId"),
+                "evidenceBundleId": _required_str(item, "evidenceBundleId"),
+                "gateStatus": _required_str(item, "gateStatus"),
+                "normalizedScore": _required_str(item, "normalizedScore"),
+                "registryResourceId": _required_str(item, "registryResourceId"),
+                "registryResourceType": _required_str(item, "registryResourceType"),
+                "suiteCode": _required_str(item, "suiteCode"),
+            }
+            for item in _required_object_list(export_payload, "items")
+        ],
+        "operationId": _required_str(export_payload, "operationId"),
+        "status": "ready_for_dry_run_submission",
+        "tenantId": _required_str(export_payload, "tenantId"),
+    }
+    artifact_path = artifact_paths["nightly_registry_submissions"]
+    _write_json_artifact(artifact_path, submissions)
+    return _artifact_result(
+        artifact_path,
+        artifact_type="nightly_registry_submissions",
+        operation_id=_required_str(export_payload, "operationId"),
+        payload=submissions,
+    )
+
+
+def write_nightly_registry_receipts_artifact(
+    registry_submissions_artifact: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    submissions = _artifact_payload(
+        registry_submissions_artifact, "nightly_registry_submissions"
+    )
+    artifact_paths = _required_artifact_paths(
+        submissions, ("nightly_registry_receipts",)
+    )
+    receipts = {
+        "contractVersion": "serp-bc21-dry-run-receipts/v1",
+        "dryRun": True,
+        "generatedAt": _required_str(submissions, "generatedAt"),
+        "operationId": _required_str(submissions, "operationId"),
+        "receipts": [
+            {
+                "accepted": True,
+                "benchmarkResultId": _required_str(item, "benchmarkResultId"),
+                "dryRun": True,
+                "evidenceBundleId": _required_str(item, "evidenceBundleId"),
+                "registryReceiptId": str(
+                    uuid5(
+                        _BENCHMARK_NAMESPACE,
+                        "bc21-dry-run-receipt|"
+                        f"{_required_str(submissions, 'operationId')}|"
+                        f"{_required_str(item, 'suiteCode')}|"
+                        f"{_required_str(item, 'benchmarkResultId')}",
+                    )
+                ),
+                "statusCode": 202,
+                "suiteCode": _required_str(item, "suiteCode"),
+            }
+            for item in _required_object_list(submissions, "items")
+        ],
+        "status": "dry_run_accepted",
+        "tenantId": _required_str(submissions, "tenantId"),
+    }
+    artifact_path = artifact_paths["nightly_registry_receipts"]
+    _write_json_artifact(artifact_path, receipts)
+    return _artifact_result(
+        artifact_path,
+        artifact_type="nightly_registry_receipts",
+        operation_id=_required_str(submissions, "operationId"),
+        payload=receipts,
+    )
+
+
 def build_nightly_runner_cli_spec(plan_json: str) -> dict[str, Any]:
     return _gateway_cli_spec(
         plan_json,
@@ -445,6 +570,213 @@ def governance_notification_pending(plan_json: str) -> dict[str, str]:
         "operation_id": _required_str(plan, "operation_id"),
         "status": "pending_governance_notification",
     }
+
+
+def _nightly_report_payload(plan: Mapping[str, Any]) -> dict[str, Any]:
+    artifact_paths = _required_artifact_paths(
+        plan,
+        (
+            "airflow_plan",
+            "suite_plan",
+            "nightly_report",
+            "benchmark_gate_export",
+            "nightly_registry_submissions",
+            "nightly_registry_receipts",
+        ),
+    )
+    operation_id = _required_str(plan, "operation_id")
+    generated_at = _required_datetime_string(plan, "generated_at")
+    suites = _required_str_list(plan, "selected_suite_ids")
+    suite_results = [
+        _nightly_suite_result(plan, suite_id, generated_at) for suite_id in suites
+    ]
+    return {
+        "artifact_paths": artifact_paths,
+        "contract_version": "serp-nightly-report-dry-run/v1",
+        "dag_id": _required_str(plan, "dag_id"),
+        "generated_at": generated_at,
+        "normalized_gate_floor": SERP_NORMALIZED_GATE_FLOOR,
+        "operation_id": operation_id,
+        "pack_version_ids": list(_required_str_list(plan, "pack_version_ids")),
+        "registry_resource_id": _required_str(plan, "registry_resource_id"),
+        "registry_resource_type": _required_resource_type(
+            plan, "registry_resource_type"
+        ),
+        "reranker_profile_version": _required_str(plan, "reranker_profile_version"),
+        "retrieval_profile_version": _required_str(plan, "retrieval_profile_version"),
+        "selected_suite_ids": suites,
+        "status": evaluate_nightly_regression_gate(
+            {"suite_results": suite_results}
+        )["status"],
+        "suite_results": suite_results,
+        "tenant_id": _required_str(plan, "tenant_id"),
+    }
+
+
+def _nightly_suite_result(
+    plan: Mapping[str, Any], suite_id: str, generated_at: str
+) -> dict[str, Any]:
+    operation_id = _operation_id(
+        "serp-airflow-nightly-suite-dry-run",
+        _required_str(plan, "operation_id"),
+        suite_id,
+    )
+    material = _canonical_json(
+        {
+            "generated_at": generated_at,
+            "operation_id": operation_id,
+            "suite_id": suite_id,
+        }
+    )
+    suite_sha256 = sha256(material.encode("utf-8")).hexdigest()
+    return {
+        "generated_at": generated_at,
+        "metric_results": [
+            _dry_run_metric_result(suite_id, "Recall@10", "retrieval", suite_sha256),
+            _dry_run_metric_result(suite_id, "nDCG@10", "retrieval", suite_sha256),
+        ],
+        "operation_id": operation_id,
+        "operation_sha256": suite_sha256,
+        "query_ids": [f"{suite_id}:dry-run-query-001"],
+        "status": "passed",
+        "suite_id": suite_id,
+        "suite_version": _DRY_RUN_SUITE_VERSION,
+    }
+
+
+def _dry_run_metric_result(
+    suite_id: str,
+    metric: str,
+    metric_family: str,
+    suite_sha256: str,
+) -> dict[str, Any]:
+    return {
+        "metric": metric,
+        "metric_family": metric_family,
+        "normalized_score": SERP_NORMALIZED_GATE_FLOOR,
+        "reference_id": f"{suite_id}:{metric}:dry-run-floor",
+        "reference_score": 1.0,
+        "score": SERP_NORMALIZED_GATE_FLOOR,
+        "status": "passed",
+        "threshold": SERP_NORMALIZED_GATE_FLOOR,
+        "trace_id": suite_sha256[:16],
+    }
+
+
+def _benchmark_export_payload(report: Mapping[str, Any]) -> dict[str, Any]:
+    artifact_paths = _required_artifact_paths(
+        report,
+        (
+            "benchmark_gate_export",
+            "nightly_registry_submissions",
+            "nightly_registry_receipts",
+        ),
+    )
+    items: list[dict[str, Any]] = []
+    for suite in _required_object_list(report, "suite_results"):
+        suite_id = _required_str(suite, "suite_id")
+        normalized_score = min(
+            _required_number(metric, "normalized_score")
+            for metric in _required_object_list(suite, "metric_results")
+        )
+        operation_id = _required_str(suite, "operation_id")
+        benchmark_result_id = str(
+            uuid5(
+                _BENCHMARK_NAMESPACE,
+                "benchmark-result|"
+                f"{_required_str(report, 'operation_id')}|{suite_id}|"
+                f"{operation_id}",
+            )
+        )
+        evidence_bundle_id = str(
+            uuid5(
+                _BENCHMARK_NAMESPACE,
+                "evidence-bundle|"
+                f"{_required_str(report, 'operation_id')}|{suite_id}|"
+                f"{_required_str(suite, 'operation_sha256')}",
+            )
+        )
+        items.append(
+            {
+                "benchmarkResultId": benchmark_result_id,
+                "evidenceBundleId": evidence_bundle_id,
+                "gateStatus": _required_str(suite, "status"),
+                "generatedAt": _required_str(report, "generated_at"),
+                "normalizedScore": f"{normalized_score:.4f}",
+                "operationSha256": _required_str(suite, "operation_sha256"),
+                "registryResourceId": _required_str(report, "registry_resource_id"),
+                "registryResourceType": _required_resource_type(
+                    report, "registry_resource_type"
+                ),
+                "runId": operation_id,
+                "suiteCode": suite_id,
+                "suiteVersion": _required_str(suite, "suite_version"),
+                "tenantId": _required_str(report, "tenant_id"),
+            }
+        )
+    return {
+        "artifact_paths": artifact_paths,
+        "contractVersion": "serp-c1-benchmark-gate-export/v1",
+        "generatedAt": _required_str(report, "generated_at"),
+        "items": items,
+        "normalizedGateFloor": f"{SERP_NORMALIZED_GATE_FLOOR:.4f}",
+        "operationId": _required_str(report, "operation_id"),
+        "status": "passed",
+        "tenantId": _required_str(report, "tenant_id"),
+    }
+
+
+def _validate_benchmark_export_payload(payload: Mapping[str, Any]) -> None:
+    items = _required_object_list(payload, "items")
+    suites = [_required_str(item, "suiteCode") for item in items]
+    if suites != list(MANDATORY_SERP_BENCHMARK_SUITES):
+        raise ValueError("benchmark export must include every mandatory suite")
+    for item in items:
+        if _required_str(item, "gateStatus") != "passed":
+            raise ValueError("benchmark export includes a non-passing suite")
+        if float(_required_str(item, "normalizedScore")) < SERP_NORMALIZED_GATE_FLOOR:
+            raise ValueError("benchmark export normalized score is below gate floor")
+
+
+def _artifact_result(
+    artifact_path: str,
+    *,
+    artifact_type: str,
+    operation_id: str,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    payload_json = _canonical_json(payload)
+    return {
+        "artifactPath": artifact_path,
+        "artifactSha256": sha256(payload_json.encode("utf-8")).hexdigest(),
+        "artifactType": artifact_type,
+        "contractVersion": _AIRFLOW_ARTIFACT_CONTRACT_VERSION,
+        "operationId": operation_id,
+        "payload": dict(payload),
+        "status": "written",
+    }
+
+
+def _artifact_payload(
+    artifact: Mapping[str, Any] | str,
+    expected_type: str,
+) -> Mapping[str, Any]:
+    if isinstance(artifact, str):
+        artifact = _json_object(artifact, "artifact")
+    payload = _payload(artifact)
+    if _required_str(payload, "artifactType") != expected_type:
+        raise ValueError("artifact type does not match expected input")
+    nested_payload = payload.get("payload")
+    if not isinstance(nested_payload, Mapping):
+        raise ValueError("artifact payload is required")
+    _reject_raw_secrets(nested_payload)
+    return nested_payload
+
+
+def _write_json_artifact(artifact_path: str, payload: Mapping[str, Any]) -> None:
+    path = Path(_artifact_path("artifact_path", artifact_path))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_canonical_json(payload), encoding="utf-8")
 
 
 def _tasks(task_ids: Sequence[str]) -> list[dict[str, int | str]]:

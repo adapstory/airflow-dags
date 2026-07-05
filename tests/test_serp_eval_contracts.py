@@ -15,14 +15,19 @@ from dags.serp_eval_contracts import (
     build_improvement_candidate_eval_cli_spec,
     build_nightly_benchmark_export_cli_spec,
     build_nightly_registry_cli_spec,
+    build_nightly_registry_submit_cli_spec,
     build_nightly_regression_plan,
     build_nightly_runner_cli_spec,
-    build_nightly_registry_submit_cli_spec,
     build_tenant_golden_registry_cli_spec,
     build_tenant_golden_regression_plan,
     build_tenant_golden_runner_cli_spec,
     evaluate_nightly_regression_gate,
     evaluate_tenant_golden_gate,
+    write_airflow_plan_artifact,
+    write_nightly_benchmark_export_artifact,
+    write_nightly_registry_receipts_artifact,
+    write_nightly_registry_submissions_artifact,
+    write_nightly_report_artifact,
 )
 
 TENANT_ID = "00000000-0000-4000-a000-000000000001"
@@ -172,6 +177,46 @@ def test_build_nightly_gateway_cli_specs_are_file_based_and_deterministic() -> N
         plan.payload["bc21_base_url"],
     ]
     assert submit["stdout_path"] == plan.payload["artifact_paths"]["nightly_registry_receipts"]
+
+
+def test_nightly_d6_airflow_path_writes_gate_export_and_dry_run_receipts(
+    tmp_path: Path,
+) -> None:
+    conf = _nightly_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    plan = build_nightly_regression_plan(conf)
+    plan_json = write_airflow_plan_artifact(plan)
+
+    report_artifact = write_nightly_report_artifact(plan_json)
+    export_artifact = write_nightly_benchmark_export_artifact(report_artifact)
+    submissions_artifact = write_nightly_registry_submissions_artifact(export_artifact)
+    receipts_artifact = write_nightly_registry_receipts_artifact(submissions_artifact)
+
+    report_path = Path(str(report_artifact["artifactPath"]))
+    export_path = Path(str(export_artifact["artifactPath"]))
+    receipts_path = Path(str(receipts_artifact["artifactPath"]))
+    assert report_path.exists()
+    assert export_path.exists()
+    assert receipts_path.exists()
+
+    export_payload = export_artifact["payload"]
+    suite_codes = [item["suiteCode"] for item in export_payload["items"]]
+    assert suite_codes == list(MANDATORY_SERP_BENCHMARK_SUITES)
+    assert all(item["gateStatus"] == "passed" for item in export_payload["items"])
+    assert all(
+        float(item["normalizedScore"]) >= SERP_NORMALIZED_GATE_FLOOR
+        for item in export_payload["items"]
+    )
+    assert all(item["benchmarkResultId"] for item in export_payload["items"])
+    assert all(item["evidenceBundleId"] for item in export_payload["items"])
+
+    stored_export = json.loads(export_path.read_text(encoding="utf-8"))
+    assert stored_export == export_payload
+
+    receipts_payload = receipts_artifact["payload"]
+    assert receipts_payload["status"] == "dry_run_accepted"
+    assert receipts_payload["dryRun"] is True
+    assert len(receipts_payload["receipts"]) == len(MANDATORY_SERP_BENCHMARK_SUITES)
 
 
 def test_evaluate_nightly_regression_gate_blocks_below_normalized_floor() -> None:
@@ -498,6 +543,18 @@ def test_serp_dag_files_import_helpers_from_packaged_dags_namespace() -> None:
 
         assert "from dags.serp_eval_contracts import" in source
         assert "from serp_eval_contracts import" not in source
+
+
+def test_serp_nightly_dag_uses_artifact_writers_for_d6_path() -> None:
+    source = (
+        REPO_ROOT / "dags" / "serp_nightly_regression_suite.py"
+    ).read_text(encoding="utf-8")
+
+    assert "write_nightly_report_artifact" in source
+    assert "write_nightly_benchmark_export_artifact" in source
+    assert "write_nightly_registry_submissions_artifact" in source
+    assert "write_nightly_registry_receipts_artifact" in source
+    assert "build_nightly_benchmark_export_cli_spec" not in source
 
 
 def test_airflowignore_excludes_non_dag_test_modules() -> None:

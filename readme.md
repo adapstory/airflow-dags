@@ -20,7 +20,12 @@ SERP eval DAG contracts:
   `airflow-plan.json`, `suite-plan.json`, `nightly-report.json`,
   `benchmark-gate-export.json`, `nightly-registry-submissions.json`, and
   `nightly-registry-receipts.json` under a deterministic operation
-  directory. Missing or partial suite lists fail closed.
+  directory. Missing or partial suite lists fail closed. D6 writes deterministic
+  dry-run benchmark artifacts in-task: `nightly-report.json`,
+  `benchmark-gate-export.json`, `nightly-registry-submissions.json`, and
+  explicit dry-run `nightly-registry-receipts.json`. The task return values
+  carry the same payloads through Airflow XCom so KubernetesExecutor task
+  isolation does not depend on pod-local files for downstream validation.
 - `serp_tenant_golden_set_regression` is the D13 contract DAG. Its
   `dag_run.conf` must provide tenant id, workflow id, golden set id/version,
   changed pack version ids, registry resource identity, approved actor id, and
@@ -39,15 +44,16 @@ SERP eval DAG contracts:
   `keep-discard-decision.json`, and `improvement-scoreboard.json` under a
   deterministic operation directory. Missing suites or unbounded benchmark
   budgets fail closed.
-- These DAGs intentionally emit local handoff artifacts and gateway CLI argv
-  specs only. The runner/export/submission tasks return deterministic
+- D13 and D19 intentionally emit local handoff artifacts and gateway CLI argv
+  specs only. Their runner/export/submission tasks return deterministic
   `python -m adapstory_serp_mcp_gateway.airflow_eval_cli ...` arguments plus a
   `stdout_path`; the executor must run the argv without shell expansion and
-  write stdout to that path. The D6 submit task is the canonical handoff for
-  posting `nightly-registry-submissions.json` to BC-21 and writing
-  `nightly-registry-receipts.json`. Live runner images, service endpoints, and
-  network policy must be added through GitOps before replacing the file-based
-  handoff tasks with native networked operators.
+  write stdout to that path. Live runner images, service endpoints, and network
+  policy must be added through GitOps before replacing those file-based handoff
+  tasks with native networked operators. D6 still keeps the CLI-spec helper
+  functions for operator handoff compatibility, but the Airflow DAG path uses
+  native dry-run artifact writers until BC-21 write credentials and live runner
+  images are configured through GitOps.
 - `artifact_root_path` must be a local absolute path. URLs, parent traversal,
   multiline values, and raw secret material are rejected before any runner
   handoff is emitted.
