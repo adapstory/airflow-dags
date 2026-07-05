@@ -9,6 +9,7 @@ from datetime import datetime
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urlparse
 from uuid import UUID
 
 MANDATORY_SERP_BENCHMARK_SUITES = (
@@ -95,8 +96,10 @@ def build_nightly_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
                     "nightly_registry_submissions",
                     "nightly-registry-submissions.json",
                 ),
+                ("nightly_registry_receipts", "nightly-registry-receipts.json"),
             ),
         ),
+        "bc21_base_url": _required_bc21_base_url(payload),
         "dag_id": "serp_nightly_regression_suite",
         "generated_at": generated_at,
         "normalized_gate_floor": SERP_NORMALIZED_GATE_FLOOR,
@@ -115,6 +118,7 @@ def build_nightly_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
                 "run_mandatory_benchmark_suites",
                 "build_c1_benchmark_gate_export",
                 "build_bc21_benchmark_run_submissions",
+                "submit_bc21_benchmark_run_submissions",
                 "notify_governance_eval_surfaces",
             )
         ),
@@ -217,6 +221,19 @@ def build_nightly_registry_cli_spec(plan_json: str) -> dict[str, Any]:
         input_path_keys=("airflow_plan", "nightly_report"),
         output_path_key="nightly_registry_submissions",
         option_names=("--airflow-plan", "--nightly-report"),
+    )
+
+
+def build_nightly_registry_submit_cli_spec(plan_json: str) -> dict[str, Any]:
+    return _gateway_cli_spec(
+        plan_json,
+        dag_id="serp_nightly_regression_suite",
+        task_id="submit_bc21_benchmark_run_submissions",
+        command="submit-nightly-registry-submissions",
+        input_path_keys=("airflow_plan", "nightly_registry_submissions"),
+        output_path_key="nightly_registry_receipts",
+        option_names=("--airflow-plan", "--nightly-registry-submissions"),
+        extra_options=("--bc21-base-url", _required_bc21_base_url(_json_object(plan_json, "plan_json"))),
     )
 
 
@@ -345,7 +362,10 @@ def _gateway_cli_spec(
     input_path_keys: Sequence[str],
     output_path_key: str,
     option_names: Sequence[str],
+    extra_options: Sequence[str] = (),
 ) -> dict[str, Any]:
+    if len(extra_options) % 2 != 0:
+        raise ValueError("gateway cli spec extra option mapping is invalid")
     if len(input_path_keys) != len(option_names):
         raise ValueError("gateway cli spec option mapping is invalid")
     plan = _json_object(plan_json, "plan_json")
@@ -367,6 +387,7 @@ def _gateway_cli_spec(
         path = artifact_paths[path_key]
         argv.extend([option_name, path])
         input_paths.append(path)
+    argv.extend(extra_options)
     stdout_path = artifact_paths[output_path_key]
     return {
         "actor_id": _required_str(plan, "actor_id"),
@@ -458,6 +479,30 @@ def _required_resource_type(payload: Mapping[str, Any], field_name: str) -> str:
     if value not in _RESOURCE_TYPES:
         raise ValueError(f"{field_name} is unsupported")
     return value
+
+
+def _required_bc21_base_url(payload: Mapping[str, Any]) -> str:
+    value = _required_str(payload, "bc21_base_url")
+    if "://" not in value or "\x00" in value or "\n" in value or "\r" in value:
+        raise ValueError("bc21_base_url must be an absolute single-line URL")
+    if _contains_raw_secret(value):
+        raise ValueError("bc21_base_url must not contain raw secret material")
+    parsed = urlparse(value)
+    if parsed.scheme == "https" and parsed.hostname:
+        return value
+    if parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
+        return value
+    if parsed.scheme == "http" and _is_kubernetes_service_host(parsed.hostname):
+        return value
+    raise ValueError(
+        "bc21_base_url must use https, localhost http, or Kubernetes service http"
+    )
+
+
+def _is_kubernetes_service_host(hostname: str | None) -> bool:
+    return hostname is not None and (
+        hostname.endswith(".svc") or hostname.endswith(".svc.cluster.local")
+    )
 
 
 def _required_datetime_string(payload: Mapping[str, Any], field_name: str) -> str:

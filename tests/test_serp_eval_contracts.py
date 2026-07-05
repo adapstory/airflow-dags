@@ -13,6 +13,7 @@ from dags.serp_eval_contracts import (
     build_nightly_registry_cli_spec,
     build_nightly_regression_plan,
     build_nightly_runner_cli_spec,
+    build_nightly_registry_submit_cli_spec,
     build_tenant_golden_registry_cli_spec,
     build_tenant_golden_regression_plan,
     build_tenant_golden_runner_cli_spec,
@@ -42,6 +43,10 @@ def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:
             "/var/opt/adapstory/serp-evals/"
             f"{plan.payload['operation_id']}/nightly-registry-submissions.json"
         ),
+        "nightly_registry_receipts": (
+            "/var/opt/adapstory/serp-evals/"
+            f"{plan.payload['operation_id']}/nightly-registry-receipts.json"
+        ),
         "nightly_report": (
             "/var/opt/adapstory/serp-evals/"
             f"{plan.payload['operation_id']}/nightly-report.json"
@@ -61,6 +66,7 @@ def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:
         "run_mandatory_benchmark_suites",
         "build_c1_benchmark_gate_export",
         "build_bc21_benchmark_run_submissions",
+        "submit_bc21_benchmark_run_submissions",
         "notify_governance_eval_surfaces",
     ]
 
@@ -78,12 +84,18 @@ def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:
     with pytest.raises(ValueError, match="artifact_root_path must be an absolute path"):
         build_nightly_regression_plan(url_artifact_root)
 
+    unsafe_bc21_base_url = _nightly_conf()
+    unsafe_bc21_base_url["bc21_base_url"] = "http://example.invalid"
+    with pytest.raises(ValueError, match="bc21_base_url must use https"):
+        build_nightly_regression_plan(unsafe_bc21_base_url)
+
 
 def test_build_nightly_gateway_cli_specs_are_file_based_and_deterministic() -> None:
     plan = build_nightly_regression_plan(_nightly_conf())
     runner = build_nightly_runner_cli_spec(plan.to_canonical_json())
     benchmark_export = build_nightly_benchmark_export_cli_spec(plan.to_canonical_json())
     submissions = build_nightly_registry_cli_spec(plan.to_canonical_json())
+    submit = build_nightly_registry_submit_cli_spec(plan.to_canonical_json())
 
     assert runner["status"] == "ready_for_gateway_cli_runner"
     assert runner["task_id"] == "run_mandatory_benchmark_suites"
@@ -140,6 +152,22 @@ def test_build_nightly_gateway_cli_specs_are_file_based_and_deterministic() -> N
         submissions["stdout_path"]
         == plan.payload["artifact_paths"]["nightly_registry_submissions"]
     )
+
+    assert submit["status"] == "ready_for_gateway_cli_runner"
+    assert submit["task_id"] == "submit_bc21_benchmark_run_submissions"
+    assert submit["argv"] == [
+        "python",
+        "-m",
+        "adapstory_serp_mcp_gateway.airflow_eval_cli",
+        "submit-nightly-registry-submissions",
+        "--airflow-plan",
+        plan.payload["artifact_paths"]["airflow_plan"],
+        "--nightly-registry-submissions",
+        plan.payload["artifact_paths"]["nightly_registry_submissions"],
+        "--bc21-base-url",
+        plan.payload["bc21_base_url"],
+    ]
+    assert submit["stdout_path"] == plan.payload["artifact_paths"]["nightly_registry_receipts"]
 
 
 def test_evaluate_nightly_regression_gate_blocks_below_normalized_floor() -> None:
@@ -304,6 +332,7 @@ def test_evaluate_tenant_golden_gate_blocks_failed_metric_results() -> None:
                 "run_mandatory_benchmark_suites",
                 "build_c1_benchmark_gate_export",
                 "build_bc21_benchmark_run_submissions",
+                "submit_bc21_benchmark_run_submissions",
                 "notify_governance_eval_surfaces",
             ],
         ),
@@ -376,6 +405,7 @@ def _nightly_conf() -> dict[str, object]:
     return {
         "actor_id": "airflow-serp-eval-runner",
         "artifact_root_path": "/var/opt/adapstory/serp-evals",
+        "bc21_base_url": "http://serp-context-platform.env-dev.svc.cluster.local",
         "generated_at": "2026-07-05T21:00:00Z",
         "pack_version_ids": [PACK_VERSION_ID],
         "registry_resource_id": REGISTRY_RESOURCE_ID,

@@ -9,6 +9,7 @@ from airflow.sdk import DAG
 from serp_eval_contracts import (
     build_nightly_benchmark_export_cli_spec,
     build_nightly_registry_cli_spec,
+    build_nightly_registry_submit_cli_spec,
     build_nightly_regression_plan,
     build_nightly_runner_cli_spec,
     governance_notification_pending,
@@ -64,6 +65,13 @@ build_submissions = PythonOperator(
     dag=dag,
 )
 
+submit_submissions = PythonOperator(
+    task_id="submit_bc21_benchmark_run_submissions",
+    python_callable=build_nightly_registry_submit_cli_spec,
+    op_args=["{{ ti.xcom_pull(task_ids='validate_nightly_regression_plan') }}"],
+    dag=dag,
+)
+
 notify_governance = PythonOperator(
     task_id="notify_governance_eval_surfaces",
     python_callable=governance_notification_pending,
@@ -71,4 +79,4 @@ notify_governance = PythonOperator(
     dag=dag,
 )
 
-validate_plan >> run_suites >> build_benchmark_export >> build_submissions >> notify_governance
+validate_plan >> run_suites >> build_benchmark_export >> build_submissions >> submit_submissions >> notify_governance

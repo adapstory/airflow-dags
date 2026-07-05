@@ -16,9 +16,10 @@ SERP eval DAG contracts:
   must provide tenant id, pack version ids, retrieval/reranker profile versions,
   registry resource identity, approved actor id, generated timestamp, and every
   mandatory SERP benchmark suite id. It must also provide an absolute local
-  `artifact_root_path`; the DAG derives `airflow-plan.json`, `suite-plan.json`,
-  `nightly-report.json`, `benchmark-gate-export.json`, and
-  `nightly-registry-submissions.json` under a deterministic operation
+  `artifact_root_path` plus the reviewed `bc21_base_url`; the DAG derives
+  `airflow-plan.json`, `suite-plan.json`, `nightly-report.json`,
+  `benchmark-gate-export.json`, `nightly-registry-submissions.json`, and
+  `nightly-registry-receipts.json` under a deterministic operation
   directory. Missing or partial suite lists fail closed.
 - `serp_tenant_golden_set_regression` is the D13 contract DAG. Its
   `dag_run.conf` must provide tenant id, workflow id, golden set id/version,
@@ -32,9 +33,11 @@ SERP eval DAG contracts:
   specs only. The runner/export/submission tasks return deterministic
   `python -m adapstory_serp_mcp_gateway.airflow_eval_cli ...` arguments plus a
   `stdout_path`; the executor must run the argv without shell expansion and
-  write stdout to that path. Live runner images, BC-21 submission endpoints,
-  connections, and credentials must be added through GitOps before replacing the
-  file-based handoff tasks with networked operators.
+  write stdout to that path. The D6 submit task is the canonical handoff for
+  posting `nightly-registry-submissions.json` to BC-21 and writing
+  `nightly-registry-receipts.json`. Live runner images, service endpoints, and
+  network policy must be added through GitOps before replacing the file-based
+  handoff tasks with native networked operators.
 - `artifact_root_path` must be a local absolute path. URLs, parent traversal,
   multiline values, and raw secret material are rejected before any runner
   handoff is emitted.
