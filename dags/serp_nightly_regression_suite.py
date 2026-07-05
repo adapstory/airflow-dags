@@ -7,17 +7,18 @@ from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
 
 from serp_eval_contracts import (
+    build_nightly_registry_cli_spec,
     build_nightly_regression_plan,
-    external_runner_pending,
+    build_nightly_runner_cli_spec,
     governance_notification_pending,
-    registry_submission_pending,
+    write_airflow_plan_artifact,
 )
 
 
 def validate_nightly_regression_plan(**context: Any) -> str:
     dag_run = context.get("dag_run")
     conf = getattr(dag_run, "conf", None) or {}
-    return build_nightly_regression_plan(conf).to_canonical_json()
+    return write_airflow_plan_artifact(build_nightly_regression_plan(conf))
 
 
 default_args = {
@@ -43,14 +44,14 @@ validate_plan = PythonOperator(
 
 run_suites = PythonOperator(
     task_id="run_mandatory_benchmark_suites",
-    python_callable=external_runner_pending,
+    python_callable=build_nightly_runner_cli_spec,
     op_args=["{{ ti.xcom_pull(task_ids='validate_nightly_regression_plan') }}"],
     dag=dag,
 )
 
 build_submissions = PythonOperator(
     task_id="build_bc21_benchmark_run_submissions",
-    python_callable=registry_submission_pending,
+    python_callable=build_nightly_registry_cli_spec,
     op_args=["{{ ti.xcom_pull(task_ids='validate_nightly_regression_plan') }}"],
     dag=dag,
 )

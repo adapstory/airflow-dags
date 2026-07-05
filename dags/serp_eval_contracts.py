@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
+from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import UUID
 
@@ -22,8 +23,11 @@ MANDATORY_SERP_BENCHMARK_SUITES = (
     "rusBEIR",
 )
 SERP_NORMALIZED_GATE_FLOOR = 0.75
+GATEWAY_CLI_MODULE = "adapstory_serp_mcp_gateway.airflow_eval_cli"
+GATEWAY_CLI_PYTHON = "python"
 
 _RESOURCE_TYPES = frozenset({"pack", "tenant", "workflow"})
+_GATEWAY_CLI_CONTRACT_VERSION = "serp-airflow-gateway-cli-bridge/v1"
 _RAW_SECRET_KEYS = frozenset(
     {
         "access_token",
@@ -68,18 +72,34 @@ def build_nightly_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
     generated_at = _required_datetime_string(payload, "generated_at")
     registry_resource_type = _required_resource_type(payload, "registry_resource_type")
     registry_resource_id = _required_uuid(payload, "registry_resource_id")
+    artifact_root_path = _required_artifact_root_path(payload)
+    operation_id = _operation_id(
+        "serp-airflow-nightly-plan",
+        tenant_id,
+        generated_at,
+        ",".join(str(value) for value in pack_version_ids),
+        ",".join(selected_suite_ids),
+    )
     plan_payload = {
         "actor_id": _required_str(payload, "actor_id"),
+        "artifact_root_path": artifact_root_path,
+        "artifact_paths": _artifact_paths(
+            artifact_root_path,
+            operation_id,
+            (
+                ("airflow_plan", "airflow-plan.json"),
+                ("suite_plan", "suite-plan.json"),
+                ("nightly_report", "nightly-report.json"),
+                (
+                    "nightly_registry_submissions",
+                    "nightly-registry-submissions.json",
+                ),
+            ),
+        ),
         "dag_id": "serp_nightly_regression_suite",
         "generated_at": generated_at,
         "normalized_gate_floor": SERP_NORMALIZED_GATE_FLOOR,
-        "operation_id": _operation_id(
-            "serp-airflow-nightly-plan",
-            tenant_id,
-            generated_at,
-            ",".join(str(value) for value in pack_version_ids),
-            ",".join(selected_suite_ids),
-        ),
+        "operation_id": operation_id,
         "pack_version_ids": [str(value) for value in pack_version_ids],
         "registry_resource_id": str(registry_resource_id),
         "registry_resource_type": registry_resource_type,
@@ -114,22 +134,38 @@ def build_tenant_golden_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
     workflow_id = _required_str(payload, "workflow_id")
     golden_set_id = _required_str(payload, "golden_set_id")
     golden_set_version = _required_str(payload, "golden_set_version")
+    artifact_root_path = _required_artifact_root_path(payload)
+    operation_id = _operation_id(
+        "serp-airflow-tenant-golden-plan",
+        tenant_id,
+        workflow_id,
+        golden_set_id,
+        golden_set_version,
+        generated_at,
+        ",".join(str(value) for value in changed_pack_version_ids),
+    )
     plan_payload = {
         "actor_id": _required_str(payload, "actor_id"),
+        "artifact_root_path": artifact_root_path,
+        "artifact_paths": _artifact_paths(
+            artifact_root_path,
+            operation_id,
+            (
+                ("airflow_plan", "airflow-plan.json"),
+                ("golden_set", "golden-set.json"),
+                ("tenant_golden_report", "tenant-golden-report.json"),
+                (
+                    "tenant_golden_registry_submissions",
+                    "tenant-golden-registry-submissions.json",
+                ),
+            ),
+        ),
         "changed_pack_version_ids": [str(value) for value in changed_pack_version_ids],
         "dag_id": "serp_tenant_golden_set_regression",
         "generated_at": generated_at,
         "golden_set_id": golden_set_id,
         "golden_set_version": golden_set_version,
-        "operation_id": _operation_id(
-            "serp-airflow-tenant-golden-plan",
-            tenant_id,
-            workflow_id,
-            golden_set_id,
-            golden_set_version,
-            generated_at,
-            ",".join(str(value) for value in changed_pack_version_ids),
-        ),
+        "operation_id": operation_id,
         "registry_resource_id": str(registry_resource_id),
         "registry_resource_type": registry_resource_type,
         "tasks": _tasks(
@@ -144,6 +180,66 @@ def build_tenant_golden_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
         "workflow_id": workflow_id,
     }
     return SerpDagPlan(plan_payload)
+
+
+def write_airflow_plan_artifact(plan: SerpDagPlan) -> str:
+    plan_json = plan.to_canonical_json()
+    artifact_paths = _required_artifact_paths(
+        plan.payload,
+        ("airflow_plan",),
+    )
+    airflow_plan_path = Path(artifact_paths["airflow_plan"])
+    airflow_plan_path.parent.mkdir(parents=True, exist_ok=True)
+    airflow_plan_path.write_text(plan_json, encoding="utf-8")
+    return plan_json
+
+
+def build_nightly_runner_cli_spec(plan_json: str) -> dict[str, Any]:
+    return _gateway_cli_spec(
+        plan_json,
+        dag_id="serp_nightly_regression_suite",
+        task_id="run_mandatory_benchmark_suites",
+        command="nightly-report",
+        input_path_keys=("airflow_plan", "suite_plan"),
+        output_path_key="nightly_report",
+        option_names=("--airflow-plan", "--suite-plan"),
+    )
+
+
+def build_nightly_registry_cli_spec(plan_json: str) -> dict[str, Any]:
+    return _gateway_cli_spec(
+        plan_json,
+        dag_id="serp_nightly_regression_suite",
+        task_id="build_bc21_benchmark_run_submissions",
+        command="nightly-registry-submissions",
+        input_path_keys=("airflow_plan", "nightly_report"),
+        output_path_key="nightly_registry_submissions",
+        option_names=("--airflow-plan", "--nightly-report"),
+    )
+
+
+def build_tenant_golden_runner_cli_spec(plan_json: str) -> dict[str, Any]:
+    return _gateway_cli_spec(
+        plan_json,
+        dag_id="serp_tenant_golden_set_regression",
+        task_id="run_tenant_golden_set_cases",
+        command="tenant-golden-report",
+        input_path_keys=("airflow_plan", "golden_set"),
+        output_path_key="tenant_golden_report",
+        option_names=("--airflow-plan", "--golden-set"),
+    )
+
+
+def build_tenant_golden_registry_cli_spec(plan_json: str) -> dict[str, Any]:
+    return _gateway_cli_spec(
+        plan_json,
+        dag_id="serp_tenant_golden_set_regression",
+        task_id="build_tenant_golden_registry_submissions",
+        command="tenant-golden-registry-submissions",
+        input_path_keys=("airflow_plan", "tenant_golden_report"),
+        output_path_key="tenant_golden_registry_submissions",
+        option_names=("--airflow-plan", "--tenant-golden-report"),
+    )
 
 
 def evaluate_nightly_regression_gate(report: Mapping[str, Any]) -> dict[str, Any]:
@@ -224,6 +320,53 @@ def _tasks(task_ids: Sequence[str]) -> list[dict[str, int | str]]:
         {"order": index + 1, "task_id": task_id}
         for index, task_id in enumerate(task_ids)
     ]
+
+
+def _gateway_cli_spec(
+    plan_json: str,
+    *,
+    dag_id: str,
+    task_id: str,
+    command: str,
+    input_path_keys: Sequence[str],
+    output_path_key: str,
+    option_names: Sequence[str],
+) -> dict[str, Any]:
+    if len(input_path_keys) != len(option_names):
+        raise ValueError("gateway cli spec option mapping is invalid")
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != dag_id:
+        raise ValueError("plan dag_id does not match gateway cli spec")
+    artifact_paths = _required_artifact_paths(
+        plan,
+        (*input_path_keys, output_path_key),
+    )
+    argv = [
+        GATEWAY_CLI_PYTHON,
+        "-m",
+        GATEWAY_CLI_MODULE,
+        command,
+    ]
+    input_paths: list[str] = []
+    for option_name, path_key in zip(option_names, input_path_keys, strict=True):
+        path = artifact_paths[path_key]
+        argv.extend([option_name, path])
+        input_paths.append(path)
+    stdout_path = artifact_paths[output_path_key]
+    return {
+        "actor_id": _required_str(plan, "actor_id"),
+        "argv": argv,
+        "contract_version": _GATEWAY_CLI_CONTRACT_VERSION,
+        "dag_id": dag_id,
+        "input_paths": input_paths,
+        "operation_id": _required_str(plan, "operation_id"),
+        "plan_sha256": sha256(_canonical_json(plan).encode("utf-8")).hexdigest(),
+        "status": "ready_for_gateway_cli_runner",
+        "stdout_path": stdout_path,
+        "task_id": task_id,
+        "tenant_id": _required_str(plan, "tenant_id"),
+    }
 
 
 def _operation_id(prefix: str, *parts: object) -> str:
@@ -328,6 +471,50 @@ def _required_number(payload: Mapping[str, Any], field_name: str) -> float:
     ):
         raise ValueError(f"{field_name} must be numeric")
     return float(value)
+
+
+def _required_artifact_root_path(payload: Mapping[str, Any]) -> str:
+    return _artifact_path(
+        "artifact_root_path", _required_str(payload, "artifact_root_path")
+    )
+
+
+def _artifact_paths(
+    artifact_root_path: str,
+    operation_id: str,
+    filenames: Sequence[tuple[str, str]],
+) -> dict[str, str]:
+    root = _artifact_path("artifact_root_path", artifact_root_path).rstrip("/")
+    operation_path = f"{root}/{operation_id}"
+    return {
+        key: _artifact_path(key, f"{operation_path}/{filename}")
+        for key, filename in filenames
+    }
+
+
+def _required_artifact_paths(
+    payload: Mapping[str, Any],
+    required_keys: Sequence[str],
+) -> dict[str, str]:
+    value = payload.get("artifact_paths")
+    if not isinstance(value, Mapping):
+        raise ValueError("artifact_paths is required")
+    return {
+        key: _artifact_path(key, _required_str(value, key)) for key in required_keys
+    }
+
+
+def _artifact_path(field_name: str, value: str) -> str:
+    _require_non_empty(field_name, value)
+    if "://" in value or not value.startswith("/"):
+        raise ValueError(f"{field_name} must be an absolute path")
+    if "\x00" in value or "\n" in value or "\r" in value:
+        raise ValueError(f"{field_name} must be a single-line absolute path")
+    if ".." in PurePosixPath(value).parts:
+        raise ValueError(f"{field_name} must not contain parent traversal")
+    if _contains_raw_secret(value):
+        raise ValueError(f"{field_name} must not contain raw secret material")
+    return value
 
 
 def _require_non_empty(field_name: str, value: str | None) -> None:
