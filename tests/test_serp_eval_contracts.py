@@ -9,6 +9,10 @@ import pytest
 from dags.serp_eval_contracts import (
     MANDATORY_SERP_BENCHMARK_SUITES,
     SERP_NORMALIZED_GATE_FLOOR,
+    build_benchmark_improvement_decision_cli_spec,
+    build_benchmark_improvement_scoreboard_cli_spec,
+    build_benchmark_improvement_wave_plan,
+    build_improvement_candidate_eval_cli_spec,
     build_nightly_benchmark_export_cli_spec,
     build_nightly_registry_cli_spec,
     build_nightly_regression_plan,
@@ -321,6 +325,113 @@ def test_evaluate_tenant_golden_gate_blocks_failed_metric_results() -> None:
     ]
 
 
+def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> None:
+    plan = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
+    repeated = build_benchmark_improvement_wave_plan(json.loads(plan.to_canonical_json()))
+
+    assert plan.to_canonical_json() == repeated.to_canonical_json()
+    assert plan.payload["dag_id"] == "serp_benchmark_improvement_wave"
+    assert plan.payload["normalized_gate_floor"] == SERP_NORMALIZED_GATE_FLOOR
+    assert plan.payload["selected_suite_ids"] == list(MANDATORY_SERP_BENCHMARK_SUITES)
+    assert plan.payload["improvement_spec_id"] == "improve-public-retrieval-reranker-v1"
+    assert plan.payload["candidate_id"] == "candidate-reranker-v2"
+    assert plan.payload["baseline_run_id"] == "evalrun_public_reranker_baseline_001"
+    assert plan.payload["artifact_paths"] == {
+        "airflow_plan": (
+            "/var/opt/adapstory/serp-evals/"
+            f"{plan.payload['operation_id']}/airflow-plan.json"
+        ),
+        "candidate_eval_report": (
+            "/var/opt/adapstory/serp-evals/"
+            f"{plan.payload['operation_id']}/candidate-eval-report.json"
+        ),
+        "improvement_scoreboard": (
+            "/var/opt/adapstory/serp-evals/"
+            f"{plan.payload['operation_id']}/improvement-scoreboard.json"
+        ),
+        "improvement_spec": (
+            "/var/opt/adapstory/serp-evals/"
+            f"{plan.payload['operation_id']}/improvement-spec.json"
+        ),
+        "keep_discard_decision": (
+            "/var/opt/adapstory/serp-evals/"
+            f"{plan.payload['operation_id']}/keep-discard-decision.json"
+        ),
+    }
+    assert [task["task_id"] for task in plan.payload["tasks"]] == [
+        "validate_benchmark_improvement_wave_plan",
+        "run_targeted_benchmark_eval_harness",
+        "decide_keep_or_discard_candidate",
+        "publish_improvement_scoreboard",
+        "notify_governance_eval_surfaces",
+    ]
+
+    missing_suite_conf = _improvement_wave_conf()
+    missing_suite_conf["selected_suite_ids"] = list(MANDATORY_SERP_BENCHMARK_SUITES[:-1])
+    with pytest.raises(
+        ValueError, match="selected_suite_ids must include every mandatory suite"
+    ):
+        build_benchmark_improvement_wave_plan(missing_suite_conf)
+
+    unbounded_budget_conf = _improvement_wave_conf()
+    unbounded_budget_conf["max_benchmark_runs"] = 0
+    with pytest.raises(ValueError, match="max_benchmark_runs must be positive"):
+        build_benchmark_improvement_wave_plan(unbounded_budget_conf)
+
+
+def test_build_benchmark_improvement_gateway_cli_specs_are_file_based_and_deterministic() -> None:
+    plan = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
+    candidate_eval = build_improvement_candidate_eval_cli_spec(plan.to_canonical_json())
+    decision = build_benchmark_improvement_decision_cli_spec(plan.to_canonical_json())
+    scoreboard = build_benchmark_improvement_scoreboard_cli_spec(plan.to_canonical_json())
+
+    assert candidate_eval["status"] == "ready_for_gateway_cli_runner"
+    assert candidate_eval["task_id"] == "run_targeted_benchmark_eval_harness"
+    assert candidate_eval["argv"] == [
+        "python",
+        "-m",
+        "adapstory_serp_mcp_gateway.airflow_eval_cli",
+        "benchmark-improvement-candidate-eval",
+        "--airflow-plan",
+        plan.payload["artifact_paths"]["airflow_plan"],
+        "--improvement-spec",
+        plan.payload["artifact_paths"]["improvement_spec"],
+    ]
+    assert candidate_eval["stdout_path"] == plan.payload["artifact_paths"]["candidate_eval_report"]
+
+    assert decision["status"] == "ready_for_gateway_cli_runner"
+    assert decision["task_id"] == "decide_keep_or_discard_candidate"
+    assert decision["argv"] == [
+        "python",
+        "-m",
+        "adapstory_serp_mcp_gateway.airflow_eval_cli",
+        "benchmark-improvement-decision",
+        "--airflow-plan",
+        plan.payload["artifact_paths"]["airflow_plan"],
+        "--improvement-spec",
+        plan.payload["artifact_paths"]["improvement_spec"],
+        "--candidate-eval-report",
+        plan.payload["artifact_paths"]["candidate_eval_report"],
+    ]
+    assert decision["stdout_path"] == plan.payload["artifact_paths"]["keep_discard_decision"]
+
+    assert scoreboard["status"] == "ready_for_gateway_cli_runner"
+    assert scoreboard["task_id"] == "publish_improvement_scoreboard"
+    assert scoreboard["argv"] == [
+        "python",
+        "-m",
+        "adapstory_serp_mcp_gateway.airflow_eval_cli",
+        "benchmark-improvement-scoreboard",
+        "--airflow-plan",
+        plan.payload["artifact_paths"]["airflow_plan"],
+        "--candidate-eval-report",
+        plan.payload["artifact_paths"]["candidate_eval_report"],
+        "--keep-discard-decision",
+        plan.payload["artifact_paths"]["keep_discard_decision"],
+    ]
+    assert scoreboard["stdout_path"] == plan.payload["artifact_paths"]["improvement_scoreboard"]
+
+
 @pytest.mark.parametrize(
     ("dag_file", "dag_id", "task_ids"),
     [
@@ -343,6 +454,17 @@ def test_evaluate_tenant_golden_gate_blocks_failed_metric_results() -> None:
                 "validate_tenant_golden_regression_plan",
                 "run_tenant_golden_set_cases",
                 "build_tenant_golden_registry_submissions",
+                "notify_governance_eval_surfaces",
+            ],
+        ),
+        (
+            "serp_benchmark_improvement_wave.py",
+            "serp_benchmark_improvement_wave",
+            [
+                "validate_benchmark_improvement_wave_plan",
+                "run_targeted_benchmark_eval_harness",
+                "decide_keep_or_discard_candidate",
+                "publish_improvement_scoreboard",
                 "notify_governance_eval_surfaces",
             ],
         ),
@@ -429,4 +551,21 @@ def _tenant_golden_conf() -> dict[str, object]:
         "registry_resource_type": "workflow",
         "tenant_id": TENANT_ID,
         "workflow_id": "workflow/private-course-authoring",
+    }
+
+
+def _improvement_wave_conf() -> dict[str, object]:
+    return {
+        "actor_id": "airflow-serp-eval-runner",
+        "artifact_root_path": "/var/opt/adapstory/serp-evals",
+        "baseline_run_id": "evalrun_public_reranker_baseline_001",
+        "candidate_id": "candidate-reranker-v2",
+        "generated_at": "2026-07-05T21:00:00Z",
+        "improvement_spec_id": "improve-public-retrieval-reranker-v1",
+        "max_benchmark_runs": 12,
+        "registry_resource_id": REGISTRY_RESOURCE_ID,
+        "registry_resource_type": "workflow",
+        "rollback_policy_ref": "policy://rollback/last-validated-baseline@v1",
+        "selected_suite_ids": list(MANDATORY_SERP_BENCHMARK_SUITES),
+        "tenant_id": TENANT_ID,
     }

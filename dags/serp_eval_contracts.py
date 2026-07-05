@@ -188,6 +188,71 @@ def build_tenant_golden_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
     return SerpDagPlan(plan_payload)
 
 
+def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
+    payload = _payload(conf)
+    _reject_raw_secrets(payload)
+    selected_suite_ids = tuple(_required_str_list(payload, "selected_suite_ids"))
+    if selected_suite_ids != MANDATORY_SERP_BENCHMARK_SUITES:
+        raise ValueError("selected_suite_ids must include every mandatory suite")
+    tenant_id = _required_uuid(payload, "tenant_id")
+    generated_at = _required_datetime_string(payload, "generated_at")
+    registry_resource_type = _required_resource_type(payload, "registry_resource_type")
+    registry_resource_id = _required_uuid(payload, "registry_resource_id")
+    improvement_spec_id = _required_str(payload, "improvement_spec_id")
+    baseline_run_id = _required_str(payload, "baseline_run_id")
+    candidate_id = _required_str(payload, "candidate_id")
+    max_benchmark_runs = _required_positive_int(payload, "max_benchmark_runs")
+    rollback_policy_ref = _required_str(payload, "rollback_policy_ref")
+    artifact_root_path = _required_artifact_root_path(payload)
+    operation_id = _operation_id(
+        "serp-airflow-benchmark-improvement-wave",
+        tenant_id,
+        improvement_spec_id,
+        baseline_run_id,
+        candidate_id,
+        generated_at,
+        ",".join(selected_suite_ids),
+    )
+    plan_payload = {
+        "actor_id": _required_str(payload, "actor_id"),
+        "artifact_root_path": artifact_root_path,
+        "artifact_paths": _artifact_paths(
+            artifact_root_path,
+            operation_id,
+            (
+                ("airflow_plan", "airflow-plan.json"),
+                ("improvement_spec", "improvement-spec.json"),
+                ("candidate_eval_report", "candidate-eval-report.json"),
+                ("keep_discard_decision", "keep-discard-decision.json"),
+                ("improvement_scoreboard", "improvement-scoreboard.json"),
+            ),
+        ),
+        "baseline_run_id": baseline_run_id,
+        "candidate_id": candidate_id,
+        "dag_id": "serp_benchmark_improvement_wave",
+        "generated_at": generated_at,
+        "improvement_spec_id": improvement_spec_id,
+        "max_benchmark_runs": max_benchmark_runs,
+        "normalized_gate_floor": SERP_NORMALIZED_GATE_FLOOR,
+        "operation_id": operation_id,
+        "registry_resource_id": str(registry_resource_id),
+        "registry_resource_type": registry_resource_type,
+        "rollback_policy_ref": rollback_policy_ref,
+        "selected_suite_ids": list(selected_suite_ids),
+        "tasks": _tasks(
+            (
+                "validate_benchmark_improvement_wave_plan",
+                "run_targeted_benchmark_eval_harness",
+                "decide_keep_or_discard_candidate",
+                "publish_improvement_scoreboard",
+                "notify_governance_eval_surfaces",
+            )
+        ),
+        "tenant_id": str(tenant_id),
+    }
+    return SerpDagPlan(plan_payload)
+
+
 def write_airflow_plan_artifact(plan: SerpDagPlan) -> str:
     plan_json = plan.to_canonical_json()
     artifact_paths = _required_artifact_paths(
@@ -270,6 +335,42 @@ def build_tenant_golden_registry_cli_spec(plan_json: str) -> dict[str, Any]:
         input_path_keys=("airflow_plan", "tenant_golden_report"),
         output_path_key="tenant_golden_registry_submissions",
         option_names=("--airflow-plan", "--tenant-golden-report"),
+    )
+
+
+def build_improvement_candidate_eval_cli_spec(plan_json: str) -> dict[str, Any]:
+    return _gateway_cli_spec(
+        plan_json,
+        dag_id="serp_benchmark_improvement_wave",
+        task_id="run_targeted_benchmark_eval_harness",
+        command="benchmark-improvement-candidate-eval",
+        input_path_keys=("airflow_plan", "improvement_spec"),
+        output_path_key="candidate_eval_report",
+        option_names=("--airflow-plan", "--improvement-spec"),
+    )
+
+
+def build_benchmark_improvement_decision_cli_spec(plan_json: str) -> dict[str, Any]:
+    return _gateway_cli_spec(
+        plan_json,
+        dag_id="serp_benchmark_improvement_wave",
+        task_id="decide_keep_or_discard_candidate",
+        command="benchmark-improvement-decision",
+        input_path_keys=("airflow_plan", "improvement_spec", "candidate_eval_report"),
+        output_path_key="keep_discard_decision",
+        option_names=("--airflow-plan", "--improvement-spec", "--candidate-eval-report"),
+    )
+
+
+def build_benchmark_improvement_scoreboard_cli_spec(plan_json: str) -> dict[str, Any]:
+    return _gateway_cli_spec(
+        plan_json,
+        dag_id="serp_benchmark_improvement_wave",
+        task_id="publish_improvement_scoreboard",
+        command="benchmark-improvement-scoreboard",
+        input_path_keys=("airflow_plan", "candidate_eval_report", "keep_discard_decision"),
+        output_path_key="improvement_scoreboard",
+        option_names=("--airflow-plan", "--candidate-eval-report", "--keep-discard-decision"),
     )
 
 
@@ -530,6 +631,13 @@ def _required_number(payload: Mapping[str, Any], field_name: str) -> float:
     ):
         raise ValueError(f"{field_name} must be numeric")
     return float(value)
+
+
+def _required_positive_int(payload: Mapping[str, Any], field_name: str) -> int:
+    value = payload.get(field_name)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{field_name} must be positive")
+    return value
 
 
 def _required_artifact_root_path(payload: Mapping[str, Any]) -> str:

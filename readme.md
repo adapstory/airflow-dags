@@ -29,6 +29,16 @@ SERP eval DAG contracts:
   `tenant-golden-report.json`, and `tenant-golden-registry-submissions.json`
   under a deterministic operation directory. Missing workflow or golden-set
   provenance fails closed.
+- `serp_benchmark_improvement_wave` is the D19 contract DAG. Its
+  `dag_run.conf` must provide tenant id, improvement spec id, baseline run id,
+  candidate id, registry resource identity, approved actor id, generated
+  timestamp, rollback policy ref, positive max benchmark run budget, and every
+  mandatory SERP benchmark suite id. It must also provide an absolute local
+  `artifact_root_path`; the DAG derives `airflow-plan.json`,
+  `improvement-spec.json`, `candidate-eval-report.json`,
+  `keep-discard-decision.json`, and `improvement-scoreboard.json` under a
+  deterministic operation directory. Missing suites or unbounded benchmark
+  budgets fail closed.
 - These DAGs intentionally emit local handoff artifacts and gateway CLI argv
   specs only. The runner/export/submission tasks return deterministic
   `python -m adapstory_serp_mcp_gateway.airflow_eval_cli ...` arguments plus a
