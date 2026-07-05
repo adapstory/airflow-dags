@@ -848,7 +848,11 @@ def _payload(value: Mapping[str, Any]) -> Mapping[str, Any]:
     return value
 
 
-def _json_object(value: str, field_name: str) -> Mapping[str, Any]:
+def _json_object(value: Mapping[str, Any] | str, field_name: str) -> Mapping[str, Any]:
+    if isinstance(value, Mapping):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a JSON object or mapping")
     try:
         loaded = json.loads(value)
     except json.JSONDecodeError as exc:

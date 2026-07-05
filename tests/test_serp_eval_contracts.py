@@ -187,7 +187,7 @@ def test_nightly_d6_airflow_path_writes_gate_export_and_dry_run_receipts(
     plan = build_nightly_regression_plan(conf)
     plan_json = write_airflow_plan_artifact(plan)
 
-    report_artifact = write_nightly_report_artifact(plan_json)
+    report_artifact = write_nightly_report_artifact(json.loads(plan_json))
     export_artifact = write_nightly_benchmark_export_artifact(report_artifact)
     submissions_artifact = write_nightly_registry_submissions_artifact(export_artifact)
     receipts_artifact = write_nightly_registry_receipts_artifact(submissions_artifact)
