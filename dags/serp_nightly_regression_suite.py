@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from airflow.providers.standard.operators.python import PythonOperator
@@ -43,7 +43,7 @@ def submit_bc21_benchmark_run_submissions(plan_json: str) -> dict[str, Any]:
 
 default_args = {
     "owner": "serp-eval-runner",
-    "start_date": datetime(2026, 7, 5, tzinfo=timezone.utc),
+    "start_date": datetime(2026, 7, 5, tzinfo=UTC),
     "retries": 0,
 }
 

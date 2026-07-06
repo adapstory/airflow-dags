@@ -1,19 +1,19 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from airflow.sdk import DAG
 from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.providers.standard.operators.python import PythonOperator
+from airflow.sdk import DAG
 
 
 def report_airflow_smoke() -> str:
-    timestamp = datetime.now(timezone.utc).isoformat()
+    timestamp = datetime.now(UTC).isoformat()
     print(f"Airflow smoke DAG executed at {timestamp}")
     return timestamp
 
 
 default_args = {
     "owner": "platform",
-    "start_date": datetime(2026, 7, 1, tzinfo=timezone.utc),
+    "start_date": datetime(2026, 7, 1, tzinfo=UTC),
     "retries": 1,
 }
 
