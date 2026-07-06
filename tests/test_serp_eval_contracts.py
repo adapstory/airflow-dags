@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -530,14 +531,58 @@ def test_write_benchmark_improvement_wave_artifacts_persist_keep_decision(
     assert decision_path.exists()
     assert scoreboard_path.exists()
     assert spec_artifact["payload"]["status"] == "ready"
+    assert spec_artifact["payload"]["dryRun"] is True
+    assert spec_artifact["payload"]["replay"] == {
+        "baselineRunId": conf["baseline_run_id"],
+        "candidateRunId": f"{conf['candidate_id']}-dry-run",
+        "featureFlags": conf["feature_flags"],
+        "guardrailBundleVersion": conf["guardrail_bundle_version"],
+        "judgeModelId": conf["judge_model_id"],
+        "judgeModelVersion": conf["judge_model_version"],
+        "judgePromptTemplateVersion": conf["judge_prompt_template_version"],
+        "modelCatalogEntryId": conf["model_catalog_entry_id"],
+        "policyBundleVersion": conf["policy_bundle_version"],
+        "providerRouteId": conf["provider_route_id"],
+        "rerankerProfileVersion": conf["reranker_profile_version"],
+        "retrievalProfileVersion": conf["retrieval_profile_version"],
+    }
+    assert spec_artifact["payload"]["modelGovernance"] == {
+        "guardrailBundleVersion": conf["guardrail_bundle_version"],
+        "judgeModelId": conf["judge_model_id"],
+        "judgeModelVersion": conf["judge_model_version"],
+        "modelCatalogEntryId": conf["model_catalog_entry_id"],
+        "policyBundleVersion": conf["policy_bundle_version"],
+        "providerRouteId": conf["provider_route_id"],
+        "status": "approved-for-eval-dry-run",
+    }
+    assert candidate_artifact["payload"]["dryRun"] is True
+    assert candidate_artifact["payload"]["replay"] == spec_artifact["payload"]["replay"]
+    assert (
+        candidate_artifact["payload"]["modelGovernance"]
+        == spec_artifact["payload"]["modelGovernance"]
+    )
     assert candidate_artifact["payload"]["status"] == "passed"
     assert candidate_artifact["payload"]["mandatorySuiteCount"] == len(
         MANDATORY_SERP_BENCHMARK_SUITES
     )
     assert candidate_artifact["payload"]["normalizedGateFloor"] == "0.7500"
     assert decision_artifact["payload"]["decision"] == "keep"
+    assert decision_artifact["payload"]["dryRun"] is True
+    assert decision_artifact["payload"]["replay"] == spec_artifact["payload"]["replay"]
+    assert (
+        decision_artifact["payload"]["modelGovernance"]
+        == spec_artifact["payload"]["modelGovernance"]
+    )
     assert decision_artifact["payload"]["status"] == "accepted"
     assert scoreboard_artifact["payload"]["status"] == "published"
+    assert scoreboard_artifact["payload"]["dryRun"] is True
+    assert (
+        scoreboard_artifact["payload"]["replay"] == spec_artifact["payload"]["replay"]
+    )
+    assert (
+        scoreboard_artifact["payload"]["modelGovernance"]
+        == spec_artifact["payload"]["modelGovernance"]
+    )
     assert scoreboard_artifact["payload"]["latestDecision"] == "keep"
     assert (
         scoreboard_artifact["payload"]["artifact_paths"]
@@ -555,11 +600,46 @@ def test_write_benchmark_improvement_wave_decision_fails_below_floor(
     candidate_artifact = write_improvement_candidate_eval_artifact(spec_artifact)
     candidate_artifact["payload"]["candidateScore"] = "0.7400"
     candidate_artifact["payload"]["suiteResults"][0]["normalizedScore"] = "0.7400"
+    _refresh_artifact_sha256(candidate_artifact)
 
     with pytest.raises(
         ValueError, match="improvement candidate score is below gate floor"
     ):
         write_benchmark_improvement_decision_artifact(candidate_artifact)
+
+
+def test_write_benchmark_improvement_wave_rejects_tampered_artifact_payload(
+    tmp_path: Path,
+) -> None:
+    conf = _improvement_wave_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    plan_json = write_airflow_plan_artifact(build_benchmark_improvement_wave_plan(conf))
+    spec_artifact = write_improvement_spec_artifact(json.loads(plan_json))
+    candidate_artifact = write_improvement_candidate_eval_artifact(spec_artifact)
+    candidate_artifact["payload"]["candidateScore"] = "0.9900"
+
+    with pytest.raises(
+        ValueError, match="artifact payload sha256 does not match artifactSha256"
+    ):
+        write_benchmark_improvement_decision_artifact(candidate_artifact)
+
+
+def test_build_benchmark_improvement_wave_plan_requires_replay_metadata() -> None:
+    conf = _improvement_wave_conf()
+    del conf["judge_model_version"]
+
+    with pytest.raises(ValueError, match="judge_model_version is required"):
+        build_benchmark_improvement_wave_plan(conf)
+
+
+def test_build_benchmark_improvement_wave_plan_rejects_raw_secret_metadata() -> None:
+    conf = _improvement_wave_conf()
+    conf["judge_model_id"] = "sk-abcdefghijklmnop"
+
+    with pytest.raises(
+        ValueError, match="dag run config must not contain raw secret material"
+    ):
+        build_benchmark_improvement_wave_plan(conf)
 
 
 @pytest.mark.parametrize(
@@ -708,6 +788,13 @@ def _matches_call(node: ast.Call, function_name: str) -> bool:
     )
 
 
+def _refresh_artifact_sha256(artifact: dict[str, object]) -> None:
+    payload_json = json.dumps(
+        artifact["payload"], ensure_ascii=True, separators=(",", ":"), sort_keys=True
+    )
+    artifact["artifactSha256"] = sha256(payload_json.encode("utf-8")).hexdigest()
+
+
 def _nightly_conf() -> dict[str, object]:
     return {
         "actor_id": "airflow-serp-eval-runner",
@@ -745,11 +832,21 @@ def _improvement_wave_conf() -> dict[str, object]:
         "artifact_root_path": "/var/opt/adapstory/serp-evals",
         "baseline_run_id": "evalrun_public_reranker_baseline_001",
         "candidate_id": "candidate-reranker-v2",
+        "feature_flags": ["serp.reranker.v2", "serp.d19.dry_run"],
         "generated_at": "2026-07-05T21:00:00Z",
+        "guardrail_bundle_version": "guardrails@2026.07.1",
         "improvement_spec_id": "improve-public-retrieval-reranker-v1",
+        "judge_model_id": "judge-serp-rubric",
+        "judge_model_version": "judge@2026.07.1",
+        "judge_prompt_template_version": "judge-template@2026.07.1",
         "max_benchmark_runs": 12,
+        "model_catalog_entry_id": "model-catalog://serp/judge-serp-rubric@2026.07.1",
+        "policy_bundle_version": "policy@2026.07.1",
+        "provider_route_id": "llm-gateway://eval/judge-serp-rubric",
         "registry_resource_id": REGISTRY_RESOURCE_ID,
         "registry_resource_type": "workflow",
+        "reranker_profile_version": "reranker@2026.07.1",
+        "retrieval_profile_version": "hybrid@2026.07.1",
         "rollback_policy_ref": "policy://rollback/last-validated-baseline@v1",
         "selected_suite_ids": list(MANDATORY_SERP_BENCHMARK_SUITES),
         "tenant_id": TENANT_ID,

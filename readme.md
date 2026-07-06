@@ -37,16 +37,21 @@ SERP eval DAG contracts:
 - `serp_benchmark_improvement_wave` is the D19 contract DAG. Its
   `dag_run.conf` must provide tenant id, improvement spec id, baseline run id,
   candidate id, registry resource identity, approved actor id, generated
-  timestamp, rollback policy ref, positive max benchmark run budget, and every
-  mandatory SERP benchmark suite id. It must also provide an absolute local
+  timestamp, rollback policy ref, positive max benchmark run budget, every
+  mandatory SERP benchmark suite id, replay profile versions, judge
+  model/template versions, feature flags, policy/guardrail bundle versions, and
+  provider/model-catalog route ids. It must also provide an absolute local
   `artifact_root_path`; the DAG derives `airflow-plan.json`,
   `improvement-spec.json`, `candidate-eval-report.json`,
   `keep-discard-decision.json`, and `improvement-scoreboard.json` under a
   deterministic operation directory. D19 writes deterministic dry-run
   improvement artifacts in-task and passes the same payloads through XCom:
   `improvement-spec.json`, `candidate-eval-report.json`,
-  `keep-discard-decision.json`, and `improvement-scoreboard.json`. Missing
-  suites, unbounded benchmark budgets, raw secrets, malformed artifacts, or
+  `keep-discard-decision.json`, and `improvement-scoreboard.json`. Each
+  downstream artifact consumer verifies the upstream wrapper contract version
+  and recomputes `artifactSha256` over the nested payload before accepting XCom
+  input. Missing suites, unbounded benchmark budgets, missing replay/model
+  governance metadata, raw secrets, malformed or tampered artifacts, or
   below-floor candidate scores fail closed.
 - D13 intentionally emits local handoff artifacts and gateway CLI argv specs
   only. Its runner/export/submission tasks return deterministic

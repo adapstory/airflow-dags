@@ -206,6 +206,8 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
     candidate_id = _required_str(payload, "candidate_id")
     max_benchmark_runs = _required_positive_int(payload, "max_benchmark_runs")
     rollback_policy_ref = _required_str(payload, "rollback_policy_ref")
+    replay_context = _improvement_replay_context(payload, baseline_run_id, candidate_id)
+    model_governance = _improvement_model_governance(payload)
     artifact_root_path = _required_artifact_root_path(payload)
     operation_id = _operation_id(
         "serp-airflow-benchmark-improvement-wave",
@@ -236,10 +238,12 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
         "generated_at": generated_at,
         "improvement_spec_id": improvement_spec_id,
         "max_benchmark_runs": max_benchmark_runs,
+        "model_governance": model_governance,
         "normalized_gate_floor": SERP_NORMALIZED_GATE_FLOOR,
         "operation_id": operation_id,
         "registry_resource_id": str(registry_resource_id),
         "registry_resource_type": registry_resource_type,
+        "replay_context": replay_context,
         "rollback_policy_ref": rollback_policy_ref,
         "selected_suite_ids": list(selected_suite_ids),
         "tasks": _tasks(
@@ -848,6 +852,79 @@ def _validate_benchmark_export_payload(payload: Mapping[str, Any]) -> None:
             raise ValueError("benchmark export normalized score is below gate floor")
 
 
+def _improvement_replay_context(
+    payload: Mapping[str, Any], baseline_run_id: str, candidate_id: str
+) -> dict[str, Any]:
+    if isinstance(payload.get("replay_context"), Mapping):
+        replay_context = dict(_required_mapping(payload, "replay_context"))
+        if _required_str(replay_context, "baselineRunId") != baseline_run_id:
+            raise ValueError("replay_context baselineRunId does not match baseline")
+        if _required_str(replay_context, "candidateRunId") != f"{candidate_id}-dry-run":
+            raise ValueError("replay_context candidateRunId does not match candidate")
+        feature_flags = _required_str_list(replay_context, "featureFlags")
+        if len(feature_flags) != len(set(feature_flags)):
+            raise ValueError("featureFlags must not contain duplicates")
+        for field_name in (
+            "guardrailBundleVersion",
+            "judgeModelId",
+            "judgeModelVersion",
+            "judgePromptTemplateVersion",
+            "modelCatalogEntryId",
+            "policyBundleVersion",
+            "providerRouteId",
+            "rerankerProfileVersion",
+            "retrievalProfileVersion",
+        ):
+            _required_str(replay_context, field_name)
+        return replay_context
+    feature_flags = _required_str_list(payload, "feature_flags")
+    if len(feature_flags) != len(set(feature_flags)):
+        raise ValueError("feature_flags must not contain duplicates")
+    return {
+        "baselineRunId": baseline_run_id,
+        "candidateRunId": f"{candidate_id}-dry-run",
+        "featureFlags": feature_flags,
+        "guardrailBundleVersion": _required_str(payload, "guardrail_bundle_version"),
+        "judgeModelId": _required_str(payload, "judge_model_id"),
+        "judgeModelVersion": _required_str(payload, "judge_model_version"),
+        "judgePromptTemplateVersion": _required_str(
+            payload, "judge_prompt_template_version"
+        ),
+        "modelCatalogEntryId": _required_str(payload, "model_catalog_entry_id"),
+        "policyBundleVersion": _required_str(payload, "policy_bundle_version"),
+        "providerRouteId": _required_str(payload, "provider_route_id"),
+        "rerankerProfileVersion": _required_str(payload, "reranker_profile_version"),
+        "retrievalProfileVersion": _required_str(payload, "retrieval_profile_version"),
+    }
+
+
+def _improvement_model_governance(payload: Mapping[str, Any]) -> dict[str, str]:
+    if isinstance(payload.get("model_governance"), Mapping):
+        governance = dict(_required_mapping(payload, "model_governance"))
+        if _required_str(governance, "status") != "approved-for-eval-dry-run":
+            raise ValueError("model_governance status is not approved")
+        return {
+            "guardrailBundleVersion": _required_str(
+                governance, "guardrailBundleVersion"
+            ),
+            "judgeModelId": _required_str(governance, "judgeModelId"),
+            "judgeModelVersion": _required_str(governance, "judgeModelVersion"),
+            "modelCatalogEntryId": _required_str(governance, "modelCatalogEntryId"),
+            "policyBundleVersion": _required_str(governance, "policyBundleVersion"),
+            "providerRouteId": _required_str(governance, "providerRouteId"),
+            "status": "approved-for-eval-dry-run",
+        }
+    return {
+        "guardrailBundleVersion": _required_str(payload, "guardrail_bundle_version"),
+        "judgeModelId": _required_str(payload, "judge_model_id"),
+        "judgeModelVersion": _required_str(payload, "judge_model_version"),
+        "modelCatalogEntryId": _required_str(payload, "model_catalog_entry_id"),
+        "policyBundleVersion": _required_str(payload, "policy_bundle_version"),
+        "providerRouteId": _required_str(payload, "provider_route_id"),
+        "status": "approved-for-eval-dry-run",
+    }
+
+
 def _improvement_spec_payload(
     plan: Mapping[str, Any], artifact_paths: Mapping[str, str]
 ) -> dict[str, Any]:
@@ -877,6 +954,7 @@ def _improvement_spec_payload(
             "maxCostUsdEquivalent": 50,
             "wallClockBudgetMinutes": 180,
         },
+        "dryRun": True,
         "candidateEvaluation": {
             "baselineRunId": baseline_run_id,
             "candidateId": candidate_id,
@@ -922,6 +1000,7 @@ def _improvement_spec_payload(
             "owner": {"role": "Eval Engineer", "team": "serp-platform"},
             "status": "draft",
         },
+        "modelGovernance": dict(_required_mapping(plan, "model_governance")),
         "objective": {
             "optimizationDirection": "maximize",
             "targetMetricFamily": {
@@ -933,6 +1012,7 @@ def _improvement_spec_payload(
         "operationId": _required_str(plan, "operation_id"),
         "registryResourceId": _required_str(plan, "registry_resource_id"),
         "registryResourceType": _required_resource_type(plan, "registry_resource_type"),
+        "replay": dict(_required_mapping(plan, "replay_context")),
         "rollback": {
             "automatic": True,
             "policyRef": _required_str(plan, "rollback_policy_ref"),
@@ -964,6 +1044,7 @@ def _improvement_spec_payload(
 def _improvement_candidate_eval_payload(spec: Mapping[str, Any]) -> dict[str, Any]:
     candidate = _required_mapping(spec, "candidateEvaluation")
     suite_results = _required_object_list(candidate, "suiteResults")
+    _required_true(spec, "dryRun")
     return {
         "artifact_paths": _required_artifact_paths(
             spec,
@@ -982,17 +1063,20 @@ def _improvement_candidate_eval_payload(spec: Mapping[str, Any]) -> dict[str, An
         "constraintResults": list(
             _required_object_list(candidate, "constraintResults")
         ),
+        "dryRun": True,
         "evidence": dict(_required_mapping(candidate, "evidence")),
         "generatedAt": _required_str(spec, "generatedAt"),
         "improvementSpecId": _required_str(_required_mapping(spec, "metadata"), "id"),
         "mandatoryMetricFamilyCount": len(_mandatory_metric_families()),
         "mandatorySuiteCount": len(MANDATORY_SERP_BENCHMARK_SUITES),
+        "modelGovernance": dict(_required_mapping(spec, "modelGovernance")),
         "normalizedGateFloor": f"{SERP_NORMALIZED_GATE_FLOOR:.4f}",
         "operationId": _operation_id(
             "serp-airflow-improvement-candidate-eval",
             _required_str(spec, "operationId"),
             _required_str(candidate, "candidateId"),
         ),
+        "replay": dict(_required_mapping(spec, "replay")),
         "rollbackPolicyRef": _required_str(
             _required_mapping(spec, "rollback"), "policyRef"
         ),
@@ -1024,6 +1108,7 @@ def _improvement_decision_payload(candidate: Mapping[str, Any]) -> dict[str, Any
         "blockingFindings": [],
         "candidateId": _required_str(candidate, "candidateId"),
         "decision": "keep",
+        "dryRun": True,
         "evidence": {
             "rolloutDecisionId": _operation_id(
                 "serp-airflow-improvement-rollout-decision",
@@ -1036,12 +1121,14 @@ def _improvement_decision_payload(candidate: Mapping[str, Any]) -> dict[str, Any
         },
         "improvementSpecId": _required_str(candidate, "improvementSpecId"),
         "latestCandidateScore": _required_str(candidate, "candidateScore"),
+        "modelGovernance": dict(_required_mapping(candidate, "modelGovernance")),
         "objectiveImproved": True,
         "operationId": _operation_id(
             "serp-airflow-improvement-keep-discard",
             _required_str(candidate, "operationId"),
         ),
         "reason": "primary metrics improved and all blocking gates held",
+        "replay": dict(_required_mapping(candidate, "replay")),
         "rollback": {
             "automatic": True,
             "policyRef": _required_str(candidate, "rollbackPolicyRef"),
@@ -1062,6 +1149,7 @@ def _improvement_scoreboard_payload(decision: Mapping[str, Any]) -> dict[str, An
         )
     if _required_str(decision, "status") != "accepted":
         raise ValueError("improvement scoreboard requires an accepted decision")
+    _required_true(decision, "dryRun")
     return {
         "artifact_paths": _required_artifact_paths(
             decision,
@@ -1074,9 +1162,11 @@ def _improvement_scoreboard_payload(decision: Mapping[str, Any]) -> dict[str, An
             ),
         ),
         "candidateId": _required_str(decision, "candidateId"),
+        "dryRun": True,
         "improvementSpecId": _required_str(decision, "improvementSpecId"),
         "latestCandidateScore": _required_str(decision, "latestCandidateScore"),
         "latestDecision": _required_str(decision, "decision"),
+        "modelGovernance": dict(_required_mapping(decision, "modelGovernance")),
         "operationId": _operation_id(
             "serp-airflow-improvement-scoreboard-publish",
             _required_str(decision, "operationId"),
@@ -1085,6 +1175,7 @@ def _improvement_scoreboard_payload(decision: Mapping[str, Any]) -> dict[str, An
         "rolloutDecisionId": _required_str(
             _required_mapping(decision, "evidence"), "rolloutDecisionId"
         ),
+        "replay": dict(_required_mapping(decision, "replay")),
         "status": "published",
         "tenantId": _required_str(decision, "tenantId"),
     }
@@ -1130,6 +1221,39 @@ def _improvement_metric_results(metric_family: str) -> list[dict[str, str]]:
 
 
 def _validate_improvement_candidate_payload(candidate: Mapping[str, Any]) -> None:
+    _required_true(candidate, "dryRun")
+    replay = _required_mapping(candidate, "replay")
+    if _required_str(candidate, "baselineRunId") != _required_str(
+        replay, "baselineRunId"
+    ):
+        raise ValueError("improvement candidate replay baseline mismatch")
+    if _required_str(candidate, "candidateRunId") != _required_str(
+        replay, "candidateRunId"
+    ):
+        raise ValueError("improvement candidate replay candidate mismatch")
+    _required_str_list(replay, "featureFlags")
+    _required_str(replay, "guardrailBundleVersion")
+    _required_str(replay, "judgeModelId")
+    _required_str(replay, "judgeModelVersion")
+    _required_str(replay, "judgePromptTemplateVersion")
+    _required_str(replay, "modelCatalogEntryId")
+    _required_str(replay, "policyBundleVersion")
+    _required_str(replay, "providerRouteId")
+    _required_str(replay, "rerankerProfileVersion")
+    _required_str(replay, "retrievalProfileVersion")
+    governance = _required_mapping(candidate, "modelGovernance")
+    if _required_str(governance, "status") != "approved-for-eval-dry-run":
+        raise ValueError("improvement candidate model governance is not approved")
+    for field_name in (
+        "guardrailBundleVersion",
+        "judgeModelId",
+        "judgeModelVersion",
+        "modelCatalogEntryId",
+        "policyBundleVersion",
+        "providerRouteId",
+    ):
+        if _required_str(governance, field_name) != _required_str(replay, field_name):
+            raise ValueError("improvement candidate governance replay mismatch")
     selected_suite_ids = tuple(_required_str_list(candidate, "selectedSuiteIds"))
     if selected_suite_ids != MANDATORY_SERP_BENCHMARK_SUITES:
         raise ValueError("improvement candidate must include every mandatory suite")
@@ -1226,10 +1350,16 @@ def _artifact_payload(
     payload = _payload(artifact)
     if _required_str(payload, "artifactType") != expected_type:
         raise ValueError("artifact type does not match expected input")
+    if _required_str(payload, "contractVersion") != _AIRFLOW_ARTIFACT_CONTRACT_VERSION:
+        raise ValueError("artifact contract version does not match expected input")
     nested_payload = payload.get("payload")
     if not isinstance(nested_payload, Mapping):
         raise ValueError("artifact payload is required")
     _reject_raw_secrets(nested_payload)
+    payload_json = _canonical_json(nested_payload)
+    actual_sha256 = sha256(payload_json.encode("utf-8")).hexdigest()
+    if _required_str(payload, "artifactSha256") != actual_sha256:
+        raise ValueError("artifact payload sha256 does not match artifactSha256")
     return nested_payload
 
 
@@ -1444,6 +1574,11 @@ def _required_positive_int(payload: Mapping[str, Any], field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{field_name} must be positive")
     return value
+
+
+def _required_true(payload: Mapping[str, Any], field_name: str) -> None:
+    if payload.get(field_name) is not True:
+        raise ValueError(f"{field_name} must be true")
 
 
 def _required_mapping(payload: Mapping[str, Any], field_name: str) -> Mapping[str, Any]:
