@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import io
 import json
 from hashlib import sha256
 from pathlib import Path
@@ -52,8 +53,7 @@ def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:
     assert plan.payload["normalized_gate_floor"] == SERP_NORMALIZED_GATE_FLOOR
     assert plan.payload["artifact_paths"] == {
         "airflow_plan": (
-            "/var/opt/adapstory/serp-evals/"
-            f"{plan.payload['operation_id']}/airflow-plan.json"
+            "/var/opt/adapstory/serp-evals/" f"{plan.payload['operation_id']}/airflow-plan.json"
         ),
         "nightly_registry_submissions": (
             "/var/opt/adapstory/serp-evals/"
@@ -64,16 +64,14 @@ def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:
             f"{plan.payload['operation_id']}/nightly-registry-receipts.json"
         ),
         "nightly_report": (
-            "/var/opt/adapstory/serp-evals/"
-            f"{plan.payload['operation_id']}/nightly-report.json"
+            "/var/opt/adapstory/serp-evals/" f"{plan.payload['operation_id']}/nightly-report.json"
         ),
         "benchmark_gate_export": (
             "/var/opt/adapstory/serp-evals/"
             f"{plan.payload['operation_id']}/benchmark-gate-export.json"
         ),
         "suite_plan": (
-            "/var/opt/adapstory/serp-evals/"
-            f"{plan.payload['operation_id']}/suite-plan.json"
+            "/var/opt/adapstory/serp-evals/" f"{plan.payload['operation_id']}/suite-plan.json"
         ),
     }
     assert plan.payload["selected_suite_ids"] == list(MANDATORY_SERP_BENCHMARK_SUITES)
@@ -88,23 +86,39 @@ def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:
     ]
 
     missing_suite_conf = _nightly_conf()
-    missing_suite_conf["selected_suite_ids"] = list(
-        MANDATORY_SERP_BENCHMARK_SUITES[:-1]
-    )
-    with pytest.raises(
-        ValueError, match="selected_suite_ids must include every mandatory suite"
-    ):
+    missing_suite_conf["selected_suite_ids"] = list(MANDATORY_SERP_BENCHMARK_SUITES[:-1])
+    with pytest.raises(ValueError, match="selected_suite_ids must include every mandatory suite"):
         build_nightly_regression_plan(missing_suite_conf)
 
     url_artifact_root = _nightly_conf()
     url_artifact_root["artifact_root_path"] = "https://example.invalid/serp-evals"
-    with pytest.raises(ValueError, match="artifact_root_path must be an absolute path"):
+    with pytest.raises(
+        ValueError, match="artifact_root_path must be an absolute path or s3:// URI"
+    ):
         build_nightly_regression_plan(url_artifact_root)
 
     unsafe_bc21_base_url = _nightly_conf()
     unsafe_bc21_base_url["bc21_base_url"] = "http://example.invalid"
     with pytest.raises(ValueError, match="bc21_base_url must use https"):
         build_nightly_regression_plan(unsafe_bc21_base_url)
+
+
+def test_build_nightly_regression_plan_accepts_s3_artifact_root_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conf = _nightly_conf()
+    conf.pop("artifact_root_path")
+    monkeypatch.setenv(
+        "ADAPSTORY_AIRFLOW_ARTIFACT_ROOT",
+        "s3://airflow-serp-artifacts/serp-evals",
+    )
+
+    plan = build_nightly_regression_plan(conf)
+
+    assert plan.payload["artifact_root_path"] == "s3://airflow-serp-artifacts/serp-evals"
+    assert plan.payload["artifact_paths"]["airflow_plan"].startswith(
+        "s3://airflow-serp-artifacts/serp-evals/"
+    )
 
 
 def test_build_nightly_gateway_cli_specs_are_file_based_and_deterministic() -> None:
@@ -119,7 +133,7 @@ def test_build_nightly_gateway_cli_specs_are_file_based_and_deterministic() -> N
     assert runner["argv"] == [
         "python",
         "-m",
-        "dags.serp_eval_contracts",
+        "adapstory_serp_mcp_gateway.airflow_eval_cli",
         "nightly-report",
         "--airflow-plan",
         plan.payload["artifact_paths"]["airflow_plan"],
@@ -137,7 +151,7 @@ def test_build_nightly_gateway_cli_specs_are_file_based_and_deterministic() -> N
     assert benchmark_export["argv"] == [
         "python",
         "-m",
-        "dags.serp_eval_contracts",
+        "adapstory_serp_mcp_gateway.airflow_eval_cli",
         "nightly-benchmark-export",
         "--airflow-plan",
         plan.payload["artifact_paths"]["airflow_plan"],
@@ -145,8 +159,7 @@ def test_build_nightly_gateway_cli_specs_are_file_based_and_deterministic() -> N
         plan.payload["artifact_paths"]["nightly_report"],
     ]
     assert (
-        benchmark_export["stdout_path"]
-        == plan.payload["artifact_paths"]["benchmark_gate_export"]
+        benchmark_export["stdout_path"] == plan.payload["artifact_paths"]["benchmark_gate_export"]
     )
     assert benchmark_export["input_paths"] == [
         plan.payload["artifact_paths"]["airflow_plan"],
@@ -158,7 +171,7 @@ def test_build_nightly_gateway_cli_specs_are_file_based_and_deterministic() -> N
     assert submissions["argv"] == [
         "python",
         "-m",
-        "dags.serp_eval_contracts",
+        "adapstory_serp_mcp_gateway.airflow_eval_cli",
         "nightly-registry-submissions",
         "--airflow-plan",
         plan.payload["artifact_paths"]["airflow_plan"],
@@ -166,8 +179,7 @@ def test_build_nightly_gateway_cli_specs_are_file_based_and_deterministic() -> N
         plan.payload["artifact_paths"]["nightly_report"],
     ]
     assert (
-        submissions["stdout_path"]
-        == plan.payload["artifact_paths"]["nightly_registry_submissions"]
+        submissions["stdout_path"] == plan.payload["artifact_paths"]["nightly_registry_submissions"]
     )
 
     assert submit["status"] == "ready_for_gateway_cli_runner"
@@ -175,7 +187,7 @@ def test_build_nightly_gateway_cli_specs_are_file_based_and_deterministic() -> N
     assert submit["argv"] == [
         "python",
         "-m",
-        "dags.serp_eval_contracts",
+        "adapstory_serp_mcp_gateway.airflow_eval_cli",
         "submit-nightly-registry-submissions",
         "--airflow-plan",
         plan.payload["artifact_paths"]["airflow_plan"],
@@ -184,10 +196,7 @@ def test_build_nightly_gateway_cli_specs_are_file_based_and_deterministic() -> N
         "--bc21-base-url",
         plan.payload["bc21_base_url"],
     ]
-    assert (
-        submit["stdout_path"]
-        == plan.payload["artifact_paths"]["nightly_registry_receipts"]
-    )
+    assert submit["stdout_path"] == plan.payload["artifact_paths"]["nightly_registry_receipts"]
 
 
 def test_nightly_d6_airflow_path_writes_suite_plan_for_gateway_runner(
@@ -203,7 +212,7 @@ def test_nightly_d6_airflow_path_writes_suite_plan_for_gateway_runner(
     suite_plan_path = Path(str(suite_plan_artifact["artifactPath"]))
     assert suite_plan_path.exists()
     suite_plan = suite_plan_artifact["payload"]
-    assert suite_plan["contract_version"] == "2026.07.1"
+    assert suite_plan["contract_version"] == "2026.07.2"
     assert suite_plan["schedule_id"] == "serp_nightly_regression_suite"
     assert suite_plan["selected_suite_ids"] == list(MANDATORY_SERP_BENCHMARK_SUITES)
     assert [suite["suite_id"] for suite in suite_plan["suites"]] == list(
@@ -260,6 +269,100 @@ def test_execute_gateway_cli_spec_runs_without_shell_and_persists_stdout(
     assert json.loads(output_path.read_text(encoding="utf-8")) == payload
     assert result["payload"] == payload
     assert result["artifactPath"] == str(output_path)
+
+
+def test_execute_gateway_cli_spec_materializes_s3_inputs_and_uploads_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = {
+        ("airflow-serp-artifacts", "serp-evals/input/airflow-plan.json"): b"{}",
+    }
+    payload = {"status": "accepted", "tenant_id": TENANT_ID}
+    put_calls: list[tuple[str, str, str, str]] = []
+    run_calls: list[tuple[list[str], bool, bool, bool]] = []
+
+    class FakeS3Client:
+        def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
+            return {"Body": io.BytesIO(storage[(Bucket, Key)])}
+
+        def put_object(
+            self,
+            *,
+            Bucket: str,
+            Key: str,
+            Body: bytes,
+            ContentType: str,
+        ) -> None:
+            storage[(Bucket, Key)] = Body
+            put_calls.append(("put_object", Bucket, Key, ContentType))
+
+    def fake_run(
+        argv: list[str],
+        *,
+        capture_output: bool,
+        check: bool,
+        text: bool,
+    ) -> object:
+        run_calls.append((argv, capture_output, check, text))
+        assert argv[-1].startswith("/")
+        assert not argv[-1].startswith("s3://")
+        assert Path(argv[-1]).read_text(encoding="utf-8") == "{}"
+
+        class Result:
+            returncode = 0
+            stdout = json.dumps(payload)
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr("dags.serp_eval_contracts._s3_client", lambda: FakeS3Client())
+    monkeypatch.setattr("dags.serp_eval_contracts.subprocess.run", fake_run)
+
+    result = execute_gateway_cli_spec(
+        {
+            "argv": [
+                "python",
+                "-m",
+                "safe.module",
+                "--airflow-plan",
+                "s3://airflow-serp-artifacts/serp-evals/input/airflow-plan.json",
+            ],
+            "contract_version": "serp-airflow-gateway-cli-bridge/v1",
+            "dag_id": "serp_nightly_regression_suite",
+            "input_paths": ["s3://airflow-serp-artifacts/serp-evals/input/airflow-plan.json"],
+            "operation_id": "op-1",
+            "status": "ready_for_gateway_cli_runner",
+            "stdout_path": "s3://airflow-serp-artifacts/serp-evals/output/nightly-report.json",
+            "task_id": "run_mandatory_benchmark_suites",
+            "tenant_id": TENANT_ID,
+        }
+    )
+
+    assert len(run_calls) == 1
+    argv, capture_output, check, text = run_calls[0]
+    assert argv[:4] == ["python", "-m", "safe.module", "--airflow-plan"]
+    assert argv[4].startswith("/")
+    assert not argv[4].startswith("s3://")
+    assert capture_output is True
+    assert check is False
+    assert text is True
+    assert put_calls == [
+        (
+            "put_object",
+            "airflow-serp-artifacts",
+            "serp-evals/output/nightly-report.json",
+            "application/json",
+        )
+    ]
+    assert (
+        json.loads(storage[("airflow-serp-artifacts", "serp-evals/output/nightly-report.json")])
+        == payload
+    )
+    assert result["payload"] == payload
+    assert (
+        result["artifactPath"]
+        == "s3://airflow-serp-artifacts/serp-evals/output/nightly-report.json"
+    )
 
 
 def test_explicit_nightly_dry_run_fallback_still_writes_marked_receipts(
@@ -327,12 +430,10 @@ def test_build_tenant_golden_regression_plan_preserves_workflow_provenance() -> 
     assert plan.payload["changed_pack_version_ids"] == [PACK_VERSION_ID]
     assert plan.payload["artifact_paths"] == {
         "airflow_plan": (
-            "/var/opt/adapstory/serp-evals/"
-            f"{plan.payload['operation_id']}/airflow-plan.json"
+            "/var/opt/adapstory/serp-evals/" f"{plan.payload['operation_id']}/airflow-plan.json"
         ),
         "golden_set": (
-            "/var/opt/adapstory/serp-evals/"
-            f"{plan.payload['operation_id']}/golden-set.json"
+            "/var/opt/adapstory/serp-evals/" f"{plan.payload['operation_id']}/golden-set.json"
         ),
         "tenant_golden_registry_submissions": (
             "/var/opt/adapstory/serp-evals/"
@@ -356,9 +457,7 @@ def test_build_tenant_golden_regression_plan_preserves_workflow_provenance() -> 
         build_tenant_golden_regression_plan(missing_workflow)
 
 
-def test_build_tenant_golden_gateway_cli_specs_are_file_based_and_deterministic() -> (
-    None
-):
+def test_build_tenant_golden_gateway_cli_specs_are_file_based_and_deterministic() -> None:
     plan = build_tenant_golden_regression_plan(_tenant_golden_conf())
     runner = build_tenant_golden_runner_cli_spec(plan.to_canonical_json())
     submissions = build_tenant_golden_registry_cli_spec(plan.to_canonical_json())
@@ -368,23 +467,21 @@ def test_build_tenant_golden_gateway_cli_specs_are_file_based_and_deterministic(
     assert runner["argv"] == [
         "python",
         "-m",
-        "dags.serp_eval_contracts",
+        "adapstory_serp_mcp_gateway.airflow_eval_cli",
         "tenant-golden-report",
         "--airflow-plan",
         plan.payload["artifact_paths"]["airflow_plan"],
         "--golden-set",
         plan.payload["artifact_paths"]["golden_set"],
     ]
-    assert (
-        runner["stdout_path"] == plan.payload["artifact_paths"]["tenant_golden_report"]
-    )
+    assert runner["stdout_path"] == plan.payload["artifact_paths"]["tenant_golden_report"]
 
     assert submissions["status"] == "ready_for_gateway_cli_runner"
     assert submissions["task_id"] == "build_tenant_golden_registry_submissions"
     assert submissions["argv"] == [
         "python",
         "-m",
-        "dags.serp_eval_contracts",
+        "adapstory_serp_mcp_gateway.airflow_eval_cli",
         "tenant-golden-registry-submissions",
         "--airflow-plan",
         plan.payload["artifact_paths"]["airflow_plan"],
@@ -431,9 +528,7 @@ def test_evaluate_tenant_golden_gate_blocks_failed_metric_results() -> None:
 
 def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> None:
     plan = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
-    repeated = build_benchmark_improvement_wave_plan(
-        json.loads(plan.to_canonical_json())
-    )
+    repeated = build_benchmark_improvement_wave_plan(json.loads(plan.to_canonical_json()))
 
     assert plan.to_canonical_json() == repeated.to_canonical_json()
     assert plan.payload["dag_id"] == "serp_benchmark_improvement_wave"
@@ -444,8 +539,7 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
     assert plan.payload["baseline_run_id"] == "evalrun_public_reranker_baseline_001"
     assert plan.payload["artifact_paths"] == {
         "airflow_plan": (
-            "/var/opt/adapstory/serp-evals/"
-            f"{plan.payload['operation_id']}/airflow-plan.json"
+            "/var/opt/adapstory/serp-evals/" f"{plan.payload['operation_id']}/airflow-plan.json"
         ),
         "candidate_eval_report": (
             "/var/opt/adapstory/serp-evals/"
@@ -456,8 +550,7 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
             f"{plan.payload['operation_id']}/improvement-scoreboard.json"
         ),
         "improvement_spec": (
-            "/var/opt/adapstory/serp-evals/"
-            f"{plan.payload['operation_id']}/improvement-spec.json"
+            "/var/opt/adapstory/serp-evals/" f"{plan.payload['operation_id']}/improvement-spec.json"
         ),
         "keep_discard_decision": (
             "/var/opt/adapstory/serp-evals/"
@@ -473,12 +566,8 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
     ]
 
     missing_suite_conf = _improvement_wave_conf()
-    missing_suite_conf["selected_suite_ids"] = list(
-        MANDATORY_SERP_BENCHMARK_SUITES[:-1]
-    )
-    with pytest.raises(
-        ValueError, match="selected_suite_ids must include every mandatory suite"
-    ):
+    missing_suite_conf["selected_suite_ids"] = list(MANDATORY_SERP_BENCHMARK_SUITES[:-1])
+    with pytest.raises(ValueError, match="selected_suite_ids must include every mandatory suite"):
         build_benchmark_improvement_wave_plan(missing_suite_conf)
 
     unbounded_budget_conf = _improvement_wave_conf()
@@ -487,39 +576,32 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
         build_benchmark_improvement_wave_plan(unbounded_budget_conf)
 
 
-def test_build_benchmark_improvement_gateway_cli_specs_are_file_based_and_deterministic() -> (
-    None
-):
+def test_build_benchmark_improvement_gateway_cli_specs_are_file_based_and_deterministic() -> None:
     plan = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
     candidate_eval = build_improvement_candidate_eval_cli_spec(plan.to_canonical_json())
     decision = build_benchmark_improvement_decision_cli_spec(plan.to_canonical_json())
-    scoreboard = build_benchmark_improvement_scoreboard_cli_spec(
-        plan.to_canonical_json()
-    )
+    scoreboard = build_benchmark_improvement_scoreboard_cli_spec(plan.to_canonical_json())
 
     assert candidate_eval["status"] == "ready_for_gateway_cli_runner"
     assert candidate_eval["task_id"] == "run_targeted_benchmark_eval_harness"
     assert candidate_eval["argv"] == [
         "python",
         "-m",
-        "dags.serp_eval_contracts",
+        "adapstory_serp_mcp_gateway.airflow_eval_cli",
         "benchmark-improvement-candidate-eval",
         "--airflow-plan",
         plan.payload["artifact_paths"]["airflow_plan"],
         "--improvement-spec",
         plan.payload["artifact_paths"]["improvement_spec"],
     ]
-    assert (
-        candidate_eval["stdout_path"]
-        == plan.payload["artifact_paths"]["candidate_eval_report"]
-    )
+    assert candidate_eval["stdout_path"] == plan.payload["artifact_paths"]["candidate_eval_report"]
 
     assert decision["status"] == "ready_for_gateway_cli_runner"
     assert decision["task_id"] == "decide_keep_or_discard_candidate"
     assert decision["argv"] == [
         "python",
         "-m",
-        "dags.serp_eval_contracts",
+        "adapstory_serp_mcp_gateway.airflow_eval_cli",
         "benchmark-improvement-decision",
         "--airflow-plan",
         plan.payload["artifact_paths"]["airflow_plan"],
@@ -528,17 +610,14 @@ def test_build_benchmark_improvement_gateway_cli_specs_are_file_based_and_determ
         "--candidate-eval-report",
         plan.payload["artifact_paths"]["candidate_eval_report"],
     ]
-    assert (
-        decision["stdout_path"]
-        == plan.payload["artifact_paths"]["keep_discard_decision"]
-    )
+    assert decision["stdout_path"] == plan.payload["artifact_paths"]["keep_discard_decision"]
 
     assert scoreboard["status"] == "ready_for_gateway_cli_runner"
     assert scoreboard["task_id"] == "publish_improvement_scoreboard"
     assert scoreboard["argv"] == [
         "python",
         "-m",
-        "dags.serp_eval_contracts",
+        "adapstory_serp_mcp_gateway.airflow_eval_cli",
         "benchmark-improvement-scoreboard",
         "--airflow-plan",
         plan.payload["artifact_paths"]["airflow_plan"],
@@ -547,10 +626,7 @@ def test_build_benchmark_improvement_gateway_cli_specs_are_file_based_and_determ
         "--keep-discard-decision",
         plan.payload["artifact_paths"]["keep_discard_decision"],
     ]
-    assert (
-        scoreboard["stdout_path"]
-        == plan.payload["artifact_paths"]["improvement_scoreboard"]
-    )
+    assert scoreboard["stdout_path"] == plan.payload["artifact_paths"]["improvement_scoreboard"]
 
 
 def test_write_benchmark_improvement_wave_artifacts_persist_keep_decision(
@@ -563,12 +639,8 @@ def test_write_benchmark_improvement_wave_artifacts_persist_keep_decision(
     plan_json = write_airflow_plan_artifact(plan)
     spec_artifact = write_improvement_spec_artifact(json.loads(plan_json))
     candidate_artifact = write_improvement_candidate_eval_artifact(spec_artifact)
-    decision_artifact = write_benchmark_improvement_decision_artifact(
-        candidate_artifact
-    )
-    scoreboard_artifact = write_benchmark_improvement_scoreboard_artifact(
-        decision_artifact
-    )
+    decision_artifact = write_benchmark_improvement_decision_artifact(candidate_artifact)
+    scoreboard_artifact = write_benchmark_improvement_scoreboard_artifact(decision_artifact)
 
     spec_path = Path(str(spec_artifact["artifactPath"]))
     candidate_path = Path(str(candidate_artifact["artifactPath"]))
@@ -625,18 +697,13 @@ def test_write_benchmark_improvement_wave_artifacts_persist_keep_decision(
     assert decision_artifact["payload"]["status"] == "accepted"
     assert scoreboard_artifact["payload"]["status"] == "published"
     assert scoreboard_artifact["payload"]["dryRun"] is True
-    assert (
-        scoreboard_artifact["payload"]["replay"] == spec_artifact["payload"]["replay"]
-    )
+    assert scoreboard_artifact["payload"]["replay"] == spec_artifact["payload"]["replay"]
     assert (
         scoreboard_artifact["payload"]["modelGovernance"]
         == spec_artifact["payload"]["modelGovernance"]
     )
     assert scoreboard_artifact["payload"]["latestDecision"] == "keep"
-    assert (
-        scoreboard_artifact["payload"]["artifact_paths"]
-        == plan.payload["artifact_paths"]
-    )
+    assert scoreboard_artifact["payload"]["artifact_paths"] == plan.payload["artifact_paths"]
 
 
 def test_write_benchmark_improvement_wave_decision_fails_below_floor(
@@ -651,9 +718,7 @@ def test_write_benchmark_improvement_wave_decision_fails_below_floor(
     candidate_artifact["payload"]["suiteResults"][0]["normalizedScore"] = "0.7400"
     _refresh_artifact_sha256(candidate_artifact)
 
-    with pytest.raises(
-        ValueError, match="improvement candidate score is below gate floor"
-    ):
+    with pytest.raises(ValueError, match="improvement candidate score is below gate floor"):
         write_benchmark_improvement_decision_artifact(candidate_artifact)
 
 
@@ -667,9 +732,7 @@ def test_write_benchmark_improvement_wave_rejects_tampered_artifact_payload(
     candidate_artifact = write_improvement_candidate_eval_artifact(spec_artifact)
     candidate_artifact["payload"]["candidateScore"] = "0.9900"
 
-    with pytest.raises(
-        ValueError, match="artifact payload sha256 does not match artifactSha256"
-    ):
+    with pytest.raises(ValueError, match="artifact payload sha256 does not match artifactSha256"):
         write_benchmark_improvement_decision_artifact(candidate_artifact)
 
 
@@ -685,9 +748,7 @@ def test_build_benchmark_improvement_wave_plan_rejects_raw_secret_metadata() -> 
     conf = _improvement_wave_conf()
     conf["judge_model_id"] = "sk-abcdefghijklmnop"
 
-    with pytest.raises(
-        ValueError, match="dag run config must not contain raw secret material"
-    ):
+    with pytest.raises(ValueError, match="dag run config must not contain raw secret material"):
         build_benchmark_improvement_wave_plan(conf)
 
 
@@ -761,9 +822,7 @@ def test_serp_dag_files_import_helpers_from_packaged_dags_namespace() -> None:
 
 
 def test_serp_nightly_dag_uses_live_gateway_cli_for_d6_path() -> None:
-    source = (REPO_ROOT / "dags" / "serp_nightly_regression_suite.py").read_text(
-        encoding="utf-8"
-    )
+    source = (REPO_ROOT / "dags" / "serp_nightly_regression_suite.py").read_text(encoding="utf-8")
 
     assert "write_nightly_suite_plan_artifact" in source
     assert "execute_gateway_cli_spec" in source
@@ -775,9 +834,7 @@ def test_serp_nightly_dag_uses_live_gateway_cli_for_d6_path() -> None:
 
 
 def test_serp_improvement_dag_uses_native_artifact_writers_for_d19_path() -> None:
-    source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(
-        encoding="utf-8"
-    )
+    source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(encoding="utf-8")
 
     assert "write_improvement_spec_artifact" in source
     assert "write_improvement_candidate_eval_artifact" in source
@@ -832,11 +889,8 @@ def _keyword_values(tree: ast.AST, function_name: str, keyword_name: str) -> lis
 
 
 def _matches_call(node: ast.Call, function_name: str) -> bool:
-    return (
-        isinstance(node.func, ast.Name)
-        and node.func.id == function_name
-        or isinstance(node.func, ast.Attribute)
-        and node.func.attr == function_name
+    return (isinstance(node.func, ast.Name) and node.func.id == function_name) or (
+        isinstance(node.func, ast.Attribute) and node.func.attr == function_name
     )
 
 

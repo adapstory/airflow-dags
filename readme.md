@@ -6,7 +6,9 @@ Runtime contract:
 - Do not import optional business dependencies at module import time.
 - Do not use local-only endpoints such as `host.docker.internal`.
 - Add service endpoints, credentials, and runtime packages through GitOps before
-  adding a DAG that depends on them.
+  adding a DAG that depends on them. The production Airflow image must install
+  this repository as a package instead of relying on dag-processor-only
+  `gitSync` visibility.
 - Keep at least one dependency-free platform smoke DAG available for runtime
   health verification.
 
@@ -15,14 +17,16 @@ SERP eval DAG contracts:
 - `serp_nightly_regression_suite` is the D6 contract DAG. Its `dag_run.conf`
   must provide tenant id, pack version ids, retrieval/reranker profile versions,
   registry resource identity, approved actor id, generated timestamp, and every
-  mandatory SERP benchmark suite id. It must also provide an absolute local
-  `artifact_root_path` plus the reviewed `bc21_base_url`; the DAG derives
+  mandatory SERP benchmark suite id. It must also provide `bc21_base_url` plus
+  either `artifact_root_path` or the runtime default
+  `ADAPSTORY_AIRFLOW_ARTIFACT_ROOT`; artifact locations may be absolute local
+  paths or `s3://bucket/prefix` URIs. The DAG derives
   `airflow-plan.json`, `suite-plan.json`, `nightly-report.json`,
   `benchmark-gate-export.json`, `nightly-registry-submissions.json`, and
   `nightly-registry-receipts.json` under a deterministic operation
   directory. Missing or partial suite lists fail closed. D6 writes
   `suite-plan.json`, runs the packaged
-  `python -m dags.serp_eval_contracts` runner without shell
+  `python -m adapstory_serp_mcp_gateway.airflow_eval_cli` runner without shell
   expansion, persists each CLI stdout artifact, and submits
   `nightly-registry-submissions.json` to BC-21 through the reviewed
   `bc21_base_url`. Local dry-run receipt writers are explicit dev/test
@@ -30,9 +34,11 @@ SERP eval DAG contracts:
 - `serp_tenant_golden_set_regression` is the D13 contract DAG. Its
   `dag_run.conf` must provide tenant id, workflow id, golden set id/version,
   changed pack version ids, registry resource identity, approved actor id, and
-  generated timestamp. It must also provide an absolute local
-  `artifact_root_path`; the DAG derives `airflow-plan.json`, `golden-set.json`,
-  `tenant-golden-report.json`, and `tenant-golden-registry-submissions.json`
+  generated timestamp. It must also provide `artifact_root_path` or rely on the
+  runtime default `ADAPSTORY_AIRFLOW_ARTIFACT_ROOT`; artifact locations may be
+  absolute local paths or `s3://bucket/prefix` URIs. The DAG derives
+  `airflow-plan.json`, `golden-set.json`, `tenant-golden-report.json`, and
+  `tenant-golden-registry-submissions.json`
   under a deterministic operation directory. Missing workflow or golden-set
   provenance fails closed.
 - `serp_benchmark_improvement_wave` is the D19 contract DAG. Its
@@ -41,8 +47,10 @@ SERP eval DAG contracts:
   timestamp, rollback policy ref, positive max benchmark run budget, every
   mandatory SERP benchmark suite id, replay profile versions, judge
   model/template versions, feature flags, policy/guardrail bundle versions, and
-  provider/model-catalog route ids. It must also provide an absolute local
-  `artifact_root_path`; the DAG derives `airflow-plan.json`,
+  provider/model-catalog route ids. It must also provide `artifact_root_path`
+  or rely on the runtime default `ADAPSTORY_AIRFLOW_ARTIFACT_ROOT`; artifact
+  locations may be absolute local paths or `s3://bucket/prefix` URIs. The DAG
+  derives `airflow-plan.json`,
   `improvement-spec.json`, `candidate-eval-report.json`,
   `keep-discard-decision.json`, and `improvement-scoreboard.json` under a
   deterministic operation directory. D19 writes deterministic dry-run
@@ -56,14 +64,17 @@ SERP eval DAG contracts:
   below-floor candidate scores fail closed.
 - D13 intentionally emits local handoff artifacts and gateway CLI argv specs
   only. Its runner/export/submission tasks return deterministic
-  `python -m dags.serp_eval_contracts ...` arguments plus a
+  `python -m adapstory_serp_mcp_gateway.airflow_eval_cli ...` arguments plus a
   `stdout_path`; the executor must run the argv without shell expansion and
-  write stdout to that path. Live runner images, service endpoints, and network
-  policy must be added through GitOps before replacing those file-based handoff
-  tasks with native networked operators. D6 now executes the same CLI bridge in
-  the DAG default path and fails closed when BC-21 submission is not configured.
+  write stdout to that path. When `stdout_path` or input artifacts are S3
+  locations, the executor materializes inputs to a temp file inside the task
+  pod and uploads stdout as the resulting artifact; the CLI module itself stays
+  local-file only. Live runner images, service endpoints, and network policy
+  must be added through GitOps before replacing those file-based handoff tasks
+  with native networked operators. D6 now executes the same CLI bridge in the
+  DAG default path and fails closed when BC-21 submission is not configured.
   D19 still keeps native deterministic artifact writers until its live
   improvement runner is wired through GitOps.
-- `artifact_root_path` must be a local absolute path. URLs, parent traversal,
-  multiline values, and raw secret material are rejected before any runner
-  handoff is emitted.
+- `artifact_root_path` must be an absolute local path or `s3://bucket/prefix`
+  URI. Unsupported URL schemes, parent traversal, multiline values, and raw
+  secret material are rejected before any runner handoff is emitted.

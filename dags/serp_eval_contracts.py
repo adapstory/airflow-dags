@@ -3,14 +3,17 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
+from tempfile import TemporaryDirectory
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -29,15 +32,21 @@ MANDATORY_SERP_BENCHMARK_SUITES = (
     "rusBEIR",
 )
 SERP_NORMALIZED_GATE_FLOOR = 0.75
-GATEWAY_CLI_MODULE = "dags.serp_eval_contracts"
+GATEWAY_CLI_MODULE = "adapstory_serp_mcp_gateway.airflow_eval_cli"
 GATEWAY_CLI_PYTHON = "python"
 
 _RESOURCE_TYPES = frozenset({"pack", "tenant", "workflow"})
 _GATEWAY_CLI_CONTRACT_VERSION = "serp-airflow-gateway-cli-bridge/v1"
 _AIRFLOW_ARTIFACT_CONTRACT_VERSION = "serp-airflow-artifact-writer/v1"
-_EVAL_CONTRACT_VERSION = "2026.07.1"
-_DRY_RUN_SUITE_VERSION = "dry-run@2026.07.1"
+_EVAL_CONTRACT_VERSION = "2026.07.2"
+_DRY_RUN_SUITE_VERSION = "dry-run@2026.07.2"
 _BENCHMARK_NAMESPACE = UUID("018f5e13-2d73-7a77-a052-8d1bcbf96599")
+_ARTIFACT_ROOT_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_ROOT"
+_ARTIFACT_S3_ENDPOINT_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT"
+_ARTIFACT_S3_REGION_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION"
+_ARTIFACT_S3_ACCESS_KEY_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ACCESS_KEY"
+_ARTIFACT_S3_SECRET_KEY_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_S3_SECRET_KEY"
+_ARTIFACT_S3_PATH_STYLE_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_S3_PATH_STYLE"
 _RAW_SECRET_KEYS = frozenset(
     {
         "access_token",
@@ -71,6 +80,15 @@ class SerpDagPlan:
         return sha256(self.to_canonical_json().encode("utf-8")).hexdigest()
 
 
+@dataclass(frozen=True, slots=True)
+class _ArtifactRef:
+    location: str
+    kind: str
+    local_path: str | None = None
+    bucket: str | None = None
+    key: str | None = None
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog=f"{GATEWAY_CLI_PYTHON} -m {GATEWAY_CLI_MODULE}",
@@ -93,13 +111,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     registry_submissions.add_argument("--nightly-report", required=True)
     registry_submissions.set_defaults(handler=_cli_nightly_registry_submissions)
 
-    submit_registry_submissions = subparsers.add_parser(
-        "submit-nightly-registry-submissions"
-    )
+    submit_registry_submissions = subparsers.add_parser("submit-nightly-registry-submissions")
     submit_registry_submissions.add_argument("--airflow-plan", required=True)
-    submit_registry_submissions.add_argument(
-        "--nightly-registry-submissions", required=True
-    )
+    submit_registry_submissions.add_argument("--nightly-registry-submissions", required=True)
     submit_registry_submissions.add_argument("--bc21-base-url", required=True)
     submit_registry_submissions.set_defaults(handler=_cli_submit_registry_submissions)
 
@@ -198,9 +212,7 @@ def build_nightly_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
         "registry_resource_id": str(registry_resource_id),
         "registry_resource_type": registry_resource_type,
         "reranker_profile_version": _required_str(payload, "reranker_profile_version"),
-        "retrieval_profile_version": _required_str(
-            payload, "retrieval_profile_version"
-        ),
+        "retrieval_profile_version": _required_str(payload, "retrieval_profile_version"),
         "selected_suite_ids": list(selected_suite_ids),
         "tasks": _tasks(
             (
@@ -222,9 +234,7 @@ def build_tenant_golden_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
     payload = _payload(conf)
     _reject_raw_secrets(payload)
     tenant_id = _required_uuid(payload, "tenant_id")
-    changed_pack_version_ids = tuple(
-        _required_uuid_list(payload, "changed_pack_version_ids")
-    )
+    changed_pack_version_ids = tuple(_required_uuid_list(payload, "changed_pack_version_ids"))
     generated_at = _required_datetime_string(payload, "generated_at")
     registry_resource_type = _required_resource_type(payload, "registry_resource_type")
     registry_resource_id = _required_uuid(payload, "registry_resource_id")
@@ -389,16 +399,16 @@ def execute_gateway_cli_spec(cli_spec: Mapping[str, Any] | str) -> dict[str, Any
     argv = _required_str_list(spec, "argv")
     if any(value in {";", "&&", "|"} for value in argv):
         raise ValueError("gateway cli spec argv must not contain shell operators")
-    for input_path in _required_str_list(spec, "input_paths"):
-        if not Path(_artifact_path("input_path", input_path)).is_file():
-            raise ValueError(f"gateway cli input path is not readable: {input_path}")
+    input_paths = _required_str_list(spec, "input_paths")
     stdout_path = _artifact_path("stdout_path", _required_str(spec, "stdout_path"))
-    completed = subprocess.run(
-        argv,
-        capture_output=True,
-        check=False,
-        text=True,
-    )
+    with TemporaryDirectory(prefix="airflow-artifacts-") as temp_dir:
+        argv = _materialize_gateway_cli_argv(argv, input_paths, temp_dir=temp_dir)
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            check=False,
+            text=True,
+        )
     if completed.returncode != 0:
         stderr_sha256 = sha256(completed.stderr.encode("utf-8")).hexdigest()
         raise ValueError(
@@ -454,9 +464,7 @@ def write_nightly_benchmark_export_artifact(
 def write_nightly_registry_submissions_artifact(
     benchmark_export_artifact: Mapping[str, Any] | str,
 ) -> dict[str, Any]:
-    export_payload = _artifact_payload(
-        benchmark_export_artifact, "benchmark_gate_export"
-    )
+    export_payload = _artifact_payload(benchmark_export_artifact, "benchmark_gate_export")
     artifact_paths = _required_artifact_paths(
         export_payload,
         ("nightly_registry_submissions", "nightly_registry_receipts"),
@@ -496,12 +504,8 @@ def write_nightly_registry_submissions_artifact(
 def write_nightly_registry_receipts_artifact(
     registry_submissions_artifact: Mapping[str, Any] | str,
 ) -> dict[str, Any]:
-    submissions = _artifact_payload(
-        registry_submissions_artifact, "nightly_registry_submissions"
-    )
-    artifact_paths = _required_artifact_paths(
-        submissions, ("nightly_registry_receipts",)
-    )
+    submissions = _artifact_payload(registry_submissions_artifact, "nightly_registry_submissions")
+    artifact_paths = _required_artifact_paths(submissions, ("nightly_registry_receipts",))
     receipts = {
         "contractVersion": "serp-bc21-dry-run-receipts/v1",
         "dryRun": True,
@@ -845,9 +849,7 @@ def _nightly_report_payload(plan: Mapping[str, Any]) -> dict[str, Any]:
     operation_id = _required_str(plan, "operation_id")
     generated_at = _required_datetime_string(plan, "generated_at")
     suites = _required_str_list(plan, "selected_suite_ids")
-    suite_results = [
-        _nightly_suite_result(plan, suite_id, generated_at) for suite_id in suites
-    ]
+    suite_results = [_nightly_suite_result(plan, suite_id, generated_at) for suite_id in suites]
     return {
         "artifact_paths": artifact_paths,
         "contract_version": "serp-nightly-report-dry-run/v1",
@@ -857,15 +859,11 @@ def _nightly_report_payload(plan: Mapping[str, Any]) -> dict[str, Any]:
         "operation_id": operation_id,
         "pack_version_ids": list(_required_str_list(plan, "pack_version_ids")),
         "registry_resource_id": _required_str(plan, "registry_resource_id"),
-        "registry_resource_type": _required_resource_type(
-            plan, "registry_resource_type"
-        ),
+        "registry_resource_type": _required_resource_type(plan, "registry_resource_type"),
         "reranker_profile_version": _required_str(plan, "reranker_profile_version"),
         "retrieval_profile_version": _required_str(plan, "retrieval_profile_version"),
         "selected_suite_ids": suites,
-        "status": evaluate_nightly_regression_gate({"suite_results": suite_results})[
-            "status"
-        ],
+        "status": evaluate_nightly_regression_gate({"suite_results": suite_results})["status"],
         "suite_results": suite_results,
         "tenant_id": _required_str(plan, "tenant_id"),
     }
@@ -888,9 +886,7 @@ def _nightly_suite_plan_payload(plan: Mapping[str, Any]) -> dict[str, Any]:
         },
         "pack_version_ids": pack_version_ids,
         "registry_resource_id": _required_str(plan, "registry_resource_id"),
-        "registry_resource_type": _required_resource_type(
-            plan, "registry_resource_type"
-        ),
+        "registry_resource_type": _required_resource_type(plan, "registry_resource_type"),
         "reranker_profile_version": reranker_profile_version,
         "retrieval_profile_version": retrieval_profile_version,
         "schedule_id": _required_str(plan, "dag_id"),
@@ -984,7 +980,7 @@ def _nightly_suite_plan_suite(
         "retrieval_profile_version": retrieval_profile_version,
         "suite_contract_version": _EVAL_CONTRACT_VERSION,
         "suite_id": suite_id,
-        "suite_version": "golden@2026.07.1",
+        "suite_version": "golden@2026.07.2",
         "tenant_id": tenant_id,
     }
 
@@ -1002,14 +998,9 @@ def _nightly_report_from_suite_plan_payload(
     if tuple(suites_by_id) != tuple(selected_suite_ids):
         raise ValueError("suites must match selected_suite_ids")
     suite_results = [
-        _suite_result_from_suite_plan(suites_by_id[suite_id])
-        for suite_id in selected_suite_ids
+        _suite_result_from_suite_plan(suites_by_id[suite_id]) for suite_id in selected_suite_ids
     ]
-    status = (
-        "blocked"
-        if any(suite["status"] == "blocked" for suite in suite_results)
-        else "passed"
-    )
+    status = "blocked" if any(suite["status"] == "blocked" for suite in suite_results) else "passed"
     operation_id = _operation_id(
         "serp-nightly-regression",
         _required_str(suite_plan, "schedule_id"),
@@ -1027,15 +1018,9 @@ def _nightly_report_from_suite_plan_payload(
         "operation_id": operation_id,
         "pack_version_ids": _required_str_list(suite_plan, "pack_version_ids"),
         "registry_resource_id": _required_str(suite_plan, "registry_resource_id"),
-        "registry_resource_type": _required_resource_type(
-            suite_plan, "registry_resource_type"
-        ),
-        "reranker_profile_version": _required_str(
-            suite_plan, "reranker_profile_version"
-        ),
-        "retrieval_profile_version": _required_str(
-            suite_plan, "retrieval_profile_version"
-        ),
+        "registry_resource_type": _required_resource_type(suite_plan, "registry_resource_type"),
+        "reranker_profile_version": _required_str(suite_plan, "reranker_profile_version"),
+        "retrieval_profile_version": _required_str(suite_plan, "retrieval_profile_version"),
         "schedule_id": _required_str(suite_plan, "schedule_id"),
         "selected_suite_ids": selected_suite_ids,
         "status": status,
@@ -1047,22 +1032,15 @@ def _nightly_report_from_suite_plan_payload(
 def _suite_result_from_suite_plan(suite: Mapping[str, Any]) -> dict[str, Any]:
     if _required_str(suite, "suite_contract_version") != _EVAL_CONTRACT_VERSION:
         raise ValueError("unsupported suite_contract_version")
-    query_ids = [
-        _required_str(case, "query_id")
-        for case in _required_object_list(suite, "cases")
-    ]
+    query_ids = [_required_str(case, "query_id") for case in _required_object_list(suite, "cases")]
     metric_results = [
         _metric_result_from_reference(suite, reference)
         for reference in _required_object_list(suite, "references")
     ]
-    if {metric["metric_family"] for metric in metric_results} != set(
-        _mandatory_metric_families()
-    ):
+    if {metric["metric_family"] for metric in metric_results} != set(_mandatory_metric_families()):
         raise ValueError("suite references must include every mandatory metric family")
     status = (
-        "blocked"
-        if any(metric["status"] == "blocked" for metric in metric_results)
-        else "passed"
+        "blocked" if any(metric["status"] == "blocked" for metric in metric_results) else "passed"
     )
     operation_id = _operation_id(
         "retrieval-eval",
@@ -1193,9 +1171,7 @@ def _live_registry_submission(
         if _required_str(metric, "metric_family") == metric_family
     ]
     if not metrics:
-        raise ValueError(
-            f"missing mandatory metric_family {suite_code}/{metric_family}"
-        )
+        raise ValueError(f"missing mandatory metric_family {suite_code}/{metric_family}")
     body = {
         "actorId": actor_id,
         "cases": [
@@ -1215,7 +1191,7 @@ def _live_registry_submission(
         "referenceSourceType": "official_baseline",
         "resourceId": _required_str(report, "registry_resource_id"),
         "resourceType": _required_resource_type(report, "registry_resource_type"),
-        "runnerVersion": "airflow-d6-serp-eval-runner@2026.07.1",
+        "runnerVersion": "airflow-d6-serp-eval-runner@2026.07.2",
         "scoringAlgorithmVersion": f"airflow-d6-eval-contract@{_EVAL_CONTRACT_VERSION}",
         "suiteCode": suite_code,
         "suiteVersion": _required_str(suite, "suite_version"),
@@ -1236,8 +1212,7 @@ def _live_registry_submission(
     return {
         "body": body,
         "endpointPath": "/api/bc-21/serp/v1/governance/benchmark-runs",
-        "fingerprint": "sha256:"
-        + sha256(_canonical_json(body).encode("utf-8")).hexdigest(),
+        "fingerprint": "sha256:" + sha256(_canonical_json(body).encode("utf-8")).hexdigest(),
         "idempotencyKey": str(idempotency_key),
         "metricFamily": metric_family,
         "suiteCode": suite_code,
@@ -1263,9 +1238,7 @@ def _submit_live_registry_submissions(
         "operation_id": _operation_id(
             "serp-nightly-registry-receipts",
             _required_str(submissions, "operation_id"),
-            ",".join(
-                _required_str(receipt, "benchmarkResultId") for receipt in receipts
-            ),
+            ",".join(_required_str(receipt, "benchmarkResultId") for receipt in receipts),
         ),
         "receipts": receipts,
         "status": "accepted",
@@ -1318,9 +1291,7 @@ def _submit_live_registry_submission(
         "endpointPath": endpoint_path,
         "gateStatus": _required_str(response_payload, "gateStatus"),
         "metricFamily": _required_str(submission, "metricFamily"),
-        "responseBodySha256": sha256(
-            _canonical_json(response_payload).encode("utf-8")
-        ).hexdigest(),
+        "responseBodySha256": sha256(_canonical_json(response_payload).encode("utf-8")).hexdigest(),
         "runId": _required_str(response_payload, "runId"),
         "statusCode": status_code,
         "suiteCode": _required_str(submission, "suiteCode"),
@@ -1419,9 +1390,7 @@ def _benchmark_export_payload(report: Mapping[str, Any]) -> dict[str, Any]:
                 "normalizedScore": f"{normalized_score:.4f}",
                 "operationSha256": _required_str(suite, "operation_sha256"),
                 "registryResourceId": _required_str(report, "registry_resource_id"),
-                "registryResourceType": _required_resource_type(
-                    report, "registry_resource_type"
-                ),
+                "registryResourceType": _required_resource_type(report, "registry_resource_type"),
                 "runId": operation_id,
                 "sourceEvidenceBundleId": evidence_bundle_id,
                 "suiteCode": suite_id,
@@ -1488,9 +1457,7 @@ def _improvement_replay_context(
         "guardrailBundleVersion": _required_str(payload, "guardrail_bundle_version"),
         "judgeModelId": _required_str(payload, "judge_model_id"),
         "judgeModelVersion": _required_str(payload, "judge_model_version"),
-        "judgePromptTemplateVersion": _required_str(
-            payload, "judge_prompt_template_version"
-        ),
+        "judgePromptTemplateVersion": _required_str(payload, "judge_prompt_template_version"),
         "modelCatalogEntryId": _required_str(payload, "model_catalog_entry_id"),
         "policyBundleVersion": _required_str(payload, "policy_bundle_version"),
         "providerRouteId": _required_str(payload, "provider_route_id"),
@@ -1505,9 +1472,7 @@ def _improvement_model_governance(payload: Mapping[str, Any]) -> dict[str, str]:
         if _required_str(governance, "status") != "approved-for-eval-dry-run":
             raise ValueError("model_governance status is not approved")
         return {
-            "guardrailBundleVersion": _required_str(
-                governance, "guardrailBundleVersion"
-            ),
+            "guardrailBundleVersion": _required_str(governance, "guardrailBundleVersion"),
             "judgeModelId": _required_str(governance, "judgeModelId"),
             "judgeModelVersion": _required_str(governance, "judgeModelVersion"),
             "modelCatalogEntryId": _required_str(governance, "modelCatalogEntryId"),
@@ -1661,9 +1626,7 @@ def _improvement_candidate_eval_payload(spec: Mapping[str, Any]) -> dict[str, An
         "candidateId": _required_str(candidate, "candidateId"),
         "candidateRunId": _required_str(candidate, "candidateRunId"),
         "candidateScore": _minimum_normalized_score(suite_results),
-        "constraintResults": list(
-            _required_object_list(candidate, "constraintResults")
-        ),
+        "constraintResults": list(_required_object_list(candidate, "constraintResults")),
         "dryRun": True,
         "evidence": dict(_required_mapping(candidate, "evidence")),
         "generatedAt": _required_str(spec, "generatedAt"),
@@ -1678,9 +1641,7 @@ def _improvement_candidate_eval_payload(spec: Mapping[str, Any]) -> dict[str, An
             _required_str(candidate, "candidateId"),
         ),
         "replay": dict(_required_mapping(spec, "replay")),
-        "rollbackPolicyRef": _required_str(
-            _required_mapping(spec, "rollback"), "policyRef"
-        ),
+        "rollbackPolicyRef": _required_str(_required_mapping(spec, "rollback"), "policyRef"),
         "scope": dict(_required_mapping(candidate, "scope")),
         "selectedSuiteIds": list(_required_str_list(spec, "selectedSuiteIds")),
         "status": "passed",
@@ -1745,9 +1706,7 @@ def _improvement_decision_payload(candidate: Mapping[str, Any]) -> dict[str, Any
 
 def _improvement_scoreboard_payload(decision: Mapping[str, Any]) -> dict[str, Any]:
     if _required_str(decision, "decision") != "keep":
-        raise ValueError(
-            "improvement scoreboard only publishes accepted keep decisions"
-        )
+        raise ValueError("improvement scoreboard only publishes accepted keep decisions")
     if _required_str(decision, "status") != "accepted":
         raise ValueError("improvement scoreboard requires an accepted decision")
     _required_true(decision, "dryRun")
@@ -1824,13 +1783,9 @@ def _improvement_metric_results(metric_family: str) -> list[dict[str, str]]:
 def _validate_improvement_candidate_payload(candidate: Mapping[str, Any]) -> None:
     _required_true(candidate, "dryRun")
     replay = _required_mapping(candidate, "replay")
-    if _required_str(candidate, "baselineRunId") != _required_str(
-        replay, "baselineRunId"
-    ):
+    if _required_str(candidate, "baselineRunId") != _required_str(replay, "baselineRunId"):
         raise ValueError("improvement candidate replay baseline mismatch")
-    if _required_str(candidate, "candidateRunId") != _required_str(
-        replay, "candidateRunId"
-    ):
+    if _required_str(candidate, "candidateRunId") != _required_str(replay, "candidateRunId"):
         raise ValueError("improvement candidate replay candidate mismatch")
     _required_str_list(replay, "featureFlags")
     _required_str(replay, "guardrailBundleVersion")
@@ -1868,20 +1823,15 @@ def _validate_improvement_candidate_payload(candidate: Mapping[str, Any]) -> Non
         by_cell[cell] = suite
     for suite_code in selected_suite_ids:
         for metric_family in _mandatory_metric_families():
-            suite = by_cell.get((suite_code, metric_family))
-            if suite is None:
-                raise ValueError(
-                    f"missing mandatory suite result {suite_code}/{metric_family}"
-                )
-            if _required_str(suite, "gateStatus") != "passed":
-                raise ValueError(
-                    f"{suite_code}/{metric_family}: gateStatus must be passed"
-                )
-            for metric in _required_object_list(suite, "metricResults"):
+            suite_value = by_cell.get((suite_code, metric_family))
+            if suite_value is None:
+                raise ValueError(f"missing mandatory suite result {suite_code}/{metric_family}")
+            suite_result: Mapping[str, Any] = suite_value
+            if _required_str(suite_result, "gateStatus") != "passed":
+                raise ValueError(f"{suite_code}/{metric_family}: gateStatus must be passed")
+            for metric in _required_object_list(suite_result, "metricResults"):
                 if _required_str(metric, "metricFamily") != metric_family:
-                    raise ValueError(
-                        f"{suite_code}/{metric_family}: metricFamily mismatch"
-                    )
+                    raise ValueError(f"{suite_code}/{metric_family}: metricFamily mismatch")
                 if (
                     _required_number_from_string(metric, "normalizedScore")
                     < SERP_NORMALIZED_GATE_FLOOR
@@ -1965,16 +1915,11 @@ def _artifact_payload(
 
 
 def _write_json_artifact(artifact_path: str, payload: Mapping[str, Any]) -> None:
-    path = Path(_artifact_path("artifact_path", artifact_path))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_canonical_json(payload), encoding="utf-8")
+    _write_artifact_text(artifact_path, _canonical_json(payload))
 
 
 def _tasks(task_ids: Sequence[str]) -> list[dict[str, int | str]]:
-    return [
-        {"order": index + 1, "task_id": task_id}
-        for index, task_id in enumerate(task_ids)
-    ]
+    return [{"order": index + 1, "task_id": task_id} for index, task_id in enumerate(task_ids)]
 
 
 def _gateway_cli_spec(
@@ -2055,8 +2000,8 @@ def _json_object(value: Mapping[str, Any] | str, field_name: str) -> Mapping[str
 
 def _read_json_file(path: str, field_name: str) -> Mapping[str, Any]:
     try:
-        raw = Path(_artifact_path(field_name, path)).read_text(encoding="utf-8")
-    except OSError as exc:
+        raw = _read_artifact_text(path, field_name)
+    except Exception as exc:
         raise ValueError(f"{field_name} file is not readable: {path}") from exc
     return _json_object(raw, field_name)
 
@@ -2142,9 +2087,7 @@ def _canonical_json(value: Mapping[str, Any]) -> str:
     return json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
 
 
-def _required_object_list(
-    payload: Mapping[str, Any], field_name: str
-) -> list[Mapping[str, Any]]:
+def _required_object_list(payload: Mapping[str, Any], field_name: str) -> list[Mapping[str, Any]]:
     value = payload.get(field_name)
     if not isinstance(value, list) or not value:
         raise ValueError(f"{field_name} must be a non-empty list")
@@ -2207,9 +2150,7 @@ def _required_bc21_base_url(payload: Mapping[str, Any]) -> str:
         return value
     if parsed.scheme == "http" and _is_kubernetes_service_host(parsed.hostname):
         return value
-    raise ValueError(
-        "bc21_base_url must use https, localhost http, or Kubernetes service http"
-    )
+    raise ValueError("bc21_base_url must use https, localhost http, or Kubernetes service http")
 
 
 def _is_kubernetes_service_host(hostname: str | None) -> bool:
@@ -2236,11 +2177,7 @@ def _required_str(payload: Mapping[str, Any], field_name: str) -> str:
 
 def _required_number(payload: Mapping[str, Any], field_name: str) -> float:
     value = payload.get(field_name)
-    if (
-        not isinstance(value, int | float)
-        or isinstance(value, bool)
-        or not math.isfinite(value)
-    ):
+    if not isinstance(value, int | float) or isinstance(value, bool) or not math.isfinite(value):
         raise ValueError(f"{field_name} must be numeric")
     return float(value)
 
@@ -2275,9 +2212,12 @@ def _required_mapping(payload: Mapping[str, Any], field_name: str) -> Mapping[st
 
 
 def _required_artifact_root_path(payload: Mapping[str, Any]) -> str:
-    return _artifact_path(
-        "artifact_root_path", _required_str(payload, "artifact_root_path")
-    )
+    value = payload.get("artifact_root_path")
+    if not isinstance(value, str):
+        value = os.environ.get(_ARTIFACT_ROOT_ENV)
+    if not isinstance(value, str):
+        raise ValueError("artifact_root_path is required")
+    return _artifact_path("artifact_root_path", value)
 
 
 def _artifact_paths(
@@ -2287,10 +2227,7 @@ def _artifact_paths(
 ) -> dict[str, str]:
     root = _artifact_path("artifact_root_path", artifact_root_path).rstrip("/")
     operation_path = f"{root}/{operation_id}"
-    return {
-        key: _artifact_path(key, f"{operation_path}/{filename}")
-        for key, filename in filenames
-    }
+    return {key: _artifact_path(key, f"{operation_path}/{filename}") for key, filename in filenames}
 
 
 def _required_artifact_paths(
@@ -2300,22 +2237,12 @@ def _required_artifact_paths(
     value = payload.get("artifact_paths")
     if not isinstance(value, Mapping):
         raise ValueError("artifact_paths is required")
-    return {
-        key: _artifact_path(key, _required_str(value, key)) for key in required_keys
-    }
+    return {key: _artifact_path(key, _required_str(value, key)) for key in required_keys}
 
 
 def _artifact_path(field_name: str, value: str) -> str:
     _require_non_empty(field_name, value)
-    if "://" in value or not value.startswith("/"):
-        raise ValueError(f"{field_name} must be an absolute path")
-    if "\x00" in value or "\n" in value or "\r" in value:
-        raise ValueError(f"{field_name} must be a single-line absolute path")
-    if ".." in PurePosixPath(value).parts:
-        raise ValueError(f"{field_name} must not contain parent traversal")
-    if _contains_raw_secret(value):
-        raise ValueError(f"{field_name} must not contain raw secret material")
-    return value
+    return _artifact_ref(field_name, value).location
 
 
 def _require_non_empty(field_name: str, value: str | None) -> None:
@@ -2333,8 +2260,7 @@ def _contains_raw_secret(value: Any) -> bool:
         for key, nested in value.items():
             normalized_key = str(key).lower().replace("-", "_")
             if normalized_key in _RAW_SECRET_KEYS or any(
-                normalized_key.endswith(f"_{secret_key}")
-                for secret_key in _RAW_SECRET_KEYS
+                normalized_key.endswith(f"_{secret_key}") for secret_key in _RAW_SECRET_KEYS
             ):
                 return True
             if _contains_raw_secret(nested):
@@ -2347,6 +2273,131 @@ def _contains_raw_secret(value: Any) -> bool:
     ):
         return True
     return False
+
+
+def _artifact_ref(field_name: str, value: str) -> _ArtifactRef:
+    _require_non_empty(field_name, value)
+    if "\x00" in value or "\n" in value or "\r" in value:
+        raise ValueError(f"{field_name} must be a single-line absolute path or s3:// URI")
+    if _contains_raw_secret(value):
+        raise ValueError(f"{field_name} must not contain raw secret material")
+    parsed = urlparse(value)
+    if parsed.scheme == "s3":
+        if not parsed.netloc:
+            raise ValueError(f"{field_name} must include an S3 bucket")
+        if parsed.params or parsed.query or parsed.fragment:
+            raise ValueError(f"{field_name} must not include URL parameters")
+        key = parsed.path.lstrip("/")
+        if not key:
+            raise ValueError(f"{field_name} must include an S3 object key")
+        if ".." in PurePosixPath(f"/{key}").parts:
+            raise ValueError(f"{field_name} must not contain parent traversal")
+        return _ArtifactRef(
+            location=f"s3://{parsed.netloc}/{key}",
+            kind="s3",
+            bucket=parsed.netloc,
+            key=key,
+        )
+    if "://" in value or not value.startswith("/"):
+        raise ValueError(f"{field_name} must be an absolute path or s3:// URI")
+    if ".." in PurePosixPath(value).parts:
+        raise ValueError(f"{field_name} must not contain parent traversal")
+    return _ArtifactRef(location=value, kind="file", local_path=value)
+
+
+def _read_artifact_text(path: str, field_name: str) -> str:
+    artifact = _artifact_ref(field_name, path)
+    if artifact.kind == "file":
+        return Path(artifact.local_path or "").read_text(encoding="utf-8")
+    response = _s3_client().get_object(
+        Bucket=_required_str_ref(artifact.bucket), Key=_required_str_ref(artifact.key)
+    )
+    body = response.get("Body")
+    if not hasattr(body, "read"):
+        raise ValueError(f"{field_name} S3 response body is unreadable")
+    raw = body.read()
+    if not isinstance(raw, bytes):
+        raise ValueError(f"{field_name} S3 response body is unreadable")
+    return raw.decode("utf-8")
+
+
+def _write_artifact_text(path: str, raw: str) -> None:
+    artifact = _artifact_ref("artifact_path", path)
+    if artifact.kind == "file":
+        local_path = Path(artifact.local_path or "")
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_text(raw, encoding="utf-8")
+        return
+    _s3_client().put_object(
+        Bucket=_required_str_ref(artifact.bucket),
+        Key=_required_str_ref(artifact.key),
+        Body=raw.encode("utf-8"),
+        ContentType="application/json",
+    )
+
+
+def _materialize_gateway_cli_argv(
+    argv: Sequence[str],
+    input_paths: Sequence[str],
+    *,
+    temp_dir: str,
+) -> list[str]:
+    materialized: dict[str, str] = {}
+    for input_path in input_paths:
+        artifact = _artifact_ref("input_path", input_path)
+        if artifact.kind == "file":
+            local_path = Path(artifact.local_path or "")
+            if not local_path.is_file():
+                raise ValueError(f"gateway cli input path is not readable: {input_path}")
+            materialized[input_path] = str(local_path)
+            continue
+        target_path = (
+            Path(temp_dir)
+            / sha256(input_path.encode("utf-8")).hexdigest()
+            / Path(artifact.key or "artifact.json").name
+        )
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(_read_artifact_text(input_path, "input_path"), encoding="utf-8")
+        materialized[input_path] = str(target_path)
+    return [materialized.get(value, value) for value in argv]
+
+
+@lru_cache(maxsize=1)
+def _s3_client() -> Any:
+    try:
+        import boto3
+        from botocore.config import Config
+    except ImportError as exc:
+        raise ValueError("boto3 is required for s3:// artifact paths") from exc
+    return boto3.client(
+        "s3",
+        endpoint_url=_required_env(_ARTIFACT_S3_ENDPOINT_ENV),
+        aws_access_key_id=_required_env(_ARTIFACT_S3_ACCESS_KEY_ENV),
+        aws_secret_access_key=_required_env(_ARTIFACT_S3_SECRET_KEY_ENV),
+        region_name=os.environ.get(_ARTIFACT_S3_REGION_ENV, "us-east-1"),
+        config=Config(
+            s3={
+                "addressing_style": (
+                    "path"
+                    if os.environ.get(_ARTIFACT_S3_PATH_STYLE_ENV, "true").lower() != "false"
+                    else "virtual"
+                )
+            }
+        ),
+    )
+
+
+def _required_env(name: str) -> str:
+    value = os.environ.get(name)
+    if not value or not value.strip():
+        raise ValueError(f"{name} is required for s3:// artifact paths")
+    return value
+
+
+def _required_str_ref(value: str | None) -> str:
+    if value is None or not value.strip():
+        raise ValueError("artifact reference is incomplete")
+    return value
 
 
 if __name__ == "__main__":
