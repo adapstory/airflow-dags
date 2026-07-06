@@ -24,6 +24,10 @@ from dags.serp_eval_contracts import (
     evaluate_nightly_regression_gate,
     evaluate_tenant_golden_gate,
     write_airflow_plan_artifact,
+    write_benchmark_improvement_decision_artifact,
+    write_benchmark_improvement_scoreboard_artifact,
+    write_improvement_candidate_eval_artifact,
+    write_improvement_spec_artifact,
     write_nightly_benchmark_export_artifact,
     write_nightly_registry_receipts_artifact,
     write_nightly_registry_submissions_artifact,
@@ -176,7 +180,10 @@ def test_build_nightly_gateway_cli_specs_are_file_based_and_deterministic() -> N
         "--bc21-base-url",
         plan.payload["bc21_base_url"],
     ]
-    assert submit["stdout_path"] == plan.payload["artifact_paths"]["nightly_registry_receipts"]
+    assert (
+        submit["stdout_path"]
+        == plan.payload["artifact_paths"]["nightly_registry_receipts"]
+    )
 
 
 def test_nightly_d6_airflow_path_writes_gate_export_and_dry_run_receipts(
@@ -374,7 +381,9 @@ def test_evaluate_tenant_golden_gate_blocks_failed_metric_results() -> None:
 
 def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> None:
     plan = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
-    repeated = build_benchmark_improvement_wave_plan(json.loads(plan.to_canonical_json()))
+    repeated = build_benchmark_improvement_wave_plan(
+        json.loads(plan.to_canonical_json())
+    )
 
     assert plan.to_canonical_json() == repeated.to_canonical_json()
     assert plan.payload["dag_id"] == "serp_benchmark_improvement_wave"
@@ -414,7 +423,9 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
     ]
 
     missing_suite_conf = _improvement_wave_conf()
-    missing_suite_conf["selected_suite_ids"] = list(MANDATORY_SERP_BENCHMARK_SUITES[:-1])
+    missing_suite_conf["selected_suite_ids"] = list(
+        MANDATORY_SERP_BENCHMARK_SUITES[:-1]
+    )
     with pytest.raises(
         ValueError, match="selected_suite_ids must include every mandatory suite"
     ):
@@ -426,11 +437,15 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
         build_benchmark_improvement_wave_plan(unbounded_budget_conf)
 
 
-def test_build_benchmark_improvement_gateway_cli_specs_are_file_based_and_deterministic() -> None:
+def test_build_benchmark_improvement_gateway_cli_specs_are_file_based_and_deterministic() -> (
+    None
+):
     plan = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
     candidate_eval = build_improvement_candidate_eval_cli_spec(plan.to_canonical_json())
     decision = build_benchmark_improvement_decision_cli_spec(plan.to_canonical_json())
-    scoreboard = build_benchmark_improvement_scoreboard_cli_spec(plan.to_canonical_json())
+    scoreboard = build_benchmark_improvement_scoreboard_cli_spec(
+        plan.to_canonical_json()
+    )
 
     assert candidate_eval["status"] == "ready_for_gateway_cli_runner"
     assert candidate_eval["task_id"] == "run_targeted_benchmark_eval_harness"
@@ -444,7 +459,10 @@ def test_build_benchmark_improvement_gateway_cli_specs_are_file_based_and_determ
         "--improvement-spec",
         plan.payload["artifact_paths"]["improvement_spec"],
     ]
-    assert candidate_eval["stdout_path"] == plan.payload["artifact_paths"]["candidate_eval_report"]
+    assert (
+        candidate_eval["stdout_path"]
+        == plan.payload["artifact_paths"]["candidate_eval_report"]
+    )
 
     assert decision["status"] == "ready_for_gateway_cli_runner"
     assert decision["task_id"] == "decide_keep_or_discard_candidate"
@@ -460,7 +478,10 @@ def test_build_benchmark_improvement_gateway_cli_specs_are_file_based_and_determ
         "--candidate-eval-report",
         plan.payload["artifact_paths"]["candidate_eval_report"],
     ]
-    assert decision["stdout_path"] == plan.payload["artifact_paths"]["keep_discard_decision"]
+    assert (
+        decision["stdout_path"]
+        == plan.payload["artifact_paths"]["keep_discard_decision"]
+    )
 
     assert scoreboard["status"] == "ready_for_gateway_cli_runner"
     assert scoreboard["task_id"] == "publish_improvement_scoreboard"
@@ -476,7 +497,69 @@ def test_build_benchmark_improvement_gateway_cli_specs_are_file_based_and_determ
         "--keep-discard-decision",
         plan.payload["artifact_paths"]["keep_discard_decision"],
     ]
-    assert scoreboard["stdout_path"] == plan.payload["artifact_paths"]["improvement_scoreboard"]
+    assert (
+        scoreboard["stdout_path"]
+        == plan.payload["artifact_paths"]["improvement_scoreboard"]
+    )
+
+
+def test_write_benchmark_improvement_wave_artifacts_persist_keep_decision(
+    tmp_path: Path,
+) -> None:
+    conf = _improvement_wave_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    plan = build_benchmark_improvement_wave_plan(conf)
+
+    plan_json = write_airflow_plan_artifact(plan)
+    spec_artifact = write_improvement_spec_artifact(json.loads(plan_json))
+    candidate_artifact = write_improvement_candidate_eval_artifact(spec_artifact)
+    decision_artifact = write_benchmark_improvement_decision_artifact(
+        candidate_artifact
+    )
+    scoreboard_artifact = write_benchmark_improvement_scoreboard_artifact(
+        decision_artifact
+    )
+
+    spec_path = Path(str(spec_artifact["artifactPath"]))
+    candidate_path = Path(str(candidate_artifact["artifactPath"]))
+    decision_path = Path(str(decision_artifact["artifactPath"]))
+    scoreboard_path = Path(str(scoreboard_artifact["artifactPath"]))
+
+    assert spec_path.exists()
+    assert candidate_path.exists()
+    assert decision_path.exists()
+    assert scoreboard_path.exists()
+    assert spec_artifact["payload"]["status"] == "ready"
+    assert candidate_artifact["payload"]["status"] == "passed"
+    assert candidate_artifact["payload"]["mandatorySuiteCount"] == len(
+        MANDATORY_SERP_BENCHMARK_SUITES
+    )
+    assert candidate_artifact["payload"]["normalizedGateFloor"] == "0.7500"
+    assert decision_artifact["payload"]["decision"] == "keep"
+    assert decision_artifact["payload"]["status"] == "accepted"
+    assert scoreboard_artifact["payload"]["status"] == "published"
+    assert scoreboard_artifact["payload"]["latestDecision"] == "keep"
+    assert (
+        scoreboard_artifact["payload"]["artifact_paths"]
+        == plan.payload["artifact_paths"]
+    )
+
+
+def test_write_benchmark_improvement_wave_decision_fails_below_floor(
+    tmp_path: Path,
+) -> None:
+    conf = _improvement_wave_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    plan_json = write_airflow_plan_artifact(build_benchmark_improvement_wave_plan(conf))
+    spec_artifact = write_improvement_spec_artifact(json.loads(plan_json))
+    candidate_artifact = write_improvement_candidate_eval_artifact(spec_artifact)
+    candidate_artifact["payload"]["candidateScore"] = "0.7400"
+    candidate_artifact["payload"]["suiteResults"][0]["normalizedScore"] = "0.7400"
+
+    with pytest.raises(
+        ValueError, match="improvement candidate score is below gate floor"
+    ):
+        write_benchmark_improvement_decision_artifact(candidate_artifact)
 
 
 @pytest.mark.parametrize(
@@ -548,15 +631,29 @@ def test_serp_dag_files_import_helpers_from_packaged_dags_namespace() -> None:
 
 
 def test_serp_nightly_dag_uses_artifact_writers_for_d6_path() -> None:
-    source = (
-        REPO_ROOT / "dags" / "serp_nightly_regression_suite.py"
-    ).read_text(encoding="utf-8")
+    source = (REPO_ROOT / "dags" / "serp_nightly_regression_suite.py").read_text(
+        encoding="utf-8"
+    )
 
     assert "write_nightly_report_artifact" in source
     assert "write_nightly_benchmark_export_artifact" in source
     assert "write_nightly_registry_submissions_artifact" in source
     assert "write_nightly_registry_receipts_artifact" in source
     assert "build_nightly_benchmark_export_cli_spec" not in source
+
+
+def test_serp_improvement_dag_uses_native_artifact_writers_for_d19_path() -> None:
+    source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "write_improvement_spec_artifact" in source
+    assert "write_improvement_candidate_eval_artifact" in source
+    assert "write_benchmark_improvement_decision_artifact" in source
+    assert "write_benchmark_improvement_scoreboard_artifact" in source
+    assert "build_improvement_candidate_eval_cli_spec" not in source
+    assert "build_benchmark_improvement_decision_cli_spec" not in source
+    assert "build_benchmark_improvement_scoreboard_cli_spec" not in source
 
 
 def test_airflowignore_excludes_non_dag_test_modules() -> None:

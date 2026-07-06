@@ -42,18 +42,22 @@ SERP eval DAG contracts:
   `artifact_root_path`; the DAG derives `airflow-plan.json`,
   `improvement-spec.json`, `candidate-eval-report.json`,
   `keep-discard-decision.json`, and `improvement-scoreboard.json` under a
-  deterministic operation directory. Missing suites or unbounded benchmark
-  budgets fail closed.
-- D13 and D19 intentionally emit local handoff artifacts and gateway CLI argv
-  specs only. Their runner/export/submission tasks return deterministic
+  deterministic operation directory. D19 writes deterministic dry-run
+  improvement artifacts in-task and passes the same payloads through XCom:
+  `improvement-spec.json`, `candidate-eval-report.json`,
+  `keep-discard-decision.json`, and `improvement-scoreboard.json`. Missing
+  suites, unbounded benchmark budgets, raw secrets, malformed artifacts, or
+  below-floor candidate scores fail closed.
+- D13 intentionally emits local handoff artifacts and gateway CLI argv specs
+  only. Its runner/export/submission tasks return deterministic
   `python -m adapstory_serp_mcp_gateway.airflow_eval_cli ...` arguments plus a
   `stdout_path`; the executor must run the argv without shell expansion and
   write stdout to that path. Live runner images, service endpoints, and network
   policy must be added through GitOps before replacing those file-based handoff
-  tasks with native networked operators. D6 still keeps the CLI-spec helper
-  functions for operator handoff compatibility, but the Airflow DAG path uses
-  native dry-run artifact writers until BC-21 write credentials and live runner
-  images are configured through GitOps.
+  tasks with native networked operators. D6 and D19 still keep the CLI-spec
+  helper functions for operator handoff compatibility, but their Airflow DAG
+  paths use native dry-run artifact writers until BC-21 write credentials and
+  live runner images are configured through GitOps.
 - `artifact_root_path` must be a local absolute path. URLs, parent traversal,
   multiline values, and raw secret material are rejected before any runner
   handoff is emitted.

@@ -325,9 +325,7 @@ def write_nightly_registry_submissions_artifact(
                 "normalizedScore": _required_str(item, "normalizedScore"),
                 "registryResourceId": _required_str(item, "registryResourceId"),
                 "registryResourceType": _required_str(item, "registryResourceType"),
-                "sourceEvidenceBundleId": _required_str(
-                    item, "sourceEvidenceBundleId"
-                ),
+                "sourceEvidenceBundleId": _required_str(item, "sourceEvidenceBundleId"),
                 "suiteCode": _required_str(item, "suiteCode"),
             }
             for item in _required_object_list(export_payload, "items")
@@ -375,9 +373,7 @@ def write_nightly_registry_receipts_artifact(
                         f"{_required_str(item, 'benchmarkResultId')}",
                     )
                 ),
-                "sourceEvidenceBundleId": _required_str(
-                    item, "sourceEvidenceBundleId"
-                ),
+                "sourceEvidenceBundleId": _required_str(item, "sourceEvidenceBundleId"),
                 "statusCode": 202,
                 "suiteCode": _required_str(item, "suiteCode"),
             }
@@ -393,6 +389,98 @@ def write_nightly_registry_receipts_artifact(
         artifact_type="nightly_registry_receipts",
         operation_id=_required_str(submissions, "operationId"),
         payload=receipts,
+    )
+
+
+def write_improvement_spec_artifact(
+    plan_json: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != "serp_benchmark_improvement_wave":
+        raise ValueError("plan dag_id does not match improvement artifact writer")
+    _required_artifact_paths(
+        plan,
+        (
+            "airflow_plan",
+            "improvement_spec",
+            "candidate_eval_report",
+            "keep_discard_decision",
+            "improvement_scoreboard",
+        ),
+    )
+    artifact_paths = _required_mapping(plan, "artifact_paths")
+    payload = _improvement_spec_payload(plan, artifact_paths)
+    artifact_path = artifact_paths["improvement_spec"]
+    _write_json_artifact(artifact_path, payload)
+    return _artifact_result(
+        artifact_path,
+        artifact_type="improvement_spec",
+        operation_id=_required_str(plan, "operation_id"),
+        payload=payload,
+    )
+
+
+def write_improvement_candidate_eval_artifact(
+    improvement_spec_artifact: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    spec_artifact = (
+        write_improvement_spec_artifact(improvement_spec_artifact)
+        if _is_plan_payload(improvement_spec_artifact)
+        else improvement_spec_artifact
+    )
+    spec = _artifact_payload(spec_artifact, "improvement_spec")
+    _required_artifact_paths(
+        spec,
+        ("candidate_eval_report", "keep_discard_decision", "improvement_scoreboard"),
+    )
+    artifact_paths = _required_mapping(spec, "artifact_paths")
+    payload = _improvement_candidate_eval_payload(spec)
+    _validate_improvement_candidate_payload(payload)
+    artifact_path = artifact_paths["candidate_eval_report"]
+    _write_json_artifact(artifact_path, payload)
+    return _artifact_result(
+        artifact_path,
+        artifact_type="candidate_eval_report",
+        operation_id=_required_str(spec, "operationId"),
+        payload=payload,
+    )
+
+
+def write_benchmark_improvement_decision_artifact(
+    candidate_eval_artifact: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    candidate = _artifact_payload(candidate_eval_artifact, "candidate_eval_report")
+    _required_artifact_paths(
+        candidate,
+        ("keep_discard_decision", "improvement_scoreboard"),
+    )
+    artifact_paths = _required_mapping(candidate, "artifact_paths")
+    payload = _improvement_decision_payload(candidate)
+    artifact_path = artifact_paths["keep_discard_decision"]
+    _write_json_artifact(artifact_path, payload)
+    return _artifact_result(
+        artifact_path,
+        artifact_type="keep_discard_decision",
+        operation_id=_required_str(candidate, "operationId"),
+        payload=payload,
+    )
+
+
+def write_benchmark_improvement_scoreboard_artifact(
+    decision_artifact: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    decision = _artifact_payload(decision_artifact, "keep_discard_decision")
+    _required_artifact_paths(decision, ("improvement_scoreboard",))
+    artifact_paths = _required_mapping(decision, "artifact_paths")
+    payload = _improvement_scoreboard_payload(decision)
+    artifact_path = artifact_paths["improvement_scoreboard"]
+    _write_json_artifact(artifact_path, payload)
+    return _artifact_result(
+        artifact_path,
+        artifact_type="improvement_scoreboard",
+        operation_id=_required_str(decision, "operationId"),
+        payload=payload,
     )
 
 
@@ -429,7 +517,10 @@ def build_nightly_registry_submit_cli_spec(plan_json: str) -> dict[str, Any]:
         input_path_keys=("airflow_plan", "nightly_registry_submissions"),
         output_path_key="nightly_registry_receipts",
         option_names=("--airflow-plan", "--nightly-registry-submissions"),
-        extra_options=("--bc21-base-url", _required_bc21_base_url(_json_object(plan_json, "plan_json"))),
+        extra_options=(
+            "--bc21-base-url",
+            _required_bc21_base_url(_json_object(plan_json, "plan_json")),
+        ),
     )
 
 
@@ -489,7 +580,11 @@ def build_benchmark_improvement_decision_cli_spec(plan_json: str) -> dict[str, A
         command="benchmark-improvement-decision",
         input_path_keys=("airflow_plan", "improvement_spec", "candidate_eval_report"),
         output_path_key="keep_discard_decision",
-        option_names=("--airflow-plan", "--improvement-spec", "--candidate-eval-report"),
+        option_names=(
+            "--airflow-plan",
+            "--improvement-spec",
+            "--candidate-eval-report",
+        ),
     )
 
 
@@ -499,9 +594,17 @@ def build_benchmark_improvement_scoreboard_cli_spec(plan_json: str) -> dict[str,
         dag_id="serp_benchmark_improvement_wave",
         task_id="publish_improvement_scoreboard",
         command="benchmark-improvement-scoreboard",
-        input_path_keys=("airflow_plan", "candidate_eval_report", "keep_discard_decision"),
+        input_path_keys=(
+            "airflow_plan",
+            "candidate_eval_report",
+            "keep_discard_decision",
+        ),
         output_path_key="improvement_scoreboard",
-        option_names=("--airflow-plan", "--candidate-eval-report", "--keep-discard-decision"),
+        option_names=(
+            "--airflow-plan",
+            "--candidate-eval-report",
+            "--keep-discard-decision",
+        ),
     )
 
 
@@ -611,9 +714,9 @@ def _nightly_report_payload(plan: Mapping[str, Any]) -> dict[str, Any]:
         "reranker_profile_version": _required_str(plan, "reranker_profile_version"),
         "retrieval_profile_version": _required_str(plan, "retrieval_profile_version"),
         "selected_suite_ids": suites,
-        "status": evaluate_nightly_regression_gate(
-            {"suite_results": suite_results}
-        )["status"],
+        "status": evaluate_nightly_regression_gate({"suite_results": suite_results})[
+            "status"
+        ],
         "suite_results": suite_results,
         "tenant_id": _required_str(plan, "tenant_id"),
     }
@@ -743,6 +846,356 @@ def _validate_benchmark_export_payload(payload: Mapping[str, Any]) -> None:
             raise ValueError("benchmark export includes a non-passing suite")
         if float(_required_str(item, "normalizedScore")) < SERP_NORMALIZED_GATE_FLOOR:
             raise ValueError("benchmark export normalized score is below gate floor")
+
+
+def _improvement_spec_payload(
+    plan: Mapping[str, Any], artifact_paths: Mapping[str, str]
+) -> dict[str, Any]:
+    generated_at = _required_datetime_string(plan, "generated_at")
+    baseline_run_id = _required_str(plan, "baseline_run_id")
+    candidate_id = _required_str(plan, "candidate_id")
+    selected_suite_ids = _required_str_list(plan, "selected_suite_ids")
+    return {
+        "acceptance": {
+            "keepRule": {"type": "multi-metric"},
+            "rejectRule": {"type": "fail-fast"},
+        },
+        "apiVersion": "serp.adapstory.ai/v1alpha1",
+        "artifact_paths": dict(artifact_paths),
+        "baseline": {
+            "beatCondition": {
+                "minimumLead": {"MRR@10": 0.01, "nDCG@10": 0.01},
+                "rule": "primary_metrics_improve_without_blocking_regressions",
+            },
+            "normalizedGateFloor": SERP_NORMALIZED_GATE_FLOOR,
+            "referenceRunId": baseline_run_id,
+            "source": "validated-internal-baseline",
+        },
+        "benchmarks": {"requiredSuites": selected_suite_ids},
+        "budgets": {
+            "maxBenchmarkRuns": _required_positive_int(plan, "max_benchmark_runs"),
+            "maxCostUsdEquivalent": 50,
+            "wallClockBudgetMinutes": 180,
+        },
+        "candidateEvaluation": {
+            "baselineRunId": baseline_run_id,
+            "candidateId": candidate_id,
+            "candidateRunId": f"{candidate_id}-dry-run",
+            "constraintResults": [
+                {"name": "Policy Compliance Rate", "status": "passed"},
+                {"name": "Citation Accuracy", "status": "passed"},
+                {"name": "Evidence Completeness", "status": "passed"},
+            ],
+            "evidence": {
+                "benchmarkReportId": f"benchmark-report-{candidate_id}",
+                "candidateDiffSummaryId": f"diff-{candidate_id}",
+                "costReportId": f"cost-report-{candidate_id}",
+                "regressionReportId": f"regression-report-{candidate_id}",
+            },
+            "scope": {"changedComponents": ["reranker-profile-public-docs"]},
+            "suiteResults": [
+                _improvement_suite_result(suite_id, metric_family)
+                for suite_id in selected_suite_ids
+                for metric_family in _mandatory_metric_families()
+            ],
+        },
+        "constraints": {
+            "mustHold": [
+                "Policy Compliance Rate == 1.0 on blocking cases",
+                "Citation Accuracy >= 0.95",
+                "Evidence Completeness >= 0.99",
+            ],
+        },
+        "evidence": {
+            "requiredArtifacts": [
+                "candidate_diff_summary",
+                "benchmark_report",
+                "regression_report",
+                "cost_report",
+                "rollout_decision",
+            ],
+        },
+        "generatedAt": generated_at,
+        "kind": "ImprovementSpec",
+        "metadata": {
+            "id": _required_str(plan, "improvement_spec_id"),
+            "owner": {"role": "Eval Engineer", "team": "serp-platform"},
+            "status": "draft",
+        },
+        "objective": {
+            "optimizationDirection": "maximize",
+            "targetMetricFamily": {
+                "primary": ["nDCG@10", "MRR@10"],
+                "secondary": ["Recall@10", "Citation Accuracy"],
+            },
+            "type": "benchmark-ratchet",
+        },
+        "operationId": _required_str(plan, "operation_id"),
+        "registryResourceId": _required_str(plan, "registry_resource_id"),
+        "registryResourceType": _required_resource_type(plan, "registry_resource_type"),
+        "rollback": {
+            "automatic": True,
+            "policyRef": _required_str(plan, "rollback_policy_ref"),
+            "revertTo": {
+                "referenceRunId": baseline_run_id,
+                "type": "last-validated-baseline",
+            },
+            "triggerConditions": [
+                "mandatory_suite_below_floor",
+                "policy_compliance_regression",
+            ],
+        },
+        "scope": {
+            "allowedComponents": ["reranker-profile-public-docs"],
+            "forbiddenChanges": [
+                "api-breaking-change",
+                "policy-bypass",
+                "manual-runtime-hotfix",
+                "new-legacy-compatibility-layer",
+            ],
+            "kind": "bounded",
+        },
+        "selectedSuiteIds": selected_suite_ids,
+        "status": "ready",
+        "tenantId": _required_str(plan, "tenant_id"),
+    }
+
+
+def _improvement_candidate_eval_payload(spec: Mapping[str, Any]) -> dict[str, Any]:
+    candidate = _required_mapping(spec, "candidateEvaluation")
+    suite_results = _required_object_list(candidate, "suiteResults")
+    return {
+        "artifact_paths": _required_artifact_paths(
+            spec,
+            (
+                "airflow_plan",
+                "improvement_spec",
+                "candidate_eval_report",
+                "keep_discard_decision",
+                "improvement_scoreboard",
+            ),
+        ),
+        "baselineRunId": _required_str(candidate, "baselineRunId"),
+        "candidateId": _required_str(candidate, "candidateId"),
+        "candidateRunId": _required_str(candidate, "candidateRunId"),
+        "candidateScore": _minimum_normalized_score(suite_results),
+        "constraintResults": list(
+            _required_object_list(candidate, "constraintResults")
+        ),
+        "evidence": dict(_required_mapping(candidate, "evidence")),
+        "generatedAt": _required_str(spec, "generatedAt"),
+        "improvementSpecId": _required_str(_required_mapping(spec, "metadata"), "id"),
+        "mandatoryMetricFamilyCount": len(_mandatory_metric_families()),
+        "mandatorySuiteCount": len(MANDATORY_SERP_BENCHMARK_SUITES),
+        "normalizedGateFloor": f"{SERP_NORMALIZED_GATE_FLOOR:.4f}",
+        "operationId": _operation_id(
+            "serp-airflow-improvement-candidate-eval",
+            _required_str(spec, "operationId"),
+            _required_str(candidate, "candidateId"),
+        ),
+        "rollbackPolicyRef": _required_str(
+            _required_mapping(spec, "rollback"), "policyRef"
+        ),
+        "scope": dict(_required_mapping(candidate, "scope")),
+        "selectedSuiteIds": list(_required_str_list(spec, "selectedSuiteIds")),
+        "status": "passed",
+        "suiteResults": list(suite_results),
+        "tenantId": _required_str(spec, "tenantId"),
+    }
+
+
+def _improvement_decision_payload(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    _validate_improvement_candidate_payload(candidate)
+    if float(_required_str(candidate, "candidateScore")) < SERP_NORMALIZED_GATE_FLOOR:
+        raise ValueError("improvement candidate score is below gate floor")
+    if not _candidate_objective_improved(candidate):
+        raise ValueError("improvement candidate does not beat baseline")
+    return {
+        "artifact_paths": _required_artifact_paths(
+            candidate,
+            (
+                "airflow_plan",
+                "improvement_spec",
+                "candidate_eval_report",
+                "keep_discard_decision",
+                "improvement_scoreboard",
+            ),
+        ),
+        "blockingFindings": [],
+        "candidateId": _required_str(candidate, "candidateId"),
+        "decision": "keep",
+        "evidence": {
+            "rolloutDecisionId": _operation_id(
+                "serp-airflow-improvement-rollout-decision",
+                _required_str(candidate, "operationId"),
+            ),
+            "scoreboardId": _operation_id(
+                "serp-airflow-improvement-scoreboard",
+                _required_str(candidate, "operationId"),
+            ),
+        },
+        "improvementSpecId": _required_str(candidate, "improvementSpecId"),
+        "latestCandidateScore": _required_str(candidate, "candidateScore"),
+        "objectiveImproved": True,
+        "operationId": _operation_id(
+            "serp-airflow-improvement-keep-discard",
+            _required_str(candidate, "operationId"),
+        ),
+        "reason": "primary metrics improved and all blocking gates held",
+        "rollback": {
+            "automatic": True,
+            "policyRef": _required_str(candidate, "rollbackPolicyRef"),
+            "revertTo": {
+                "referenceRunId": _required_str(candidate, "baselineRunId"),
+                "type": "last-validated-baseline",
+            },
+        },
+        "status": "accepted",
+        "tenantId": _required_str(candidate, "tenantId"),
+    }
+
+
+def _improvement_scoreboard_payload(decision: Mapping[str, Any]) -> dict[str, Any]:
+    if _required_str(decision, "decision") != "keep":
+        raise ValueError(
+            "improvement scoreboard only publishes accepted keep decisions"
+        )
+    if _required_str(decision, "status") != "accepted":
+        raise ValueError("improvement scoreboard requires an accepted decision")
+    return {
+        "artifact_paths": _required_artifact_paths(
+            decision,
+            (
+                "airflow_plan",
+                "improvement_spec",
+                "candidate_eval_report",
+                "keep_discard_decision",
+                "improvement_scoreboard",
+            ),
+        ),
+        "candidateId": _required_str(decision, "candidateId"),
+        "improvementSpecId": _required_str(decision, "improvementSpecId"),
+        "latestCandidateScore": _required_str(decision, "latestCandidateScore"),
+        "latestDecision": _required_str(decision, "decision"),
+        "operationId": _operation_id(
+            "serp-airflow-improvement-scoreboard-publish",
+            _required_str(decision, "operationId"),
+        ),
+        "publishedAt": _required_str(decision, "operationId"),
+        "rolloutDecisionId": _required_str(
+            _required_mapping(decision, "evidence"), "rolloutDecisionId"
+        ),
+        "status": "published",
+        "tenantId": _required_str(decision, "tenantId"),
+    }
+
+
+def _improvement_suite_result(suite_code: str, metric_family: str) -> dict[str, Any]:
+    return {
+        "gateStatus": "passed",
+        "metricFamily": metric_family,
+        "metricResults": _improvement_metric_results(metric_family),
+        "suiteCode": suite_code,
+        "suiteVersion": _DRY_RUN_SUITE_VERSION,
+    }
+
+
+def _improvement_metric_results(metric_family: str) -> list[dict[str, str]]:
+    if metric_family != "retrieval":
+        return [
+            {
+                "baselineScore": "0.9600",
+                "candidateScore": "0.9600",
+                "metric": f"{metric_family}:golden",
+                "metricFamily": metric_family,
+                "normalizedScore": "0.9600",
+            }
+        ]
+    return [
+        {
+            "baselineScore": "0.7800",
+            "candidateScore": "0.8000",
+            "metric": "nDCG@10",
+            "metricFamily": metric_family,
+            "normalizedScore": "0.8000",
+        },
+        {
+            "baselineScore": "0.7700",
+            "candidateScore": "0.7900",
+            "metric": "MRR@10",
+            "metricFamily": metric_family,
+            "normalizedScore": "0.7900",
+        },
+    ]
+
+
+def _validate_improvement_candidate_payload(candidate: Mapping[str, Any]) -> None:
+    selected_suite_ids = tuple(_required_str_list(candidate, "selectedSuiteIds"))
+    if selected_suite_ids != MANDATORY_SERP_BENCHMARK_SUITES:
+        raise ValueError("improvement candidate must include every mandatory suite")
+    by_cell: dict[tuple[str, str], Mapping[str, Any]] = {}
+    for suite in _required_object_list(candidate, "suiteResults"):
+        suite_code = _required_str(suite, "suiteCode")
+        metric_family = _required_str(suite, "metricFamily")
+        cell = (suite_code, metric_family)
+        if cell in by_cell:
+            raise ValueError(f"{suite_code}/{metric_family}: duplicate suite results")
+        by_cell[cell] = suite
+    for suite_code in selected_suite_ids:
+        for metric_family in _mandatory_metric_families():
+            suite = by_cell.get((suite_code, metric_family))
+            if suite is None:
+                raise ValueError(
+                    f"missing mandatory suite result {suite_code}/{metric_family}"
+                )
+            if _required_str(suite, "gateStatus") != "passed":
+                raise ValueError(
+                    f"{suite_code}/{metric_family}: gateStatus must be passed"
+                )
+            for metric in _required_object_list(suite, "metricResults"):
+                if _required_str(metric, "metricFamily") != metric_family:
+                    raise ValueError(
+                        f"{suite_code}/{metric_family}: metricFamily mismatch"
+                    )
+                if (
+                    _required_number_from_string(metric, "normalizedScore")
+                    < SERP_NORMALIZED_GATE_FLOOR
+                ):
+                    raise ValueError("improvement candidate score is below gate floor")
+    for constraint in _required_object_list(candidate, "constraintResults"):
+        if _required_str(constraint, "status") != "passed":
+            raise ValueError("improvement candidate constraint must pass")
+
+
+def _candidate_objective_improved(candidate: Mapping[str, Any]) -> bool:
+    for suite in _required_object_list(candidate, "suiteResults"):
+        for metric in _required_object_list(suite, "metricResults"):
+            metric_name = _required_str(metric, "metric")
+            if metric_name not in {"nDCG@10", "MRR@10"}:
+                continue
+            baseline = _required_number_from_string(metric, "baselineScore")
+            score = _required_number_from_string(metric, "candidateScore")
+            if score - baseline >= 0.01:
+                return True
+    return False
+
+
+def _minimum_normalized_score(suite_results: Sequence[Mapping[str, Any]]) -> str:
+    score = min(
+        _required_number_from_string(metric, "normalizedScore")
+        for suite in suite_results
+        for metric in _required_object_list(suite, "metricResults")
+    )
+    return f"{score:.4f}"
+
+
+def _mandatory_metric_families() -> tuple[str, str, str, str]:
+    return ("retrieval", "answer-quality", "citation", "policy")
+
+
+def _is_plan_payload(value: Mapping[str, Any] | str) -> bool:
+    payload = _json_object(value, "plan_json")
+    return payload.get("dag_id") == "serp_benchmark_improvement_wave"
 
 
 def _artifact_result(
@@ -976,10 +1429,27 @@ def _required_number(payload: Mapping[str, Any], field_name: str) -> float:
     return float(value)
 
 
+def _required_number_from_string(payload: Mapping[str, Any], field_name: str) -> float:
+    value = payload.get(field_name)
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        raise ValueError(f"{field_name} must be numeric")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{field_name} must be finite")
+    return number
+
+
 def _required_positive_int(payload: Mapping[str, Any], field_name: str) -> int:
     value = payload.get(field_name)
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{field_name} must be positive")
+    return value
+
+
+def _required_mapping(payload: Mapping[str, Any], field_name: str) -> Mapping[str, Any]:
+    value = payload.get(field_name)
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{field_name} must be an object")
     return value
 
 
