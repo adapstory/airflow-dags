@@ -7,13 +7,15 @@ from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
 
 from dags.serp_eval_contracts import (
+    build_nightly_benchmark_export_cli_spec,
+    build_nightly_registry_cli_spec,
+    build_nightly_registry_submit_cli_spec,
     build_nightly_regression_plan,
+    build_nightly_runner_cli_spec,
+    execute_gateway_cli_spec,
     governance_notification_pending,
     write_airflow_plan_artifact,
-    write_nightly_benchmark_export_artifact,
-    write_nightly_registry_receipts_artifact,
-    write_nightly_registry_submissions_artifact,
-    write_nightly_report_artifact,
+    write_nightly_suite_plan_artifact,
 )
 
 
@@ -21,6 +23,22 @@ def validate_nightly_regression_plan(**context: Any) -> str:
     dag_run = context.get("dag_run")
     conf = getattr(dag_run, "conf", None) or {}
     return write_airflow_plan_artifact(build_nightly_regression_plan(conf))
+
+
+def run_mandatory_benchmark_suites(plan_json: str) -> dict[str, Any]:
+    return execute_gateway_cli_spec(build_nightly_runner_cli_spec(plan_json))
+
+
+def build_c1_benchmark_gate_export(plan_json: str) -> dict[str, Any]:
+    return execute_gateway_cli_spec(build_nightly_benchmark_export_cli_spec(plan_json))
+
+
+def build_bc21_benchmark_run_submissions(plan_json: str) -> dict[str, Any]:
+    return execute_gateway_cli_spec(build_nightly_registry_cli_spec(plan_json))
+
+
+def submit_bc21_benchmark_run_submissions(plan_json: str) -> dict[str, Any]:
+    return execute_gateway_cli_spec(build_nightly_registry_submit_cli_spec(plan_json))
 
 
 default_args = {
@@ -45,31 +63,38 @@ validate_plan = PythonOperator(
     dag=dag,
 )
 
+write_suite_plan = PythonOperator(
+    task_id="write_nightly_suite_plan",
+    python_callable=write_nightly_suite_plan_artifact,
+    op_args=["{{ ti.xcom_pull(task_ids='validate_nightly_regression_plan') }}"],
+    dag=dag,
+)
+
 run_suites = PythonOperator(
     task_id="run_mandatory_benchmark_suites",
-    python_callable=write_nightly_report_artifact,
+    python_callable=run_mandatory_benchmark_suites,
     op_args=["{{ ti.xcom_pull(task_ids='validate_nightly_regression_plan') }}"],
     dag=dag,
 )
 
 build_benchmark_export = PythonOperator(
     task_id="build_c1_benchmark_gate_export",
-    python_callable=write_nightly_benchmark_export_artifact,
-    op_args=["{{ ti.xcom_pull(task_ids='run_mandatory_benchmark_suites') }}"],
+    python_callable=build_c1_benchmark_gate_export,
+    op_args=["{{ ti.xcom_pull(task_ids='validate_nightly_regression_plan') }}"],
     dag=dag,
 )
 
 build_submissions = PythonOperator(
     task_id="build_bc21_benchmark_run_submissions",
-    python_callable=write_nightly_registry_submissions_artifact,
-    op_args=["{{ ti.xcom_pull(task_ids='build_c1_benchmark_gate_export') }}"],
+    python_callable=build_bc21_benchmark_run_submissions,
+    op_args=["{{ ti.xcom_pull(task_ids='validate_nightly_regression_plan') }}"],
     dag=dag,
 )
 
 submit_submissions = PythonOperator(
     task_id="submit_bc21_benchmark_run_submissions",
-    python_callable=write_nightly_registry_receipts_artifact,
-    op_args=["{{ ti.xcom_pull(task_ids='build_bc21_benchmark_run_submissions') }}"],
+    python_callable=submit_bc21_benchmark_run_submissions,
+    op_args=["{{ ti.xcom_pull(task_ids='validate_nightly_regression_plan') }}"],
     dag=dag,
 )
 
@@ -80,4 +105,12 @@ notify_governance = PythonOperator(
     dag=dag,
 )
 
-validate_plan >> run_suites >> build_benchmark_export >> build_submissions >> submit_submissions >> notify_governance
+(
+    validate_plan
+    >> write_suite_plan
+    >> run_suites
+    >> build_benchmark_export
+    >> build_submissions
+    >> submit_submissions
+    >> notify_governance
+)

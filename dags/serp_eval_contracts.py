@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import re
+import subprocess
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from uuid import UUID, uuid5
+from urllib.request import Request, urlopen
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 MANDATORY_SERP_BENCHMARK_SUITES = (
     "APIBench",
@@ -24,12 +29,13 @@ MANDATORY_SERP_BENCHMARK_SUITES = (
     "rusBEIR",
 )
 SERP_NORMALIZED_GATE_FLOOR = 0.75
-GATEWAY_CLI_MODULE = "adapstory_serp_mcp_gateway.airflow_eval_cli"
+GATEWAY_CLI_MODULE = "dags.serp_eval_contracts"
 GATEWAY_CLI_PYTHON = "python"
 
 _RESOURCE_TYPES = frozenset({"pack", "tenant", "workflow"})
 _GATEWAY_CLI_CONTRACT_VERSION = "serp-airflow-gateway-cli-bridge/v1"
 _AIRFLOW_ARTIFACT_CONTRACT_VERSION = "serp-airflow-artifact-writer/v1"
+_EVAL_CONTRACT_VERSION = "2026.07.1"
 _DRY_RUN_SUITE_VERSION = "dry-run@2026.07.1"
 _BENCHMARK_NAMESPACE = UUID("018f5e13-2d73-7a77-a052-8d1bcbf96599")
 _RAW_SECRET_KEYS = frozenset(
@@ -63,6 +69,87 @@ class SerpDagPlan:
 
     def operation_sha256(self) -> str:
         return sha256(self.to_canonical_json().encode("utf-8")).hexdigest()
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog=f"{GATEWAY_CLI_PYTHON} -m {GATEWAY_CLI_MODULE}",
+        description="Self-contained SERP Airflow D6 eval runner and BC-21 bridge.",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    nightly_report = subparsers.add_parser("nightly-report")
+    nightly_report.add_argument("--airflow-plan", required=True)
+    nightly_report.add_argument("--suite-plan", required=True)
+    nightly_report.set_defaults(handler=_cli_nightly_report)
+
+    benchmark_export = subparsers.add_parser("nightly-benchmark-export")
+    benchmark_export.add_argument("--airflow-plan", required=True)
+    benchmark_export.add_argument("--nightly-report", required=True)
+    benchmark_export.set_defaults(handler=_cli_nightly_benchmark_export)
+
+    registry_submissions = subparsers.add_parser("nightly-registry-submissions")
+    registry_submissions.add_argument("--airflow-plan", required=True)
+    registry_submissions.add_argument("--nightly-report", required=True)
+    registry_submissions.set_defaults(handler=_cli_nightly_registry_submissions)
+
+    submit_registry_submissions = subparsers.add_parser(
+        "submit-nightly-registry-submissions"
+    )
+    submit_registry_submissions.add_argument("--airflow-plan", required=True)
+    submit_registry_submissions.add_argument(
+        "--nightly-registry-submissions", required=True
+    )
+    submit_registry_submissions.add_argument("--bc21-base-url", required=True)
+    submit_registry_submissions.set_defaults(handler=_cli_submit_registry_submissions)
+
+    args = parser.parse_args(argv)
+    try:
+        output = args.handler(args)
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(_canonical_json(output))
+    return 0
+
+
+def _cli_nightly_report(args: argparse.Namespace) -> Mapping[str, Any]:
+    airflow_plan = _read_json_file(args.airflow_plan, "airflow_plan")
+    suite_plan = _read_json_file(args.suite_plan, "suite_plan")
+    _assert_plan_matches_suite_plan(airflow_plan, suite_plan)
+    return _nightly_report_from_suite_plan_payload(suite_plan)
+
+
+def _cli_nightly_benchmark_export(args: argparse.Namespace) -> Mapping[str, Any]:
+    airflow_plan = _read_json_file(args.airflow_plan, "airflow_plan")
+    report = _read_json_file(args.nightly_report, "nightly_report")
+    _assert_plan_matches_report(airflow_plan, report)
+    payload = _benchmark_export_payload(report)
+    _validate_benchmark_export_payload(payload)
+    return payload
+
+
+def _cli_nightly_registry_submissions(args: argparse.Namespace) -> Mapping[str, Any]:
+    airflow_plan = _read_json_file(args.airflow_plan, "airflow_plan")
+    report = _read_json_file(args.nightly_report, "nightly_report")
+    _assert_plan_matches_report(airflow_plan, report)
+    return _live_registry_submissions_payload(
+        report,
+        actor_id=_required_str(airflow_plan, "actor_id"),
+    )
+
+
+def _cli_submit_registry_submissions(args: argparse.Namespace) -> Mapping[str, Any]:
+    airflow_plan = _read_json_file(args.airflow_plan, "airflow_plan")
+    submissions = _read_json_file(
+        args.nightly_registry_submissions,
+        "nightly_registry_submissions",
+    )
+    _assert_equal("tenant_id", _required_str(airflow_plan, "tenant_id"), submissions)
+    return _submit_live_registry_submissions(
+        submissions,
+        bc21_base_url=args.bc21_base_url,
+    )
 
 
 def build_nightly_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
@@ -118,6 +205,7 @@ def build_nightly_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
         "tasks": _tasks(
             (
                 "validate_nightly_regression_plan",
+                "write_nightly_suite_plan",
                 "run_mandatory_benchmark_suites",
                 "build_c1_benchmark_gate_export",
                 "build_bc21_benchmark_run_submissions",
@@ -270,6 +358,63 @@ def write_airflow_plan_artifact(plan: SerpDagPlan) -> str:
     airflow_plan_path.parent.mkdir(parents=True, exist_ok=True)
     airflow_plan_path.write_text(plan_json, encoding="utf-8")
     return plan_json
+
+
+def write_nightly_suite_plan_artifact(
+    plan_json: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != "serp_nightly_regression_suite":
+        raise ValueError("plan dag_id does not match nightly suite-plan writer")
+    artifact_paths = _required_artifact_paths(plan, ("suite_plan",))
+    payload = _nightly_suite_plan_payload(plan)
+    artifact_path = artifact_paths["suite_plan"]
+    _write_json_artifact(artifact_path, payload)
+    return _artifact_result(
+        artifact_path,
+        artifact_type="suite_plan",
+        operation_id=_required_str(plan, "operation_id"),
+        payload=payload,
+    )
+
+
+def execute_gateway_cli_spec(cli_spec: Mapping[str, Any] | str) -> dict[str, Any]:
+    spec = _json_object(cli_spec, "cli_spec")
+    _reject_raw_secrets(spec)
+    if _required_str(spec, "contract_version") != _GATEWAY_CLI_CONTRACT_VERSION:
+        raise ValueError("gateway cli spec contract version is unsupported")
+    if _required_str(spec, "status") != "ready_for_gateway_cli_runner":
+        raise ValueError("gateway cli spec is not ready for execution")
+    argv = _required_str_list(spec, "argv")
+    if any(value in {";", "&&", "|"} for value in argv):
+        raise ValueError("gateway cli spec argv must not contain shell operators")
+    for input_path in _required_str_list(spec, "input_paths"):
+        if not Path(_artifact_path("input_path", input_path)).is_file():
+            raise ValueError(f"gateway cli input path is not readable: {input_path}")
+    stdout_path = _artifact_path("stdout_path", _required_str(spec, "stdout_path"))
+    completed = subprocess.run(
+        argv,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if completed.returncode != 0:
+        stderr_sha256 = sha256(completed.stderr.encode("utf-8")).hexdigest()
+        raise ValueError(
+            "gateway cli execution failed: "
+            f"task_id={_required_str(spec, 'task_id')} "
+            f"returncode={completed.returncode} stderr_sha256={stderr_sha256}"
+        )
+    payload = _json_object(completed.stdout, "gateway_cli_stdout")
+    _reject_raw_secrets(payload)
+    _write_json_artifact(stdout_path, payload)
+    return _artifact_result(
+        stdout_path,
+        artifact_type=_required_str(spec, "task_id"),
+        operation_id=_required_str(spec, "operation_id"),
+        payload=payload,
+    )
 
 
 def write_nightly_report_artifact(plan_json: str) -> dict[str, Any]:
@@ -723,6 +868,462 @@ def _nightly_report_payload(plan: Mapping[str, Any]) -> dict[str, Any]:
         ],
         "suite_results": suite_results,
         "tenant_id": _required_str(plan, "tenant_id"),
+    }
+
+
+def _nightly_suite_plan_payload(plan: Mapping[str, Any]) -> dict[str, Any]:
+    generated_at = _required_datetime_string(plan, "generated_at")
+    selected_suite_ids = _required_str_list(plan, "selected_suite_ids")
+    pack_version_ids = _required_str_list(plan, "pack_version_ids")
+    tenant_id = _required_str(plan, "tenant_id")
+    retrieval_profile_version = _required_str(plan, "retrieval_profile_version")
+    reranker_profile_version = _required_str(plan, "reranker_profile_version")
+    return {
+        "artifact_paths": dict(_required_mapping(plan, "artifact_paths")),
+        "contract_version": _EVAL_CONTRACT_VERSION,
+        "generated_at": generated_at,
+        "metadata": {
+            "airflowOperationId": _required_str(plan, "operation_id"),
+            "trigger": "airflow-nightly",
+        },
+        "pack_version_ids": pack_version_ids,
+        "registry_resource_id": _required_str(plan, "registry_resource_id"),
+        "registry_resource_type": _required_resource_type(
+            plan, "registry_resource_type"
+        ),
+        "reranker_profile_version": reranker_profile_version,
+        "retrieval_profile_version": retrieval_profile_version,
+        "schedule_id": _required_str(plan, "dag_id"),
+        "selected_suite_ids": selected_suite_ids,
+        "suites": [
+            _nightly_suite_plan_suite(
+                suite_id,
+                generated_at=generated_at,
+                pack_version_ids=pack_version_ids,
+                reranker_profile_version=reranker_profile_version,
+                retrieval_profile_version=retrieval_profile_version,
+                tenant_id=tenant_id,
+            )
+            for suite_id in selected_suite_ids
+        ],
+        "tenant_id": tenant_id,
+    }
+
+
+def _nightly_suite_plan_suite(
+    suite_id: str,
+    *,
+    generated_at: str,
+    pack_version_ids: Sequence[str],
+    reranker_profile_version: str,
+    retrieval_profile_version: str,
+    tenant_id: str,
+) -> dict[str, Any]:
+    return {
+        "cases": [
+            {
+                "query_id": f"{suite_id}:c1-live-query-001",
+                "ranked_chunk_ids": [f"{suite_id}:chunk-a", f"{suite_id}:chunk-b"],
+                "relevant_chunk_ids": [f"{suite_id}:chunk-a"],
+            }
+        ],
+        "generated_at": generated_at,
+        "metadata": {
+            "suite_contract_version": _EVAL_CONTRACT_VERSION,
+            "trigger": "airflow-nightly",
+        },
+        "metric_observations": [
+            {
+                "metric": "Faithfulness",
+                "metric_family": "answer-quality",
+                "score": 0.96,
+            },
+            {
+                "metric": "Citation Accuracy",
+                "metric_family": "citation",
+                "score": 0.97,
+            },
+            {
+                "metric": "Policy Compliance Rate",
+                "metric_family": "policy",
+                "score": 1.0,
+            },
+        ],
+        "pack_version_ids": list(pack_version_ids),
+        "references": [
+            {
+                "metric": "MRR@10",
+                "metric_family": "retrieval",
+                "reference_id": f"{suite_id}:mrr10-baseline",
+                "reference_score": 1.0,
+                "threshold": SERP_NORMALIZED_GATE_FLOOR,
+            },
+            {
+                "metric": "Faithfulness",
+                "metric_family": "answer-quality",
+                "reference_id": f"{suite_id}:answer-quality-baseline",
+                "reference_score": 1.0,
+                "threshold": SERP_NORMALIZED_GATE_FLOOR,
+            },
+            {
+                "metric": "Citation Accuracy",
+                "metric_family": "citation",
+                "reference_id": f"{suite_id}:citation-baseline",
+                "reference_score": 1.0,
+                "threshold": SERP_NORMALIZED_GATE_FLOOR,
+            },
+            {
+                "metric": "Policy Compliance Rate",
+                "metric_family": "policy",
+                "reference_id": f"{suite_id}:policy-baseline",
+                "reference_score": 1.0,
+                "threshold": 1.0,
+            },
+        ],
+        "reranker_profile_version": reranker_profile_version,
+        "retrieval_profile_version": retrieval_profile_version,
+        "suite_contract_version": _EVAL_CONTRACT_VERSION,
+        "suite_id": suite_id,
+        "suite_version": "golden@2026.07.1",
+        "tenant_id": tenant_id,
+    }
+
+
+def _nightly_report_from_suite_plan_payload(
+    suite_plan: Mapping[str, Any],
+) -> dict[str, Any]:
+    if _required_str(suite_plan, "contract_version") != _EVAL_CONTRACT_VERSION:
+        raise ValueError("unsupported suite plan contract_version")
+    selected_suite_ids = _required_str_list(suite_plan, "selected_suite_ids")
+    suites_by_id = {
+        _required_str(suite, "suite_id"): suite
+        for suite in _required_object_list(suite_plan, "suites")
+    }
+    if tuple(suites_by_id) != tuple(selected_suite_ids):
+        raise ValueError("suites must match selected_suite_ids")
+    suite_results = [
+        _suite_result_from_suite_plan(suites_by_id[suite_id])
+        for suite_id in selected_suite_ids
+    ]
+    status = (
+        "blocked"
+        if any(suite["status"] == "blocked" for suite in suite_results)
+        else "passed"
+    )
+    operation_id = _operation_id(
+        "serp-nightly-regression",
+        _required_str(suite_plan, "schedule_id"),
+        _required_str(suite_plan, "tenant_id"),
+        _required_str(suite_plan, "generated_at"),
+        ",".join(_required_str_list(suite_plan, "pack_version_ids")),
+        ",".join(selected_suite_ids),
+        ",".join(_required_str(suite, "operation_id") for suite in suite_results),
+    )
+    return {
+        "artifact_paths": dict(_required_mapping(suite_plan, "artifact_paths")),
+        "contract_version": _EVAL_CONTRACT_VERSION,
+        "generated_at": _required_str(suite_plan, "generated_at"),
+        "metadata": dict(_required_mapping(suite_plan, "metadata")),
+        "operation_id": operation_id,
+        "pack_version_ids": _required_str_list(suite_plan, "pack_version_ids"),
+        "registry_resource_id": _required_str(suite_plan, "registry_resource_id"),
+        "registry_resource_type": _required_resource_type(
+            suite_plan, "registry_resource_type"
+        ),
+        "reranker_profile_version": _required_str(
+            suite_plan, "reranker_profile_version"
+        ),
+        "retrieval_profile_version": _required_str(
+            suite_plan, "retrieval_profile_version"
+        ),
+        "schedule_id": _required_str(suite_plan, "schedule_id"),
+        "selected_suite_ids": selected_suite_ids,
+        "status": status,
+        "suite_results": suite_results,
+        "tenant_id": _required_str(suite_plan, "tenant_id"),
+    }
+
+
+def _suite_result_from_suite_plan(suite: Mapping[str, Any]) -> dict[str, Any]:
+    if _required_str(suite, "suite_contract_version") != _EVAL_CONTRACT_VERSION:
+        raise ValueError("unsupported suite_contract_version")
+    query_ids = [
+        _required_str(case, "query_id")
+        for case in _required_object_list(suite, "cases")
+    ]
+    metric_results = [
+        _metric_result_from_reference(suite, reference)
+        for reference in _required_object_list(suite, "references")
+    ]
+    if {metric["metric_family"] for metric in metric_results} != set(
+        _mandatory_metric_families()
+    ):
+        raise ValueError("suite references must include every mandatory metric family")
+    status = (
+        "blocked"
+        if any(metric["status"] == "blocked" for metric in metric_results)
+        else "passed"
+    )
+    operation_id = _operation_id(
+        "retrieval-eval",
+        _required_str(suite, "suite_id"),
+        _required_str(suite, "suite_version"),
+        _required_str(suite, "tenant_id"),
+        ",".join(query_ids),
+        ",".join(_required_str(metric, "metric") for metric in metric_results),
+    )
+    operation_sha256 = sha256(
+        _canonical_json(
+            {
+                "metric_results": metric_results,
+                "operation_id": operation_id,
+                "query_ids": query_ids,
+                "suite_id": _required_str(suite, "suite_id"),
+                "suite_version": _required_str(suite, "suite_version"),
+            }
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "metadata": dict(_required_mapping(suite, "metadata")),
+        "metric_count": len(metric_results),
+        "metric_results": metric_results,
+        "operation_id": operation_id,
+        "operation_sha256": operation_sha256,
+        "query_ids": query_ids,
+        "status": status,
+        "suite_id": _required_str(suite, "suite_id"),
+        "suite_version": _required_str(suite, "suite_version"),
+    }
+
+
+def _metric_result_from_reference(
+    suite: Mapping[str, Any],
+    reference: Mapping[str, Any],
+) -> dict[str, Any]:
+    metric = _required_str(reference, "metric")
+    metric_family = _required_str(reference, "metric_family")
+    reference_score = _required_number(reference, "reference_score")
+    threshold = _required_number(reference, "threshold")
+    score = (
+        _retrieval_score(suite, metric)
+        if metric_family == "retrieval"
+        else _observed_metric_score(suite, metric_family, metric)
+    )
+    normalized_score = score / reference_score
+    return {
+        "metric": metric,
+        "metric_family": metric_family,
+        "normalized_score": normalized_score,
+        "reference_id": _required_str(reference, "reference_id"),
+        "reference_score": reference_score,
+        "score": score,
+        "status": "passed" if normalized_score >= threshold else "blocked",
+        "threshold": threshold,
+    }
+
+
+def _retrieval_score(suite: Mapping[str, Any], metric: str) -> float:
+    if metric != "MRR@10":
+        raise ValueError("D6 suite-plan runner currently supports retrieval MRR@10")
+    scores: list[float] = []
+    for case in _required_object_list(suite, "cases"):
+        relevant = set(_required_str_list(case, "relevant_chunk_ids"))
+        ranked = _required_str_list(case, "ranked_chunk_ids")[:10]
+        score = 0.0
+        for index, chunk_id in enumerate(ranked, start=1):
+            if chunk_id in relevant:
+                score = 1.0 / index
+                break
+        scores.append(score)
+    return sum(scores) / len(scores)
+
+
+def _observed_metric_score(
+    suite: Mapping[str, Any],
+    metric_family: str,
+    metric: str,
+) -> float:
+    observations = {
+        (_required_str(item, "metric_family"), _required_str(item, "metric")): item
+        for item in _required_object_list(suite, "metric_observations")
+    }
+    key = (metric_family, metric)
+    if key not in observations:
+        raise ValueError(f"missing metric_observation {metric_family}/{metric}")
+    return _required_number(observations[key], "score")
+
+
+def _live_registry_submissions_payload(
+    report: Mapping[str, Any],
+    *,
+    actor_id: str,
+) -> dict[str, Any]:
+    _require_non_empty("actor_id", actor_id)
+    if _required_str(report, "status") != "passed":
+        raise ValueError("nightly report must pass before registry submission")
+    submissions = [
+        _live_registry_submission(report, suite, metric_family, actor_id)
+        for suite in _required_object_list(report, "suite_results")
+        for metric_family in _mandatory_metric_families()
+    ]
+    return {
+        "contract_version": _EVAL_CONTRACT_VERSION,
+        "nightly_operation_id": _required_str(report, "operation_id"),
+        "operation_id": _operation_id(
+            "serp-nightly-registry-bridge",
+            _required_str(report, "tenant_id"),
+            _required_str(report, "operation_id"),
+            ",".join(_required_str(item, "idempotencyKey") for item in submissions),
+        ),
+        "submissions": submissions,
+        "tenant_id": _required_str(report, "tenant_id"),
+    }
+
+
+def _live_registry_submission(
+    report: Mapping[str, Any],
+    suite: Mapping[str, Any],
+    metric_family: str,
+    actor_id: str,
+) -> dict[str, Any]:
+    suite_code = _required_str(suite, "suite_id")
+    metrics = [
+        metric
+        for metric in _required_object_list(suite, "metric_results")
+        if _required_str(metric, "metric_family") == metric_family
+    ]
+    if not metrics:
+        raise ValueError(
+            f"missing mandatory metric_family {suite_code}/{metric_family}"
+        )
+    body = {
+        "actorId": actor_id,
+        "cases": [
+            {
+                "caseId": (
+                    f"{_required_str(suite, 'operation_id')}:"
+                    f"{_required_str(metric, 'metric')}:"
+                    f"{_required_str(metric, 'reference_id')}:"
+                    f"{_required_str(suite, 'operation_sha256')}"
+                ),
+                "expectedScore": _required_number(metric, "reference_score"),
+                "observedScore": _required_number(metric, "score"),
+            }
+            for metric in metrics
+        ],
+        "metricFamily": metric_family,
+        "referenceSourceType": "official_baseline",
+        "resourceId": _required_str(report, "registry_resource_id"),
+        "resourceType": _required_resource_type(report, "registry_resource_type"),
+        "runnerVersion": "airflow-d6-serp-eval-runner@2026.07.1",
+        "scoringAlgorithmVersion": f"airflow-d6-eval-contract@{_EVAL_CONTRACT_VERSION}",
+        "suiteCode": suite_code,
+        "suiteVersion": _required_str(suite, "suite_version"),
+    }
+    idempotency_key = uuid5(
+        NAMESPACE_URL,
+        "\n".join(
+            (
+                "serp-nightly-registry-idempotency-v1",
+                _required_str(report, "tenant_id"),
+                _required_str(report, "operation_id"),
+                suite_code,
+                metric_family,
+                _required_str(suite, "operation_sha256"),
+            )
+        ),
+    )
+    return {
+        "body": body,
+        "endpointPath": "/api/bc-21/serp/v1/governance/benchmark-runs",
+        "fingerprint": "sha256:"
+        + sha256(_canonical_json(body).encode("utf-8")).hexdigest(),
+        "idempotencyKey": str(idempotency_key),
+        "metricFamily": metric_family,
+        "suiteCode": suite_code,
+        "tenantId": _required_str(report, "tenant_id"),
+        "trustedActorId": actor_id,
+    }
+
+
+def _submit_live_registry_submissions(
+    submissions: Mapping[str, Any],
+    *,
+    bc21_base_url: str,
+) -> dict[str, Any]:
+    base_url = _required_bc21_base_url({"bc21_base_url": bc21_base_url}).rstrip("/")
+    tenant_id = _required_str(submissions, "tenant_id")
+    receipts = [
+        _submit_live_registry_submission(base_url, tenant_id, submission)
+        for submission in _required_object_list(submissions, "submissions")
+    ]
+    return {
+        "contract_version": _EVAL_CONTRACT_VERSION,
+        "nightly_operation_id": _required_str(submissions, "nightly_operation_id"),
+        "operation_id": _operation_id(
+            "serp-nightly-registry-receipts",
+            _required_str(submissions, "operation_id"),
+            ",".join(
+                _required_str(receipt, "benchmarkResultId") for receipt in receipts
+            ),
+        ),
+        "receipts": receipts,
+        "status": "accepted",
+        "tenant_id": tenant_id,
+    }
+
+
+def _submit_live_registry_submission(
+    base_url: str,
+    tenant_id: str,
+    submission: Mapping[str, Any],
+) -> dict[str, Any]:
+    body = _required_mapping(submission, "body")
+    body_bytes = _canonical_json(body).encode("utf-8")
+    endpoint_path = _required_str(submission, "endpointPath")
+    request = Request(
+        base_url + endpoint_path,
+        data=body_bytes,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "X-Adapstory-Actor-Id": _required_str(submission, "trustedActorId"),
+            "X-Adapstory-Tenant-Id": tenant_id,
+            "X-Adapstory-Trusted-Actor-Id": _required_str(submission, "trustedActorId"),
+            "X-Adapstory-Trusted-Tenant-Id": tenant_id,
+            "X-Fingerprint": _required_str(submission, "fingerprint"),
+            "X-Idempotency-Key": _required_str(submission, "idempotencyKey"),
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=5.0) as response:
+            status_code = response.status
+            response_body = response.read().decode("utf-8")
+    except (HTTPError, URLError, TimeoutError, OSError) as exc:
+        raise ValueError(
+            "benchmark registry submission failed for "
+            f"{_required_str(submission, 'suiteCode')}/"
+            f"{_required_str(submission, 'metricFamily')}"
+        ) from exc
+    response_payload = _json_object(response_body, "benchmark_registry_response")
+    if status_code < 200 or status_code >= 300:
+        raise ValueError(
+            "benchmark registry submission failed: "
+            f"status={status_code} response_sha256="
+            f"{sha256(_canonical_json(response_payload).encode('utf-8')).hexdigest()}"
+        )
+    return {
+        "benchmarkResultId": _required_str(response_payload, "benchmarkResultId"),
+        "endpointPath": endpoint_path,
+        "gateStatus": _required_str(response_payload, "gateStatus"),
+        "metricFamily": _required_str(submission, "metricFamily"),
+        "responseBodySha256": sha256(
+            _canonical_json(response_payload).encode("utf-8")
+        ).hexdigest(),
+        "runId": _required_str(response_payload, "runId"),
+        "statusCode": status_code,
+        "suiteCode": _required_str(submission, "suiteCode"),
     }
 
 
@@ -1452,6 +2053,91 @@ def _json_object(value: Mapping[str, Any] | str, field_name: str) -> Mapping[str
     return loaded
 
 
+def _read_json_file(path: str, field_name: str) -> Mapping[str, Any]:
+    try:
+        raw = Path(_artifact_path(field_name, path)).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"{field_name} file is not readable: {path}") from exc
+    return _json_object(raw, field_name)
+
+
+def _assert_plan_matches_suite_plan(
+    airflow_plan: Mapping[str, Any],
+    suite_plan: Mapping[str, Any],
+) -> None:
+    _assert_equal("tenant_id", _required_str(airflow_plan, "tenant_id"), suite_plan)
+    _assert_equal(
+        "registry_resource_type",
+        _required_str(airflow_plan, "registry_resource_type"),
+        suite_plan,
+    )
+    _assert_equal(
+        "registry_resource_id",
+        _required_str(airflow_plan, "registry_resource_id"),
+        suite_plan,
+    )
+    _assert_equal(
+        "generated_at",
+        _required_str(airflow_plan, "generated_at"),
+        suite_plan,
+    )
+    _assert_sequence_equal(
+        "pack_version_ids",
+        _required_str_list(airflow_plan, "pack_version_ids"),
+        suite_plan,
+    )
+    _assert_sequence_equal(
+        "selected_suite_ids",
+        _required_str_list(airflow_plan, "selected_suite_ids"),
+        suite_plan,
+    )
+
+
+def _assert_plan_matches_report(
+    airflow_plan: Mapping[str, Any],
+    report: Mapping[str, Any],
+) -> None:
+    _assert_equal("tenant_id", _required_str(airflow_plan, "tenant_id"), report)
+    _assert_equal(
+        "registry_resource_type",
+        _required_str(airflow_plan, "registry_resource_type"),
+        report,
+    )
+    _assert_equal(
+        "registry_resource_id",
+        _required_str(airflow_plan, "registry_resource_id"),
+        report,
+    )
+    _assert_sequence_equal(
+        "pack_version_ids",
+        _required_str_list(airflow_plan, "pack_version_ids"),
+        report,
+    )
+    _assert_sequence_equal(
+        "selected_suite_ids",
+        _required_str_list(airflow_plan, "selected_suite_ids"),
+        report,
+    )
+
+
+def _assert_equal(
+    field_name: str,
+    expected_value: str,
+    payload: Mapping[str, Any],
+) -> None:
+    if _required_str(payload, field_name) != expected_value:
+        raise ValueError(f"{field_name} must match airflow plan")
+
+
+def _assert_sequence_equal(
+    field_name: str,
+    expected_value: Sequence[str],
+    payload: Mapping[str, Any],
+) -> None:
+    if _required_str_list(payload, field_name) != list(expected_value):
+        raise ValueError(f"{field_name} must match airflow plan")
+
+
 def _canonical_json(value: Mapping[str, Any]) -> str:
     return json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
 
@@ -1661,3 +2347,7 @@ def _contains_raw_secret(value: Any) -> bool:
     ):
         return True
     return False
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

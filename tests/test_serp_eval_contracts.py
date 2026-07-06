@@ -24,6 +24,7 @@ from dags.serp_eval_contracts import (
     build_tenant_golden_runner_cli_spec,
     evaluate_nightly_regression_gate,
     evaluate_tenant_golden_gate,
+    execute_gateway_cli_spec,
     write_airflow_plan_artifact,
     write_benchmark_improvement_decision_artifact,
     write_benchmark_improvement_scoreboard_artifact,
@@ -33,6 +34,7 @@ from dags.serp_eval_contracts import (
     write_nightly_registry_receipts_artifact,
     write_nightly_registry_submissions_artifact,
     write_nightly_report_artifact,
+    write_nightly_suite_plan_artifact,
 )
 
 TENANT_ID = "00000000-0000-4000-a000-000000000001"
@@ -77,6 +79,7 @@ def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:
     assert plan.payload["selected_suite_ids"] == list(MANDATORY_SERP_BENCHMARK_SUITES)
     assert [task["task_id"] for task in plan.payload["tasks"]] == [
         "validate_nightly_regression_plan",
+        "write_nightly_suite_plan",
         "run_mandatory_benchmark_suites",
         "build_c1_benchmark_gate_export",
         "build_bc21_benchmark_run_submissions",
@@ -116,7 +119,7 @@ def test_build_nightly_gateway_cli_specs_are_file_based_and_deterministic() -> N
     assert runner["argv"] == [
         "python",
         "-m",
-        "adapstory_serp_mcp_gateway.airflow_eval_cli",
+        "dags.serp_eval_contracts",
         "nightly-report",
         "--airflow-plan",
         plan.payload["artifact_paths"]["airflow_plan"],
@@ -134,7 +137,7 @@ def test_build_nightly_gateway_cli_specs_are_file_based_and_deterministic() -> N
     assert benchmark_export["argv"] == [
         "python",
         "-m",
-        "adapstory_serp_mcp_gateway.airflow_eval_cli",
+        "dags.serp_eval_contracts",
         "nightly-benchmark-export",
         "--airflow-plan",
         plan.payload["artifact_paths"]["airflow_plan"],
@@ -155,7 +158,7 @@ def test_build_nightly_gateway_cli_specs_are_file_based_and_deterministic() -> N
     assert submissions["argv"] == [
         "python",
         "-m",
-        "adapstory_serp_mcp_gateway.airflow_eval_cli",
+        "dags.serp_eval_contracts",
         "nightly-registry-submissions",
         "--airflow-plan",
         plan.payload["artifact_paths"]["airflow_plan"],
@@ -172,7 +175,7 @@ def test_build_nightly_gateway_cli_specs_are_file_based_and_deterministic() -> N
     assert submit["argv"] == [
         "python",
         "-m",
-        "adapstory_serp_mcp_gateway.airflow_eval_cli",
+        "dags.serp_eval_contracts",
         "submit-nightly-registry-submissions",
         "--airflow-plan",
         plan.payload["artifact_paths"]["airflow_plan"],
@@ -187,7 +190,7 @@ def test_build_nightly_gateway_cli_specs_are_file_based_and_deterministic() -> N
     )
 
 
-def test_nightly_d6_airflow_path_writes_gate_export_and_dry_run_receipts(
+def test_nightly_d6_airflow_path_writes_suite_plan_for_gateway_runner(
     tmp_path: Path,
 ) -> None:
     conf = _nightly_conf()
@@ -195,38 +198,84 @@ def test_nightly_d6_airflow_path_writes_gate_export_and_dry_run_receipts(
     plan = build_nightly_regression_plan(conf)
     plan_json = write_airflow_plan_artifact(plan)
 
+    suite_plan_artifact = write_nightly_suite_plan_artifact(json.loads(plan_json))
+
+    suite_plan_path = Path(str(suite_plan_artifact["artifactPath"]))
+    assert suite_plan_path.exists()
+    suite_plan = suite_plan_artifact["payload"]
+    assert suite_plan["contract_version"] == "2026.07.1"
+    assert suite_plan["schedule_id"] == "serp_nightly_regression_suite"
+    assert suite_plan["selected_suite_ids"] == list(MANDATORY_SERP_BENCHMARK_SUITES)
+    assert [suite["suite_id"] for suite in suite_plan["suites"]] == list(
+        MANDATORY_SERP_BENCHMARK_SUITES
+    )
+    assert all(len(suite["references"]) == 4 for suite in suite_plan["suites"])
+    assert all(len(suite["metric_observations"]) == 3 for suite in suite_plan["suites"])
+
+
+def test_execute_gateway_cli_spec_runs_without_shell_and_persists_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    input_path = tmp_path / "airflow-plan.json"
+    output_path = tmp_path / "nightly-report.json"
+    input_path.write_text("{}", encoding="utf-8")
+    payload = {"status": "accepted", "tenant_id": TENANT_ID}
+    calls: list[object] = []
+
+    def fake_run(
+        argv: list[str],
+        *,
+        capture_output: bool,
+        check: bool,
+        text: bool,
+    ) -> object:
+        calls.append((argv, capture_output, check, text))
+
+        class Result:
+            returncode = 0
+            stdout = json.dumps(payload)
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr("dags.serp_eval_contracts.subprocess.run", fake_run)
+
+    result = execute_gateway_cli_spec(
+        {
+            "argv": ["python", "-m", "safe.module", "run"],
+            "contract_version": "serp-airflow-gateway-cli-bridge/v1",
+            "dag_id": "serp_nightly_regression_suite",
+            "input_paths": [str(input_path)],
+            "operation_id": "op-1",
+            "status": "ready_for_gateway_cli_runner",
+            "stdout_path": str(output_path),
+            "task_id": "run_mandatory_benchmark_suites",
+            "tenant_id": TENANT_ID,
+        }
+    )
+
+    assert calls == [(["python", "-m", "safe.module", "run"], True, False, True)]
+    assert output_path.exists()
+    assert json.loads(output_path.read_text(encoding="utf-8")) == payload
+    assert result["payload"] == payload
+    assert result["artifactPath"] == str(output_path)
+
+
+def test_explicit_nightly_dry_run_fallback_still_writes_marked_receipts(
+    tmp_path: Path,
+) -> None:
+    conf = _nightly_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    plan_json = write_airflow_plan_artifact(build_nightly_regression_plan(conf))
     report_artifact = write_nightly_report_artifact(json.loads(plan_json))
     export_artifact = write_nightly_benchmark_export_artifact(report_artifact)
     submissions_artifact = write_nightly_registry_submissions_artifact(export_artifact)
     receipts_artifact = write_nightly_registry_receipts_artifact(submissions_artifact)
 
-    report_path = Path(str(report_artifact["artifactPath"]))
-    export_path = Path(str(export_artifact["artifactPath"]))
-    receipts_path = Path(str(receipts_artifact["artifactPath"]))
-    assert report_path.exists()
-    assert export_path.exists()
-    assert receipts_path.exists()
-
-    export_payload = export_artifact["payload"]
-    suite_codes = [item["suiteCode"] for item in export_payload["items"]]
-    assert suite_codes == list(MANDATORY_SERP_BENCHMARK_SUITES)
-    assert all(item["gateStatus"] == "passed" for item in export_payload["items"])
-    assert all(
-        float(item["normalizedScore"]) >= SERP_NORMALIZED_GATE_FLOOR
-        for item in export_payload["items"]
-    )
-    assert all(item["benchmarkResultId"] for item in export_payload["items"])
-    assert all(item["evidenceBundleId"] for item in export_payload["items"])
-    assert all(item["runId"] for item in export_payload["items"])
-    assert all(item["sourceEvidenceBundleId"] for item in export_payload["items"])
-
-    stored_export = json.loads(export_path.read_text(encoding="utf-8"))
-    assert stored_export == export_payload
-
     receipts_payload = receipts_artifact["payload"]
     assert receipts_payload["status"] == "dry_run_accepted"
     assert receipts_payload["dryRun"] is True
-    assert len(receipts_payload["receipts"]) == len(MANDATORY_SERP_BENCHMARK_SUITES)
 
 
 def test_evaluate_nightly_regression_gate_blocks_below_normalized_floor() -> None:
@@ -319,7 +368,7 @@ def test_build_tenant_golden_gateway_cli_specs_are_file_based_and_deterministic(
     assert runner["argv"] == [
         "python",
         "-m",
-        "adapstory_serp_mcp_gateway.airflow_eval_cli",
+        "dags.serp_eval_contracts",
         "tenant-golden-report",
         "--airflow-plan",
         plan.payload["artifact_paths"]["airflow_plan"],
@@ -335,7 +384,7 @@ def test_build_tenant_golden_gateway_cli_specs_are_file_based_and_deterministic(
     assert submissions["argv"] == [
         "python",
         "-m",
-        "adapstory_serp_mcp_gateway.airflow_eval_cli",
+        "dags.serp_eval_contracts",
         "tenant-golden-registry-submissions",
         "--airflow-plan",
         plan.payload["artifact_paths"]["airflow_plan"],
@@ -453,7 +502,7 @@ def test_build_benchmark_improvement_gateway_cli_specs_are_file_based_and_determ
     assert candidate_eval["argv"] == [
         "python",
         "-m",
-        "adapstory_serp_mcp_gateway.airflow_eval_cli",
+        "dags.serp_eval_contracts",
         "benchmark-improvement-candidate-eval",
         "--airflow-plan",
         plan.payload["artifact_paths"]["airflow_plan"],
@@ -470,7 +519,7 @@ def test_build_benchmark_improvement_gateway_cli_specs_are_file_based_and_determ
     assert decision["argv"] == [
         "python",
         "-m",
-        "adapstory_serp_mcp_gateway.airflow_eval_cli",
+        "dags.serp_eval_contracts",
         "benchmark-improvement-decision",
         "--airflow-plan",
         plan.payload["artifact_paths"]["airflow_plan"],
@@ -489,7 +538,7 @@ def test_build_benchmark_improvement_gateway_cli_specs_are_file_based_and_determ
     assert scoreboard["argv"] == [
         "python",
         "-m",
-        "adapstory_serp_mcp_gateway.airflow_eval_cli",
+        "dags.serp_eval_contracts",
         "benchmark-improvement-scoreboard",
         "--airflow-plan",
         plan.payload["artifact_paths"]["airflow_plan"],
@@ -650,6 +699,7 @@ def test_build_benchmark_improvement_wave_plan_rejects_raw_secret_metadata() -> 
             "serp_nightly_regression_suite",
             [
                 "validate_nightly_regression_plan",
+                "write_nightly_suite_plan",
                 "run_mandatory_benchmark_suites",
                 "build_c1_benchmark_gate_export",
                 "build_bc21_benchmark_run_submissions",
@@ -710,16 +760,18 @@ def test_serp_dag_files_import_helpers_from_packaged_dags_namespace() -> None:
         assert "from serp_eval_contracts import" not in source
 
 
-def test_serp_nightly_dag_uses_artifact_writers_for_d6_path() -> None:
+def test_serp_nightly_dag_uses_live_gateway_cli_for_d6_path() -> None:
     source = (REPO_ROOT / "dags" / "serp_nightly_regression_suite.py").read_text(
         encoding="utf-8"
     )
 
-    assert "write_nightly_report_artifact" in source
-    assert "write_nightly_benchmark_export_artifact" in source
-    assert "write_nightly_registry_submissions_artifact" in source
-    assert "write_nightly_registry_receipts_artifact" in source
-    assert "build_nightly_benchmark_export_cli_spec" not in source
+    assert "write_nightly_suite_plan_artifact" in source
+    assert "execute_gateway_cli_spec" in source
+    assert "build_nightly_runner_cli_spec" in source
+    assert "build_nightly_benchmark_export_cli_spec" in source
+    assert "build_nightly_registry_submit_cli_spec" in source
+    assert "write_nightly_report_artifact" not in source
+    assert "write_nightly_registry_receipts_artifact" not in source
 
 
 def test_serp_improvement_dag_uses_native_artifact_writers_for_d19_path() -> None:
