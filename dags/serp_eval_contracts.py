@@ -1405,6 +1405,7 @@ def _benchmark_export_payload(report: Mapping[str, Any]) -> dict[str, Any]:
         "items": items,
         "normalizedGateFloor": f"{SERP_NORMALIZED_GATE_FLOOR:.4f}",
         "operationId": _required_str(report, "operation_id"),
+        "packVersionIds": _required_str_list(report, "pack_version_ids"),
         "status": "passed",
         "tenantId": _required_str(report, "tenant_id"),
     }
