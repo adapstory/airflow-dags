@@ -23,6 +23,7 @@ from dags.serp_eval_contracts import (
     build_online_eval_registry_cli_spec,
     build_online_eval_rollup_cli_spec,
     build_online_eval_rollup_plan,
+    build_public_docs_seed_refresh_plan,
     build_tenant_golden_registry_cli_spec,
     build_tenant_golden_regression_plan,
     build_tenant_golden_runner_cli_spec,
@@ -40,6 +41,8 @@ from dags.serp_eval_contracts import (
     write_nightly_report_artifact,
     write_nightly_suite_plan_artifact,
     write_online_eval_rollup_plan_artifact,
+    write_public_docs_seed_refresh_plan_artifact,
+    write_public_docs_seed_registry_artifact,
 )
 
 TENANT_ID = "00000000-0000-4000-a000-000000000001"
@@ -846,6 +849,84 @@ def test_build_benchmark_improvement_wave_plan_rejects_raw_secret_metadata() -> 
         build_benchmark_improvement_wave_plan(conf)
 
 
+def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path: Path) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+
+    plan = build_public_docs_seed_refresh_plan(conf)
+    repeated = build_public_docs_seed_refresh_plan(json.loads(plan.to_canonical_json()))
+
+    assert plan.to_canonical_json() == repeated.to_canonical_json()
+    assert plan.payload["dag_id"] == "serp_web_seed_crawl_refresh"
+    assert plan.payload["seed_count"] == 4
+    assert plan.payload["status"] == "ready_for_public_docs_seed_refresh"
+    assert plan.payload["source_type_counts"] == {
+        "git": 1,
+        "openapi": 1,
+        "pdf": 1,
+        "website": 1,
+    }
+    assert plan.payload["artifact_paths"] == {
+        "airflow_plan": "/".join(
+            (str(tmp_path), plan.payload["operation_id"], "airflow-plan.json")
+        ),
+        "public_docs_seed_refresh_plan": "/".join(
+            (str(tmp_path), plan.payload["operation_id"], "public-docs-seed-refresh-plan.json")
+        ),
+        "public_docs_seed_registry": "/".join(
+            (str(tmp_path), plan.payload["operation_id"], "public-docs-seed-registry.json")
+        ),
+    }
+    assert [task["task_id"] for task in plan.payload["tasks"]] == [
+        "validate_public_docs_seed_registry",
+        "write_public_docs_seed_registry",
+        "build_public_docs_seed_refresh_plan",
+        "dispatch_pipeline_seed_refresh_handoff",
+        "notify_governance_eval_surfaces",
+    ]
+
+    seed_registry_artifact = write_public_docs_seed_registry_artifact(plan.to_canonical_json())
+    refresh_plan_artifact = write_public_docs_seed_refresh_plan_artifact(plan.to_canonical_json())
+
+    assert Path(seed_registry_artifact["artifactPath"]).exists()
+    assert Path(refresh_plan_artifact["artifactPath"]).exists()
+    assert (
+        seed_registry_artifact["payload"]["seed_registry_sha256"]
+        == plan.payload["seed_registry_sha256"]
+    )
+    assert refresh_plan_artifact["payload"]["status"] == "ready_for_pipeline_dispatch"
+    assert [
+        request["pipeline_run_spec"]["pipeline_stages"]
+        for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
+    ] == [
+        ["fetch", "parse", "chunk", "embed", "index"],
+        ["fetch", "parse", "chunk", "embed", "index"],
+        ["fetch", "parse", "chunk", "embed", "index"],
+        ["fetch", "parse", "chunk", "embed", "index"],
+    ]
+    assert {
+        request["source_type"]
+        for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
+    } == {"git", "openapi", "pdf", "website"}
+
+
+def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> None:
+    disallowed_source_type = _public_docs_seed_refresh_conf()
+    disallowed_source_type["seed_registry"][0]["source_type"] = "confluence"
+    with pytest.raises(ValueError, match="source_type is not executable by current connectors"):
+        build_public_docs_seed_refresh_plan(disallowed_source_type)
+
+    missing_robot_policy = _public_docs_seed_refresh_conf()
+    missing_robot_policy["seed_registry"][1]["crawl_policy"]["respect_robots_txt"] = False
+    with pytest.raises(ValueError, match="respect_robots_txt must be true"):
+        build_public_docs_seed_refresh_plan(missing_robot_policy)
+
+    secret_in_metadata = _public_docs_seed_refresh_conf()
+    secret_in_metadata["seed_registry"][2]["metadata"] = {"api_key": "sk-abcdefghijklmnop"}
+    with pytest.raises(ValueError, match="dag run config must not contain raw secret material"):
+        build_public_docs_seed_refresh_plan(secret_in_metadata)
+
+
 @pytest.mark.parametrize(
     ("dag_file", "dag_id", "task_ids"),
     [
@@ -894,6 +975,17 @@ def test_build_benchmark_improvement_wave_plan_rejects_raw_secret_metadata() -> 
                 "notify_governance_eval_surfaces",
             ],
         ),
+        (
+            "serp_web_seed_crawl_refresh.py",
+            "serp_web_seed_crawl_refresh",
+            [
+                "validate_public_docs_seed_registry",
+                "write_public_docs_seed_registry",
+                "build_public_docs_seed_refresh_plan",
+                "dispatch_pipeline_seed_refresh_handoff",
+                "notify_governance_eval_surfaces",
+            ],
+        ),
     ],
 )
 def test_serp_dag_files_declare_expected_airflow_contracts(
@@ -920,6 +1012,7 @@ def test_serp_dag_files_import_helpers_from_packaged_dags_namespace() -> None:
         "serp_online_eval_rollup.py",
         "serp_tenant_golden_set_regression.py",
         "serp_benchmark_improvement_wave.py",
+        "serp_web_seed_crawl_refresh.py",
     ):
         source = (REPO_ROOT / "dags" / dag_file).read_text(encoding="utf-8")
 
@@ -1120,4 +1213,99 @@ def _improvement_wave_conf() -> dict[str, object]:
         "rollback_policy_ref": "policy://rollback/last-validated-baseline@v1",
         "selected_suite_ids": list(MANDATORY_SERP_BENCHMARK_SUITES),
         "tenant_id": TENANT_ID,
+    }
+
+
+def _public_docs_seed_refresh_conf() -> dict[str, object]:
+    return {
+        "actor_id": "airflow-serp-public-docs-refresh",
+        "artifact_root_path": "/var/opt/adapstory/serp-public-docs-refresh",
+        "generated_at": "2026-07-08T21:00:00Z",
+        "pack_id": "serp-public-docs-adapstory-stack",
+        "pack_version_id": PACK_VERSION_ID,
+        "registry_resource_id": REGISTRY_RESOURCE_ID,
+        "registry_resource_type": "pack",
+        "seed_registry": [
+            _public_docs_seed(
+                "k3s-docs",
+                "website",
+                "https://docs.k3s.io/",
+                component="K3s",
+                version="v1.34.3+k3s1",
+            ),
+            _public_docs_seed(
+                "spring-boot-docs",
+                "openapi",
+                "https://docs.spring.io/spring-boot/4.0/api/rest/application.yaml",
+                component="Spring Boot",
+                version="4.0.7",
+            ),
+            _public_docs_seed(
+                "react-docs",
+                "pdf",
+                "https://react.dev/reference/react.pdf",
+                component="React",
+                version="19.2.6",
+            ),
+            _public_docs_seed(
+                "adapstory-gitops-docs",
+                "git",
+                "git+file:///opt/adapstory/Adapstory-GitOps.git",
+                component="Adapstory GitOps",
+                version="main",
+            ),
+        ],
+        "tenant_id": TENANT_ID,
+    }
+
+
+def _public_docs_seed(
+    seed_id: str,
+    source_type: str,
+    source_uri: str,
+    *,
+    component: str,
+    version: str,
+) -> dict[str, object]:
+    return {
+        "approved": True,
+        "connector_name": source_type,
+        "crawl_policy": {
+            "allowed_domains": ["docs.k3s.io", "docs.spring.io", "react.dev", "opt.adapstory"],
+            "deny_patterns": ["/login", "/admin"],
+            "max_depth": 2,
+            "max_pages": 50,
+            "respect_robots_txt": True,
+            "sitemap_discovery": True,
+            "user_agent": "AdapstorySERPDocsRefresh/2026.07",
+        },
+        "data_class": "PUBLIC",
+        "inventory_evidence": {
+            "component": component,
+            "evidence_sha256": sha256(f"{component}:{version}".encode()).hexdigest(),
+            "stack_inventory_path": "tmp/stack-inventory-2026-07-02.md",
+            "version": version,
+        },
+        "license": {
+            "distribution_rule": "cite-and-cache",
+            "obligation_state": "reviewed-public-docs",
+        },
+        "metadata": {
+            "origin": "tmp/stack-inventory-2026-07-02.md",
+            "purpose": "public-docs-seed-to-serve",
+        },
+        "official_docs_uri": source_uri,
+        "refresh_policy": {
+            "cadence": "daily",
+            "max_age_hours": 24,
+        },
+        "seed_id": seed_id,
+        "source_id": str(
+            __import__("uuid").uuid5(
+                __import__("uuid").NAMESPACE_URL,
+                f"adapstory-serp-public-docs:{seed_id}",
+            )
+        ),
+        "source_type": source_type,
+        "source_uri": source_uri,
     }

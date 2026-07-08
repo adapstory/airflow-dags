@@ -41,6 +41,10 @@ _AIRFLOW_ARTIFACT_CONTRACT_VERSION = "serp-airflow-artifact-writer/v1"
 _EVAL_CONTRACT_VERSION = "2026.07.2"
 _DRY_RUN_SUITE_VERSION = "dry-run@2026.07.2"
 _BENCHMARK_NAMESPACE = UUID("018f5e13-2d73-7a77-a052-8d1bcbf96599")
+_PUBLIC_DOCS_NAMESPACE = UUID("018f5e13-2d73-7a77-a052-8d1bcbf96600")
+_PUBLIC_DOCS_EXECUTABLE_SOURCE_TYPES = frozenset({"git", "markdown", "openapi", "pdf", "website"})
+_PUBLIC_DOCS_DATA_CLASSES = frozenset({"PUBLIC", "INTERNAL_EXTERNAL_OK"})
+_PUBLIC_DOCS_DISTRIBUTION_RULES = frozenset({"cite-and-cache", "cite-only", "internal-cache-only"})
 _ARTIFACT_ROOT_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_ROOT"
 _ARTIFACT_S3_ENDPOINT_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT"
 _ARTIFACT_S3_REGION_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION"
@@ -421,6 +425,73 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
     return SerpDagPlan(plan_payload)
 
 
+def build_public_docs_seed_refresh_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
+    payload = _payload(conf)
+    _reject_raw_secrets(payload)
+    tenant_id = _required_uuid(payload, "tenant_id")
+    generated_at = _required_datetime_string(payload, "generated_at")
+    registry_resource_type = _required_resource_type(payload, "registry_resource_type")
+    registry_resource_id = _required_uuid(payload, "registry_resource_id")
+    pack_version_id = _required_uuid(payload, "pack_version_id")
+    pack_id = _required_str(payload, "pack_id")
+    artifact_root_path = _required_artifact_root_path(payload)
+    seeds = _public_docs_seed_registry(payload)
+    seed_registry_sha256 = sha256(
+        _canonical_json({"seed_registry": seeds}).encode("utf-8")
+    ).hexdigest()
+    source_type_counts = _source_type_counts(seeds)
+    operation_id = _operation_id(
+        "serp-web-seed-crawl-refresh",
+        tenant_id,
+        registry_resource_type,
+        registry_resource_id,
+        pack_id,
+        pack_version_id,
+        generated_at,
+        seed_registry_sha256,
+    )
+    plan_payload = {
+        "actor_id": _required_str(payload, "actor_id"),
+        "artifact_root_path": artifact_root_path,
+        "artifact_paths": _artifact_paths(
+            artifact_root_path,
+            operation_id,
+            (
+                ("airflow_plan", "airflow-plan.json"),
+                ("public_docs_seed_registry", "public-docs-seed-registry.json"),
+                (
+                    "public_docs_seed_refresh_plan",
+                    "public-docs-seed-refresh-plan.json",
+                ),
+            ),
+        ),
+        "contract_version": _EVAL_CONTRACT_VERSION,
+        "dag_id": "serp_web_seed_crawl_refresh",
+        "generated_at": generated_at,
+        "operation_id": operation_id,
+        "pack_id": pack_id,
+        "pack_version_id": str(pack_version_id),
+        "registry_resource_id": str(registry_resource_id),
+        "registry_resource_type": registry_resource_type,
+        "seed_count": len(seeds),
+        "seed_registry": seeds,
+        "seed_registry_sha256": seed_registry_sha256,
+        "source_type_counts": source_type_counts,
+        "status": "ready_for_public_docs_seed_refresh",
+        "tasks": _tasks(
+            (
+                "validate_public_docs_seed_registry",
+                "write_public_docs_seed_registry",
+                "build_public_docs_seed_refresh_plan",
+                "dispatch_pipeline_seed_refresh_handoff",
+                "notify_governance_eval_surfaces",
+            )
+        ),
+        "tenant_id": str(tenant_id),
+    }
+    return SerpDagPlan(plan_payload)
+
+
 def write_airflow_plan_artifact(plan: SerpDagPlan) -> str:
     plan_json = plan.to_canonical_json()
     artifact_paths = _required_artifact_paths(
@@ -431,6 +502,57 @@ def write_airflow_plan_artifact(plan: SerpDagPlan) -> str:
     airflow_plan_path.parent.mkdir(parents=True, exist_ok=True)
     airflow_plan_path.write_text(plan_json, encoding="utf-8")
     return plan_json
+
+
+def write_public_docs_seed_registry_artifact(
+    plan_json: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != "serp_web_seed_crawl_refresh":
+        raise ValueError("plan dag_id does not match public docs seed-registry writer")
+    artifact_paths = _required_artifact_paths(plan, ("public_docs_seed_registry",))
+    seed_registry = _required_object_list(plan, "seed_registry")
+    payload = {
+        "contract_version": _EVAL_CONTRACT_VERSION,
+        "generated_at": _required_datetime_string(plan, "generated_at"),
+        "operation_id": _required_str(plan, "operation_id"),
+        "pack_id": _required_str(plan, "pack_id"),
+        "pack_version_id": _required_str(plan, "pack_version_id"),
+        "seed_count": len(seed_registry),
+        "seed_registry": [dict(seed) for seed in seed_registry],
+        "seed_registry_sha256": _required_str(plan, "seed_registry_sha256"),
+        "source_type_counts": dict(_required_mapping(plan, "source_type_counts")),
+        "status": "validated",
+        "tenant_id": _required_str(plan, "tenant_id"),
+    }
+    artifact_path = artifact_paths["public_docs_seed_registry"]
+    _write_json_artifact(artifact_path, payload)
+    return _artifact_result(
+        artifact_path,
+        artifact_type="public_docs_seed_registry",
+        operation_id=_required_str(plan, "operation_id"),
+        payload=payload,
+    )
+
+
+def write_public_docs_seed_refresh_plan_artifact(
+    plan_json: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != "serp_web_seed_crawl_refresh":
+        raise ValueError("plan dag_id does not match public docs seed-refresh writer")
+    artifact_paths = _required_artifact_paths(plan, ("public_docs_seed_refresh_plan",))
+    payload = _public_docs_seed_refresh_payload(plan)
+    artifact_path = artifact_paths["public_docs_seed_refresh_plan"]
+    _write_json_artifact(artifact_path, payload)
+    return _artifact_result(
+        artifact_path,
+        artifact_type="public_docs_seed_refresh_plan",
+        operation_id=_required_str(plan, "operation_id"),
+        payload=payload,
+    )
 
 
 def write_nightly_suite_plan_artifact(
@@ -947,6 +1069,114 @@ def governance_notification_pending(plan_json: str) -> dict[str, str]:
         "dag_id": _required_str(plan, "dag_id"),
         "operation_id": _required_str(plan, "operation_id"),
         "status": "pending_governance_notification",
+    }
+
+
+def dispatch_public_docs_seed_refresh_handoff(plan_json: str) -> dict[str, Any]:
+    plan = _json_object(plan_json, "plan_json")
+    if _required_str(plan, "dag_id") != "serp_web_seed_crawl_refresh":
+        raise ValueError("plan dag_id does not match public docs seed-refresh dispatch")
+    return {
+        "dag_id": "serp_web_seed_crawl_refresh",
+        "d4_dispatch_target": "serp_scan_parse_index",
+        "operation_id": _required_str(plan, "operation_id"),
+        "plan_sha256": sha256(_canonical_json(plan).encode("utf-8")).hexdigest(),
+        "seed_count": len(_required_object_list(plan, "seed_registry")),
+        "seed_registry_sha256": _required_str(plan, "seed_registry_sha256"),
+        "status": "pending_pipeline_dispatch",
+        "tenant_id": _required_str(plan, "tenant_id"),
+    }
+
+
+def _public_docs_seed_refresh_payload(plan: Mapping[str, Any]) -> dict[str, Any]:
+    artifact_paths = _required_artifact_paths(
+        plan,
+        (
+            "airflow_plan",
+            "public_docs_seed_registry",
+            "public_docs_seed_refresh_plan",
+        ),
+    )
+    source_fetch_requests = [
+        _public_docs_source_fetch_request(plan, seed)
+        for seed in _required_object_list(plan, "seed_registry")
+    ]
+    return {
+        "artifact_paths": artifact_paths,
+        "contract_version": _EVAL_CONTRACT_VERSION,
+        "d4_dispatch_target": "serp_scan_parse_index",
+        "dag_id": "serp_web_seed_crawl_refresh",
+        "generated_at": _required_datetime_string(plan, "generated_at"),
+        "operation_id": _required_str(plan, "operation_id"),
+        "pack_id": _required_str(plan, "pack_id"),
+        "pack_version_id": _required_str(plan, "pack_version_id"),
+        "seed_count": len(source_fetch_requests),
+        "seed_registry_sha256": _required_str(plan, "seed_registry_sha256"),
+        "source_fetch_requests": source_fetch_requests,
+        "status": "ready_for_pipeline_dispatch",
+        "tenant_id": _required_str(plan, "tenant_id"),
+    }
+
+
+def _public_docs_source_fetch_request(
+    plan: Mapping[str, Any],
+    seed: Mapping[str, Any],
+) -> dict[str, Any]:
+    source_uri = _required_str(seed, "source_uri")
+    source_id = _required_str(seed, "source_id")
+    seed_id = _required_str(seed, "seed_id")
+    source_type = _required_str(seed, "source_type")
+    operation_id = _required_str(plan, "operation_id")
+    fetch_run_id = str(uuid5(_PUBLIC_DOCS_NAMESPACE, f"fetch|{operation_id}|{seed_id}"))
+    pipeline_run_id = str(uuid5(_PUBLIC_DOCS_NAMESPACE, f"pipeline|{operation_id}|{seed_id}"))
+    idempotency_key = str(
+        uuid5(
+            _PUBLIC_DOCS_NAMESPACE,
+            "|".join(
+                (
+                    "public-docs-seed-refresh",
+                    _required_str(plan, "tenant_id"),
+                    seed_id,
+                    source_id,
+                    source_uri,
+                    _required_str(plan, "seed_registry_sha256"),
+                )
+            ),
+        )
+    )
+    source_metadata = dict(_required_mapping(seed, "metadata"))
+    source_metadata.update(
+        {
+            "crawl_policy": dict(_required_mapping(seed, "crawl_policy")),
+            "inventory_evidence": dict(_required_mapping(seed, "inventory_evidence")),
+            "license": dict(_required_mapping(seed, "license")),
+            "refresh_policy": dict(_required_mapping(seed, "refresh_policy")),
+        }
+    )
+    return {
+        "connector_name": _required_str(seed, "connector_name"),
+        "data_class": _required_str(seed, "data_class"),
+        "fetch_run_id": fetch_run_id,
+        "idempotency_key": idempotency_key,
+        "official_docs_uri": _required_str(seed, "official_docs_uri"),
+        "pipeline_run_spec": {
+            "index_targets": ["qdrant", "opensearch", "neo4j"],
+            "pack_id": _required_str(plan, "pack_id"),
+            "pack_version_id": _required_str(plan, "pack_version_id"),
+            "pipeline_run_id": pipeline_run_id,
+            "pipeline_stages": ["fetch", "parse", "chunk", "embed", "index"],
+            "publish_state_after_index": "activation_pending",
+            "source_id": source_id,
+            "source_type": source_type,
+            "tenant_id": _required_str(plan, "tenant_id"),
+        },
+        "seed_id": seed_id,
+        "source_id": source_id,
+        "source_metadata": source_metadata,
+        "source_type": source_type,
+        "source_uri": source_uri,
+        "source_uri_hash": sha256(source_uri.encode("utf-8")).hexdigest(),
+        "status": "ready_for_fetch",
     }
 
 
@@ -1983,6 +2213,196 @@ def _minimum_normalized_score(suite_results: Sequence[Mapping[str, Any]]) -> str
 
 def _mandatory_metric_families() -> tuple[str, str, str, str]:
     return ("retrieval", "answer-quality", "citation", "policy")
+
+
+def _public_docs_seed_registry(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    raw_seeds = _required_object_list(payload, "seed_registry")
+    seeds = [_public_docs_seed(seed) for seed in raw_seeds]
+    _require_unique_public_docs_seed_values(seeds)
+    return sorted(seeds, key=lambda seed: _required_str(seed, "seed_id"))
+
+
+def _public_docs_seed(seed: Mapping[str, Any]) -> dict[str, Any]:
+    _reject_raw_secrets(seed)
+    seed_id = _required_seed_id(seed)
+    source_id = str(_required_uuid(seed, "source_id"))
+    source_type = _required_public_docs_source_type(seed)
+    source_uri = _required_public_docs_source_uri(seed, source_type)
+    official_docs_uri = _required_public_docs_official_docs_uri(seed)
+    crawl_policy = _public_docs_crawl_policy(seed, source_uri, source_type)
+    refresh_policy = _public_docs_refresh_policy(seed)
+    license_contract = _public_docs_license(seed)
+    inventory_evidence = _public_docs_inventory_evidence(seed)
+    metadata = seed.get("metadata", {})
+    if not isinstance(metadata, Mapping):
+        raise ValueError("metadata must be an object")
+    return {
+        "approved": _required_public_docs_approved(seed),
+        "connector_name": _required_public_docs_connector_name(seed, source_type),
+        "crawl_policy": crawl_policy,
+        "data_class": _required_public_docs_data_class(seed),
+        "inventory_evidence": inventory_evidence,
+        "license": license_contract,
+        "metadata": dict(metadata),
+        "official_docs_uri": official_docs_uri,
+        "refresh_policy": refresh_policy,
+        "seed_id": seed_id,
+        "source_id": source_id,
+        "source_type": source_type,
+        "source_uri": source_uri,
+    }
+
+
+def _required_seed_id(seed: Mapping[str, Any]) -> str:
+    seed_id = _required_str(seed, "seed_id")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,80}", seed_id):
+        raise ValueError("seed_id must be stable lowercase slug")
+    return seed_id
+
+
+def _required_public_docs_approved(seed: Mapping[str, Any]) -> bool:
+    if seed.get("approved") is not True:
+        raise ValueError("approved must be true")
+    return True
+
+
+def _required_public_docs_source_type(seed: Mapping[str, Any]) -> str:
+    source_type = _required_str(seed, "source_type")
+    if source_type not in _PUBLIC_DOCS_EXECUTABLE_SOURCE_TYPES:
+        raise ValueError("source_type is not executable by current connectors")
+    return source_type
+
+
+def _required_public_docs_connector_name(
+    seed: Mapping[str, Any],
+    source_type: str,
+) -> str:
+    connector_name = _required_str(seed, "connector_name")
+    if connector_name != source_type:
+        raise ValueError("connector_name must match source_type")
+    return connector_name
+
+
+def _required_public_docs_data_class(seed: Mapping[str, Any]) -> str:
+    data_class = _required_str(seed, "data_class")
+    if data_class not in _PUBLIC_DOCS_DATA_CLASSES:
+        raise ValueError("data_class is not allowed for public docs seed refresh")
+    return data_class
+
+
+def _required_public_docs_source_uri(seed: Mapping[str, Any], source_type: str) -> str:
+    source_uri = _required_str(seed, "source_uri")
+    if _contains_raw_secret(source_uri):
+        raise ValueError("source_uri must not contain raw secret material")
+    parsed = urlparse(source_uri)
+    if source_type == "git":
+        if parsed.scheme not in {"git+file", "git+https"}:
+            raise ValueError("git public docs seeds must use git+file or git+https URI")
+        return source_uri
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError("public docs source_uri must use https")
+    return source_uri
+
+
+def _required_public_docs_official_docs_uri(seed: Mapping[str, Any]) -> str:
+    official_docs_uri = _required_str(seed, "official_docs_uri")
+    parsed = urlparse(official_docs_uri)
+    if parsed.scheme not in {"https", "git+file", "git+https"}:
+        raise ValueError("official_docs_uri must use an approved docs URI scheme")
+    if parsed.scheme == "https" and not parsed.hostname:
+        raise ValueError("official_docs_uri must include a host")
+    return official_docs_uri
+
+
+def _public_docs_crawl_policy(
+    seed: Mapping[str, Any],
+    source_uri: str,
+    source_type: str,
+) -> dict[str, Any]:
+    policy = _required_mapping(seed, "crawl_policy")
+    if policy.get("respect_robots_txt") is not True:
+        raise ValueError("respect_robots_txt must be true")
+    max_depth = _required_positive_int(policy, "max_depth")
+    max_pages = _required_positive_int(policy, "max_pages")
+    if max_depth > 5:
+        raise ValueError("max_depth must be bounded to five or fewer")
+    if max_pages > 500:
+        raise ValueError("max_pages must be bounded to 500 or fewer")
+    sitemap_discovery = policy.get("sitemap_discovery")
+    if not isinstance(sitemap_discovery, bool):
+        raise ValueError("sitemap_discovery must be boolean")
+    allowed_domains = _required_str_list(policy, "allowed_domains")
+    deny_patterns = policy.get("deny_patterns", [])
+    if not isinstance(deny_patterns, list) or not all(
+        isinstance(value, str) and value.strip() for value in deny_patterns
+    ):
+        raise ValueError("deny_patterns must be a list of strings")
+    if source_type != "git":
+        hostname = urlparse(source_uri).hostname
+        if hostname not in set(allowed_domains):
+            raise ValueError("source_uri host must be in allowed_domains")
+    return {
+        "allowed_domains": allowed_domains,
+        "deny_patterns": list(deny_patterns),
+        "max_depth": max_depth,
+        "max_pages": max_pages,
+        "respect_robots_txt": True,
+        "sitemap_discovery": sitemap_discovery,
+        "user_agent": _required_str(policy, "user_agent"),
+    }
+
+
+def _public_docs_refresh_policy(seed: Mapping[str, Any]) -> dict[str, Any]:
+    policy = _required_mapping(seed, "refresh_policy")
+    cadence = _required_str(policy, "cadence")
+    if cadence not in {"daily", "nightly"}:
+        raise ValueError("refresh_policy cadence must be daily or nightly")
+    return {
+        "cadence": cadence,
+        "max_age_hours": _required_positive_int(policy, "max_age_hours"),
+    }
+
+
+def _public_docs_license(seed: Mapping[str, Any]) -> dict[str, Any]:
+    license_contract = _required_mapping(seed, "license")
+    distribution_rule = _required_str(license_contract, "distribution_rule")
+    if distribution_rule not in _PUBLIC_DOCS_DISTRIBUTION_RULES:
+        raise ValueError("license distribution_rule is unsupported")
+    return {
+        "distribution_rule": distribution_rule,
+        "obligation_state": _required_str(license_contract, "obligation_state"),
+    }
+
+
+def _public_docs_inventory_evidence(seed: Mapping[str, Any]) -> dict[str, Any]:
+    evidence = _required_mapping(seed, "inventory_evidence")
+    stack_inventory_path = _required_str(evidence, "stack_inventory_path")
+    if stack_inventory_path != "tmp/stack-inventory-2026-07-02.md":
+        raise ValueError("inventory_evidence must reference tmp stack inventory")
+    evidence_sha256 = _required_str(evidence, "evidence_sha256")
+    if not re.fullmatch(r"[a-f0-9]{64}", evidence_sha256):
+        raise ValueError("inventory_evidence evidence_sha256 must be sha256 hex")
+    return {
+        "component": _required_str(evidence, "component"),
+        "evidence_sha256": evidence_sha256,
+        "stack_inventory_path": stack_inventory_path,
+        "version": _required_str(evidence, "version"),
+    }
+
+
+def _require_unique_public_docs_seed_values(seeds: Sequence[Mapping[str, Any]]) -> None:
+    for field_name in ("seed_id", "source_id", "source_uri"):
+        values = [_required_str(seed, field_name) for seed in seeds]
+        if len(values) != len(set(values)):
+            raise ValueError(f"{field_name} values must be unique")
+
+
+def _source_type_counts(seeds: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for seed in seeds:
+        source_type = _required_str(seed, "source_type")
+        counts[source_type] = counts.get(source_type, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def _is_plan_payload(value: Mapping[str, Any] | str) -> bool:
