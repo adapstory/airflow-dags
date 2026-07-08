@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import ast
+import importlib
 import io
 import json
+import sys
+import types
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 import pytest
@@ -2025,10 +2028,71 @@ def test_serp_public_docs_dag_runs_default_seed_registry_pipeline_path() -> None
     source = (REPO_ROOT / "dags" / "serp_web_seed_crawl_refresh.py").read_text(encoding="utf-8")
 
     assert "default_public_docs_seed_refresh_conf" in source
-    assert "if not conf:" in source
+    assert "_public_docs_seed_refresh_conf_with_defaults" in source
     assert "datetime.now(UTC)" in source
     assert "execute_pipeline_cli_spec" in source
     assert "run_public_docs_seed_refresh_pipeline" in source
+
+
+def test_serp_public_docs_dag_overlays_partial_run_conf_on_default_seed_registry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    module = importlib.import_module("dags.serp_web_seed_crawl_refresh")
+    module = importlib.reload(module)
+
+    class DagRun:
+        def __init__(self) -> None:
+            self.conf = {
+                "artifact_root_path": str(tmp_path),
+                "generated_at": "2026-07-08T21:30:00Z",
+            }
+
+    plan_json = module.validate_public_docs_seed_registry(dag_run=DagRun())
+    plan = json.loads(plan_json)
+
+    assert plan["generated_at"] == "2026-07-08T21:30:00Z"
+    assert plan["seed_count"] == 4
+    assert {seed["seed_id"] for seed in plan["seed_registry"]} == {
+        "adapstory-gitops-docs",
+        "k3s-docs",
+        "kubernetes-openapi-docs",
+        "postgresql-reference-pdf",
+    }
+    assert all(path.startswith(str(tmp_path)) for path in plan["artifact_paths"].values())
+
+
+def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeDAG:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+    class FakePythonOperator:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def __rshift__(self, other: object) -> object:
+            return other
+
+    modules = {
+        "airflow": types.ModuleType("airflow"),
+        "airflow.providers": types.ModuleType("airflow.providers"),
+        "airflow.providers.standard": types.ModuleType("airflow.providers.standard"),
+        "airflow.providers.standard.operators": types.ModuleType(
+            "airflow.providers.standard.operators"
+        ),
+        "airflow.providers.standard.operators.python": types.ModuleType(
+            "airflow.providers.standard.operators.python"
+        ),
+        "airflow.sdk": types.ModuleType("airflow.sdk"),
+    }
+    cast(
+        Any, modules["airflow.providers.standard.operators.python"]
+    ).PythonOperator = FakePythonOperator
+    cast(Any, modules["airflow.sdk"]).DAG = FakeDAG
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
 
 
 def test_serp_improvement_dag_uses_native_artifact_writers_for_d19_path() -> None:

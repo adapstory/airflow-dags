@@ -24,11 +24,20 @@ from dags.serp_eval_contracts import (
 def validate_public_docs_seed_registry(**context: Any) -> str:
     dag_run = context.get("dag_run")
     conf = getattr(dag_run, "conf", None) or {}
-    if not conf:
-        conf = default_public_docs_seed_refresh_conf(
-            generated_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        )
+    conf = _public_docs_seed_refresh_conf_with_defaults(conf)
     return write_airflow_plan_artifact(build_public_docs_seed_refresh_plan_contract(conf))
+
+
+def _public_docs_seed_refresh_conf_with_defaults(conf: dict[str, Any]) -> dict[str, Any]:
+    generated_at = str(
+        conf.get("generated_at") or datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    )
+    artifact_root_path = conf.get("artifact_root_path")
+    defaults = default_public_docs_seed_refresh_conf(
+        generated_at=generated_at,
+        artifact_root_path=str(artifact_root_path) if artifact_root_path else None,
+    )
+    return {**defaults, **conf, "generated_at": generated_at}
 
 
 default_args = {
