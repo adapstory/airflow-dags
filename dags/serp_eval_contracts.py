@@ -710,9 +710,7 @@ def write_airflow_plan_artifact(plan: SerpDagPlan) -> str:
         plan.payload,
         ("airflow_plan",),
     )
-    airflow_plan_path = Path(artifact_paths["airflow_plan"])
-    airflow_plan_path.parent.mkdir(parents=True, exist_ok=True)
-    airflow_plan_path.write_text(plan_json, encoding="utf-8")
+    _write_json_artifact(artifact_paths["airflow_plan"], plan.payload)
     return plan_json
 
 

@@ -141,6 +141,42 @@ def test_build_nightly_regression_plan_accepts_s3_artifact_root_from_env(
     )
 
 
+def test_write_airflow_plan_artifact_writes_s3_artifact_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conf = _nightly_conf()
+    conf["artifact_root_path"] = "s3://airflow-serp-artifacts/serp-evals"
+    plan = build_nightly_regression_plan(conf)
+    airflow_plan_path = plan.payload["artifact_paths"]["airflow_plan"]
+    bucket, key = airflow_plan_path.removeprefix("s3://").split("/", 1)
+    put_calls: list[tuple[str, str, str, str]] = []
+
+    class FakeS3Client:
+        def put_object(
+            self,
+            *,
+            Bucket: str,
+            Key: str,
+            Body: bytes,
+            ContentType: str,
+        ) -> None:
+            put_calls.append((Bucket, Key, Body.decode("utf-8"), ContentType))
+
+    monkeypatch.setattr("dags.serp_eval_contracts._s3_client", lambda: FakeS3Client())
+
+    plan_json = write_airflow_plan_artifact(plan)
+
+    assert json.loads(plan_json) == plan.payload
+    assert put_calls == [
+        (
+            bucket,
+            key,
+            json.dumps(plan.payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+            "application/json",
+        )
+    ]
+
+
 def test_build_nightly_gateway_cli_specs_are_file_based_and_deterministic() -> None:
     plan = build_nightly_regression_plan(_nightly_conf())
     runner = build_nightly_runner_cli_spec(plan.to_canonical_json())
