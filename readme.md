@@ -14,6 +14,31 @@ Runtime contract:
 
 SERP eval DAG contracts:
 
+- D1-D20 runtime coverage checkpoint:
+
+  | DAG ID | Runtime status | Contract note |
+  | --- | --- | --- |
+  | D1 `serp_ingest_source_once` | Planned gap | One-shot source ingest DAG is not implemented yet. |
+  | D2 `serp_refresh_due_sources` | Planned gap | Scheduled freshness/popularity refresh DAG is not implemented yet. |
+  | D3 `serp_reparse_pack_version` | Planned gap | Pack-version reparse DAG is not implemented yet. |
+  | D4 `serp_scan_parse_index` | Planned gap | Scan/parse/enrich/index child DAG or task group is not implemented yet. |
+  | D5 `serp_publish_signed_pack` | Planned gap | Approval/sign/publish DAG is not implemented yet. |
+  | D6 `serp_nightly_regression_suite` | Implemented, runtime-backed in current source | Production GitOps image/DAG refs must be refreshed before claiming deployed-current runtime. |
+  | D7 `serp_online_eval_rollup` | Implemented, runtime-backed in current source | DAG is manual/event-triggered today; backlog frequent scheduling remains planned. Production GitOps refs must be refreshed before claiming deployed-current runtime. |
+  | D8 `serp_expire_revoke_packs` | Planned gap | Freshness expiration/revocation DAG is not implemented yet. |
+  | D9 `serp_usage_cost_rollup` | Planned gap | CostOps usage rollup DAG is not implemented yet. |
+  | D10 `serp_public_catalog_refresh` | Planned gap | Public catalog refresh DAG is not implemented yet. |
+  | D11 `serp_tenant_offboarding_purge` | Planned gap | Tenant export/revoke/purge DAG is not implemented yet. |
+  | D12 `serp_evidence_seal_verify` | Planned gap | Evidence sealing/verification DAG is not implemented yet. |
+  | D13 `serp_tenant_golden_set_regression` | Scaffolded handoff contract | Emits deterministic gateway CLI handoff artifacts; native runtime execution is still planned. |
+  | D14 `serp_break_glass_expiry_reconcile` | Planned gap | Emergency override expiry/reconcile DAG is not implemented yet. |
+  | D15 `serp_offline_bundle_build_publish` | Planned gap | Offline bundle build/publish DAG is not implemented yet. |
+  | D16 `serp_policy_rollout_canary` | Planned gap | Policy rollout canary DAG is not implemented yet. |
+  | D17 `serp_model_catalog_promotion` | Planned gap | Model promotion/deprecation DAG is not implemented yet. |
+  | D18 `serp_chaos_restore_game_day` | Planned gap | Restore/game-day DAG is not implemented yet. |
+  | D19 `serp_benchmark_improvement_wave` | Scaffolded deterministic contract | Writes deterministic improvement artifacts in-task; live improvement runner wiring is still planned. |
+  | D20 `serp_web_seed_crawl_refresh` | Planned gap | Governed public-web/intranet seed refresh DAG is not implemented yet. |
+
 - `serp_nightly_regression_suite` is the D6 contract DAG. Its `dag_run.conf`
   must provide tenant id, pack version ids, retrieval/reranker profile versions,
   registry resource identity, approved actor id, generated timestamp, and every
@@ -31,7 +56,8 @@ SERP eval DAG contracts:
   `nightly-registry-submissions.json` to BC-21 through the reviewed
   `bc21_base_url`. Local dry-run receipt writers are explicit dev/test
   fallback helpers only and are not the default DAG runtime path.
-- `serp_tenant_golden_set_regression` is the D13 contract DAG. Its
+- `serp_tenant_golden_set_regression` is the D13 scaffolded handoff contract
+  DAG, not a native runtime-backed runner yet. Its
   `dag_run.conf` must provide tenant id, workflow id, golden set id/version,
   changed pack version ids, registry resource identity, approved actor id, and
   generated timestamp. It must also provide `artifact_root_path` or rely on the
@@ -55,7 +81,8 @@ SERP eval DAG contracts:
   runner without shell expansion, persists stdout, then builds BC-21 registry
   submissions for the same rollup. Its plan state is
   `ready_for_po_capacity_approval`; it is not a 1M production approval.
-- `serp_benchmark_improvement_wave` is the D19 contract DAG. Its
+- `serp_benchmark_improvement_wave` is the D19 scaffolded deterministic
+  contract DAG, not a live runtime-backed improvement runner yet. Its
   `dag_run.conf` must provide tenant id, improvement spec id, baseline run id,
   candidate id, registry resource identity, approved actor id, generated
   timestamp, rollback policy ref, positive max benchmark run budget, every
