@@ -921,6 +921,7 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
 
     assert plan.to_canonical_json() == repeated.to_canonical_json()
     assert plan.payload["dag_id"] == "serp_web_seed_crawl_refresh"
+    assert plan.payload["index_mode"] == "evidence-only"
     assert plan.payload["seed_count"] == 4
     assert plan.payload["status"] == "ready_for_public_docs_seed_refresh"
     assert plan.payload["source_type_counts"] == {
@@ -962,6 +963,7 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
         == plan.payload["seed_registry_sha256"]
     )
     assert refresh_plan_artifact["payload"]["status"] == "ready_for_pipeline_dispatch"
+    assert refresh_plan_artifact["payload"]["index_mode"] == "evidence-only"
     assert refresh_plan_artifact["payload"]["skipped_seed_count"] == 0
     assert [
         request["pipeline_run_spec"]["pipeline_stages"]
@@ -997,6 +999,8 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
     assert "pending_pipeline_dispatch" not in json.dumps(cli_spec, sort_keys=True)
     assert cli_spec["seed_count"] == 4
     assert cli_spec["skipped_seed_count"] == 0
+    assert "--index-mode" in cli_spec["argv"]
+    assert cli_spec["argv"][cli_spec["argv"].index("--index-mode") + 1] == "evidence-only"
     assert cli_spec["argv"][:3] == [
         "python",
         "-m",
@@ -1026,10 +1030,11 @@ def test_public_docs_seed_refresh_selects_due_seeds_and_records_skips(
     assert payload["seed_count"] == 3
     assert payload["skipped_seed_count"] == 1
     assert [skip["seed_id"] for skip in payload["skipped_seed_refreshes"]] == ["k3s-docs"]
-    assert {
-        request["seed_id"]
-        for request in payload["source_fetch_requests"]
-    } == {"adapstory-gitops-docs", "react-docs", "spring-boot-docs"}
+    assert {request["seed_id"] for request in payload["source_fetch_requests"]} == {
+        "adapstory-gitops-docs",
+        "react-docs",
+        "spring-boot-docs",
+    }
     assert {
         request["source_metadata"]["refresh_selection"]["reason"]
         for request in payload["source_fetch_requests"]
@@ -1040,6 +1045,20 @@ def test_public_docs_seed_refresh_selects_due_seeds_and_records_skips(
     assert cli_spec["status"] == "ready_for_pipeline_cli_runner"
     assert cli_spec["seed_count"] == 3
     assert cli_spec["skipped_seed_count"] == 1
+
+
+def test_public_docs_seed_refresh_dispatches_live_index_mode(tmp_path: Path) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    conf["index_mode"] = "live"
+
+    plan = build_public_docs_seed_refresh_plan(conf)
+    refresh_plan_artifact = write_public_docs_seed_refresh_plan_artifact(plan.to_canonical_json())
+    cli_spec = dispatch_public_docs_seed_refresh_handoff(plan.to_canonical_json())
+
+    assert plan.payload["index_mode"] == "live"
+    assert refresh_plan_artifact["payload"]["index_mode"] == "live"
+    assert cli_spec["argv"][cli_spec["argv"].index("--index-mode") + 1] == "live"
 
 
 def test_public_docs_seed_refresh_noops_when_no_seed_is_due(tmp_path: Path) -> None:
@@ -1112,6 +1131,11 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
     planned_markdown["seed_registry"][0]["source_type"] = "markdown"
     with pytest.raises(ValueError, match="source_type is not executable by current connectors"):
         build_public_docs_seed_refresh_plan(planned_markdown)
+
+    unsupported_index_mode = _public_docs_seed_refresh_conf()
+    unsupported_index_mode["index_mode"] = "shadow-live"
+    with pytest.raises(ValueError, match="index_mode is unsupported"):
+        build_public_docs_seed_refresh_plan(unsupported_index_mode)
 
     remote_git = _public_docs_seed_refresh_conf()
     remote_git["seed_registry"][3]["source_uri"] = "git+https://github.com/adapstory/docs.git"

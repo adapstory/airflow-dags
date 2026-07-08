@@ -50,6 +50,7 @@ _PUBLIC_DOCS_DISTRIBUTION_RULES = frozenset({"cite-and-cache", "cite-only", "int
 _PUBLIC_DOCS_FRESHNESS_STATUSES = frozenset(
     {"failed", "indexed", "never_indexed", "partial_failure", "quarantined"}
 )
+_PUBLIC_DOCS_INDEX_MODES = frozenset({"evidence-only", "live"})
 _PUBLIC_DOCS_DEFAULT_TENANT_ID = "00000000-0000-4000-a000-000000000001"
 _PUBLIC_DOCS_DEFAULT_PACK_ID = "00000000-0000-4000-a000-000000000201"
 _PUBLIC_DOCS_DEFAULT_PACK_VERSION_ID = "018f5e13-2d73-7a77-a052-8d1bcbf96541"
@@ -446,6 +447,7 @@ def build_public_docs_seed_refresh_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
     pack_id = _required_uuid(payload, "pack_id")
     pack_version_id = _required_uuid(payload, "pack_version_id")
     artifact_root_path = _required_artifact_root_path(payload)
+    index_mode = _public_docs_index_mode(payload)
     seeds = _public_docs_seed_registry(payload)
     seed_registry_sha256 = sha256(
         _canonical_json({"seed_registry": seeds}).encode("utf-8")
@@ -460,6 +462,7 @@ def build_public_docs_seed_refresh_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
         pack_version_id,
         generated_at,
         seed_registry_sha256,
+        index_mode,
     )
     plan_payload = {
         "actor_id": _required_str(payload, "actor_id"),
@@ -483,6 +486,7 @@ def build_public_docs_seed_refresh_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
         "contract_version": _EVAL_CONTRACT_VERSION,
         "dag_id": "serp_web_seed_crawl_refresh",
         "generated_at": generated_at,
+        "index_mode": index_mode,
         "operation_id": operation_id,
         "pack_id": str(pack_id),
         "pack_version_id": str(pack_version_id),
@@ -760,6 +764,7 @@ def _execute_pipeline_noop_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
         "skipped_seed_count": int(spec.get("skipped_seed_count", 0)),
         "status": "no_due_sources",
         "tenant_id": _required_str(spec, "tenant_id"),
+        "index_mode": _required_str(spec, "index_mode"),
     }
     _write_json_artifact(stdout_path, payload)
     return _artifact_result(
@@ -1231,6 +1236,8 @@ def dispatch_public_docs_seed_refresh_handoff(plan_json: str) -> dict[str, Any]:
         _required_datetime_string(plan, "generated_at"),
         "--embedding-mode",
         "deterministic-dev",
+        "--index-mode",
+        _required_str(plan, "index_mode"),
         "--tenant-id",
         _required_str(plan, "tenant_id"),
         "--pack-id",
@@ -1258,6 +1265,7 @@ def dispatch_public_docs_seed_refresh_handoff(plan_json: str) -> dict[str, Any]:
         "stdout_path": result_path,
         "task_id": "public_docs_seed_refresh_pipeline",
         "tenant_id": _required_str(plan, "tenant_id"),
+        "index_mode": _required_str(plan, "index_mode"),
     }
 
 
@@ -1286,6 +1294,7 @@ def _public_docs_seed_refresh_payload(plan: Mapping[str, Any]) -> dict[str, Any]
         "operation_id": _required_str(plan, "operation_id"),
         "pack_id": _required_str(plan, "pack_id"),
         "pack_version_id": _required_str(plan, "pack_version_id"),
+        "index_mode": _required_str(plan, "index_mode"),
         "seed_count": len(source_fetch_requests),
         "seed_registry_sha256": _required_str(plan, "seed_registry_sha256"),
         "skipped_seed_count": len(skipped_seed_refreshes),
@@ -2737,6 +2746,15 @@ def _source_type_counts(seeds: Sequence[Mapping[str, Any]]) -> dict[str, int]:
         source_type = _required_str(seed, "source_type")
         counts[source_type] = counts.get(source_type, 0) + 1
     return dict(sorted(counts.items()))
+
+
+def _public_docs_index_mode(payload: Mapping[str, Any]) -> str:
+    value = payload.get("index_mode", "evidence-only")
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("index_mode is required")
+    if value not in _PUBLIC_DOCS_INDEX_MODES:
+        raise ValueError("index_mode is unsupported")
+    return value
 
 
 def _is_plan_payload(value: Mapping[str, Any] | str) -> bool:

@@ -108,7 +108,8 @@ SERP eval DAG contracts:
   registry from the stack-inventory anchored source set. Override
   `dag_run.conf` may still provide tenant id, pack id/version, registry
   resource identity, approved actor id, generated timestamp, a governed
-  `seed_registry`, and either `artifact_root_path` or
+  `seed_registry`, `index_mode` (`evidence-only` or `live`), and either
+  `artifact_root_path` or
   `ADAPSTORY_AIRFLOW_ARTIFACT_ROOT`. The seed registry is intentionally limited
   to currently executable connector types: `git`, `website`, `openapi`, and
   `pdf`. Markdown/file-upload intake, Confluence, Notion, and Google Docs are
@@ -126,12 +127,13 @@ SERP eval DAG contracts:
   deterministic `no_due_sources` result without spawning the CLI process.
   Otherwise it runs
   `python -m adapstory_serp_pipeline.orchestration.seed_refresh_cli` without
-  shell expansion and persists `public-docs-seed-refresh-result.json`. The
-  packaged CLI executes the current fetch/parse/chunk/embed/index path through
-  the SERP pipeline ports and writes deterministic batch evidence. It does not
-  perform crawler frontier expansion, changed-page discovery beyond seed
-  freshness, approval, signing, publish activation, or live store credential
-  management; those remain planned runtime work.
+  shell expansion, passes the selected `--index-mode`, and persists
+  `public-docs-seed-refresh-result.json`. The packaged CLI executes the current
+  fetch/parse/chunk/embed/index path through the SERP pipeline ports and writes
+  deterministic batch evidence. Live index mode is implemented in the packaged
+  pipeline via HTTP store adapters, but GitOps/runtime environment wiring,
+  crawler frontier expansion, changed-page discovery beyond seed freshness,
+  approval, signing, and publish activation remain planned runtime work.
 - Runtime status in this document means current source-level contract unless a
   deployed runtime is explicitly named. The production Airflow image and
   `gitSync` revision are pinned in GitOps by `Adapstory-GitOps/infra/airflow`;
