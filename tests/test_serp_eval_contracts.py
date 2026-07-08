@@ -1104,6 +1104,51 @@ def test_d20_writes_public_docs_publish_activation_trigger_conf_artifact(
     assert trigger_artifact["artifactSha256"] == repeated_artifact["artifactSha256"]
 
 
+def test_d20_trigger_conf_includes_bc21_base_url_from_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "ADAPSTORY_SERP_BC21_BASE_URL",
+        "http://prod-serp-context-platform.env-prod.svc.cluster.local",
+    )
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    plan = build_public_docs_seed_refresh_plan(conf)
+    seed_refresh_result_path = Path(
+        plan.payload["artifact_paths"]["public_docs_seed_refresh_result"]
+    )
+    seed_refresh_result_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_public_docs_seed_refresh_result(seed_refresh_result_path)
+
+    trigger_artifact = write_public_docs_publish_activation_trigger_conf_artifact(
+        plan.to_canonical_json()
+    )
+
+    assert plan.payload["bc21_base_url"] == (
+        "http://prod-serp-context-platform.env-prod.svc.cluster.local"
+    )
+    assert trigger_artifact["payload"]["governance_required_fields"] == [
+        "activation_idempotency_key",
+        "approval_run_id",
+        "benchmark_gate_export_sha256",
+        "evidence_bundle_id",
+        "evidence_seal_hash",
+    ]
+    assert trigger_artifact["payload"]["target_dag_run_conf"]["bc21_base_url"] == (
+        "http://prod-serp-context-platform.env-prod.svc.cluster.local"
+    )
+
+
+def test_d20_default_conf_rejects_unsafe_env_bc21_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ADAPSTORY_SERP_BC21_BASE_URL", "http://example.invalid")
+
+    with pytest.raises(ValueError, match="bc21_base_url must use https"):
+        default_public_docs_seed_refresh_conf(generated_at="2026-07-08T21:00:00Z")
+
+
 def test_d20_trigger_conf_rejects_invalid_seed_refresh_result(tmp_path: Path) -> None:
     conf = _public_docs_seed_refresh_conf()
     conf["artifact_root_path"] = str(tmp_path)

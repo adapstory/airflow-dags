@@ -65,6 +65,7 @@ _PUBLIC_DOCS_EMBEDDING_MODE_ENV = "ADAPSTORY_SERP_PUBLIC_DOCS_EMBEDDING_MODE"
 _PUBLIC_DOCS_QDRANT_COLLECTION_ENV = "ADAPSTORY_SERP_PUBLIC_DOCS_QDRANT_COLLECTION"
 _PUBLIC_DOCS_OPENSEARCH_INDEX_ENV = "ADAPSTORY_SERP_PUBLIC_DOCS_OPENSEARCH_INDEX"
 _PUBLIC_DOCS_NEO4J_DATABASE_ENV = "ADAPSTORY_SERP_PUBLIC_DOCS_NEO4J_DATABASE"
+_BC21_BASE_URL_ENV = "ADAPSTORY_SERP_BC21_BASE_URL"
 _PUBLIC_DOCS_DEFAULT_QDRANT_COLLECTION = "serp_vectors_dev"
 _PUBLIC_DOCS_DEFAULT_OPENSEARCH_INDEX = "serp_lexical_dev"
 _PUBLIC_DOCS_DEFAULT_NEO4J_DATABASE = "serp_graph_dev"
@@ -570,6 +571,7 @@ def build_public_docs_seed_refresh_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
         env_name=_PUBLIC_DOCS_NEO4J_DATABASE_ENV,
         default=_PUBLIC_DOCS_DEFAULT_NEO4J_DATABASE,
     )
+    bc21_base_url = _optional_bc21_base_url(payload)
     seeds = _public_docs_seed_registry(payload)
     seed_registry_sha256 = sha256(
         _canonical_json({"seed_registry": seeds}).encode("utf-8")
@@ -586,6 +588,7 @@ def build_public_docs_seed_refresh_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
         seed_registry_sha256,
         index_mode,
         embedding_mode,
+        bc21_base_url or "",
     )
     plan_payload = {
         "actor_id": _required_str(payload, "actor_id"),
@@ -610,6 +613,7 @@ def build_public_docs_seed_refresh_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
                 ),
             ),
         ),
+        **({"bc21_base_url": bc21_base_url} if bc21_base_url else {}),
         "contract_version": _EVAL_CONTRACT_VERSION,
         "dag_id": "serp_web_seed_crawl_refresh",
         "generated_at": generated_at,
@@ -654,7 +658,7 @@ def default_public_docs_seed_refresh_conf(
         _ARTIFACT_ROOT_ENV,
         _PUBLIC_DOCS_DEFAULT_ARTIFACT_ROOT,
     )
-    return {
+    conf = {
         "actor_id": _PUBLIC_DOCS_DEFAULT_ACTOR_ID,
         "artifact_root_path": root_path,
         "generated_at": generated_at,
@@ -694,6 +698,10 @@ def default_public_docs_seed_refresh_conf(
         ],
         "tenant_id": _PUBLIC_DOCS_DEFAULT_TENANT_ID,
     }
+    bc21_base_url = _optional_bc21_base_url(conf)
+    if bc21_base_url:
+        conf["bc21_base_url"] = bc21_base_url
+    return conf
 
 
 def write_airflow_plan_artifact(plan: SerpDagPlan) -> str:
@@ -797,20 +805,28 @@ def write_public_docs_publish_activation_trigger_conf_artifact(
         "registry_resource_type": _required_str(plan, "registry_resource_type"),
         "tenant_id": _required_str(plan, "tenant_id"),
     }
+    if bc21_base_url := plan.get("bc21_base_url"):
+        trigger_conf["bc21_base_url"] = _required_bc21_base_url({"bc21_base_url": bc21_base_url})
+    governance_required_fields = [
+        "activation_idempotency_key",
+        "approval_run_id",
+        "benchmark_gate_export_sha256",
+    ]
+    if "bc21_base_url" not in trigger_conf:
+        governance_required_fields.append("bc21_base_url")
+    governance_required_fields.extend(
+        [
+            "evidence_bundle_id",
+            "evidence_seal_hash",
+        ]
+    )
     payload = {
         "artifact_type": "public_docs_publish_activation_trigger_conf",
         "contract_version": _EVAL_CONTRACT_VERSION,
         "dag_id": "serp_web_seed_crawl_refresh",
         "d5_publish_target": "serp_publish_signed_pack",
         "generated_at": _required_datetime_string(plan, "generated_at"),
-        "governance_required_fields": [
-            "activation_idempotency_key",
-            "approval_run_id",
-            "benchmark_gate_export_sha256",
-            "bc21_base_url",
-            "evidence_bundle_id",
-            "evidence_seal_hash",
-        ],
+        "governance_required_fields": governance_required_fields,
         "operation_id": _required_str(plan, "operation_id"),
         "source_seed_refresh_result_path": seed_refresh_result_path,
         "status": "governance_inputs_required",
@@ -3299,6 +3315,13 @@ def _public_docs_store_name(
         raise ValueError(f"{field_name} must be a plain store name")
     _reject_raw_secrets({field_name: value})
     return value
+
+
+def _optional_bc21_base_url(payload: Mapping[str, Any]) -> str | None:
+    value = payload.get("bc21_base_url", os.environ.get(_BC21_BASE_URL_ENV))
+    if value is None:
+        return None
+    return _required_bc21_base_url({"bc21_base_url": value})
 
 
 def _is_plan_payload(value: Mapping[str, Any] | str) -> bool:

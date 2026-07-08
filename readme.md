@@ -37,7 +37,7 @@ SERP eval DAG contracts:
   | D17 `serp_model_catalog_promotion` | Planned gap | Model promotion/deprecation DAG is not implemented yet. |
   | D18 `serp_chaos_restore_game_day` | Planned gap | Restore/game-day DAG is not implemented yet. |
   | D19 `serp_benchmark_improvement_wave` | Scaffolded deterministic contract | Writes deterministic improvement artifacts in-task; live improvement runner wiring is still planned. |
-  | D20 `serp_web_seed_crawl_refresh` | Implemented scheduled pipeline CLI bridge in current source | Uses a default stack-inventory anchored seed registry when no `dag_run.conf` is supplied, expands approved website `frontier_urls` into deterministic per-page fetch requests, selects due seeds from `refresh_policy` and optional `freshness_state`, writes deterministic seed/refresh artifacts, runs the packaged SERP pipeline CLI bridge only when sources are due, and emits a governed D5 trigger-conf artifact once indexed D20 evidence exists. Live robots/sitemap discovery, D4 child dispatch, and deployed GitOps image refresh remain planned; publish activation is handled by D5 after approvals, evidence seal, benchmark gate, and BC-21 target are supplied. |
+  | D20 `serp_web_seed_crawl_refresh` | Implemented scheduled pipeline CLI bridge in current source | Uses a default stack-inventory anchored seed registry when no `dag_run.conf` is supplied, expands approved website `frontier_urls` into deterministic per-page fetch requests, selects due seeds from `refresh_policy` and optional `freshness_state`, writes deterministic seed/refresh artifacts, runs the packaged SERP pipeline CLI bridge only when sources are due, and emits a governed D5 trigger-conf artifact once indexed D20 evidence exists. The D5 trigger-conf carries `ADAPSTORY_SERP_BC21_BASE_URL` when the runtime env provides it, but approvals, evidence seal, benchmark gate, and idempotency remain required. Live robots/sitemap discovery, D4 child dispatch, and deployed GitOps image refresh remain planned; publish activation is handled by D5. |
 
 - `serp_nightly_regression_suite` is the D6 contract DAG. Its `dag_run.conf`
   must provide tenant id, pack version ids, retrieval/reranker profile versions,
@@ -197,8 +197,11 @@ SERP eval DAG contracts:
   D20 trigger-conf can be used as the base `dag_run.conf` for
   `serp_publish_signed_pack`, but D5 still fails closed until
   `approval_run_id`, `evidence_bundle_id`, `evidence_seal_hash`,
-  `activation_idempotency_key`, `benchmark_gate_export_sha256`, and
-  `bc21_base_url` are supplied by the governance/evidence seal flow.
+  `activation_idempotency_key`, and `benchmark_gate_export_sha256` are supplied
+  by the governance/evidence seal flow. `bc21_base_url` can be supplied by the
+  caller or by the non-secret runtime default `ADAPSTORY_SERP_BC21_BASE_URL`;
+  unsafe public HTTP URLs and raw-secret-looking values are rejected before the
+  trigger-conf artifact is written.
 - `artifact_root_path` must be an absolute local path or `s3://bucket/prefix`
   URI. Unsupported URL schemes, parent traversal, multiline values, and raw
   secret material are rejected before any runner handoff is emitted.
