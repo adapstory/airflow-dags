@@ -781,9 +781,9 @@ def write_public_docs_publish_activation_trigger_conf_artifact(
             "public_docs_publish_activation_trigger_conf",
         ),
     )
-    seed_refresh_result_path = _required_existing_local_artifact_path(
-        {"public_docs_seed_refresh_result_path": artifact_paths["public_docs_seed_refresh_result"]},
+    seed_refresh_result_path = _artifact_path(
         "public_docs_seed_refresh_result_path",
+        artifact_paths["public_docs_seed_refresh_result"],
     )
     seed_refresh_identity = _public_docs_seed_refresh_result_identity(seed_refresh_result_path)
     if seed_refresh_identity["tenant_id"] != _required_str(plan, "tenant_id"):

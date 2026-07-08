@@ -1253,6 +1253,63 @@ def test_d20_trigger_conf_includes_bc21_base_url_from_env(
     )
 
 
+def test_d20_writes_public_docs_publish_activation_trigger_conf_from_s3_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = "s3://airflow-serp-artifacts/serp-evals"
+    plan = build_public_docs_seed_refresh_plan(conf)
+    seed_refresh_result_path = plan.payload["artifact_paths"]["public_docs_seed_refresh_result"]
+    trigger_conf_path = plan.payload["artifact_paths"][
+        "public_docs_publish_activation_trigger_conf"
+    ]
+    result_bucket, result_key = seed_refresh_result_path.removeprefix("s3://").split("/", 1)
+    trigger_bucket, trigger_key = trigger_conf_path.removeprefix("s3://").split("/", 1)
+    storage = {
+        (result_bucket, result_key): json.dumps(
+            {
+                "artifact_type": "public_docs_seed_refresh_batch_evidence",
+                "batch_evidence": {
+                    "pack_id": PACK_ID,
+                    "pack_version_id": PACK_VERSION_ID,
+                    "tenant_id": TENANT_ID,
+                },
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+    }
+    put_calls: list[tuple[str, str, str, str]] = []
+
+    class FakeS3Client:
+        def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
+            return {"Body": io.BytesIO(storage[(Bucket, Key)])}
+
+        def put_object(
+            self,
+            *,
+            Bucket: str,
+            Key: str,
+            Body: bytes,
+            ContentType: str,
+        ) -> None:
+            put_calls.append((Bucket, Key, Body.decode("utf-8"), ContentType))
+
+    monkeypatch.setattr("dags.serp_eval_contracts._s3_client", lambda: FakeS3Client())
+
+    trigger_artifact = write_public_docs_publish_activation_trigger_conf_artifact(
+        plan.to_canonical_json()
+    )
+
+    assert trigger_artifact["artifactPath"] == trigger_conf_path
+    assert trigger_artifact["payload"]["source_seed_refresh_result_path"] == (
+        seed_refresh_result_path
+    )
+    assert put_calls
+    assert put_calls[0][0] == trigger_bucket
+    assert put_calls[0][1] == trigger_key
+    assert put_calls[0][3] == "application/json"
+
+
 def test_d20_default_conf_rejects_unsafe_env_bc21_base_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1267,7 +1324,7 @@ def test_d20_trigger_conf_rejects_invalid_seed_refresh_result(tmp_path: Path) ->
     conf["artifact_root_path"] = str(tmp_path)
     plan = build_public_docs_seed_refresh_plan(conf)
 
-    with pytest.raises(ValueError, match="public_docs_seed_refresh_result_path must exist"):
+    with pytest.raises(ValueError, match="public_docs_seed_refresh_result file is not readable"):
         write_public_docs_publish_activation_trigger_conf_artifact(plan.to_canonical_json())
 
     seed_refresh_result_path = Path(
