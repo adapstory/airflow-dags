@@ -10,7 +10,9 @@ from dags.serp_eval_contracts import (
     build_public_docs_seed_refresh_plan as build_public_docs_seed_refresh_plan_contract,
 )
 from dags.serp_eval_contracts import (
+    default_public_docs_seed_refresh_conf,
     dispatch_public_docs_seed_refresh_handoff,
+    execute_pipeline_cli_spec,
     governance_notification_pending,
     write_airflow_plan_artifact,
     write_public_docs_seed_refresh_plan_artifact,
@@ -21,6 +23,10 @@ from dags.serp_eval_contracts import (
 def validate_public_docs_seed_registry(**context: Any) -> str:
     dag_run = context.get("dag_run")
     conf = getattr(dag_run, "conf", None) or {}
+    if not conf:
+        conf = default_public_docs_seed_refresh_conf(
+            generated_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        )
     return write_airflow_plan_artifact(build_public_docs_seed_refresh_plan_contract(conf))
 
 
@@ -67,6 +73,13 @@ dispatch_handoff = PythonOperator(
     dag=dag,
 )
 
+run_pipeline = PythonOperator(
+    task_id="run_public_docs_seed_refresh_pipeline",
+    python_callable=execute_pipeline_cli_spec,
+    op_args=["{{ ti.xcom_pull(task_ids='dispatch_pipeline_seed_refresh_handoff') }}"],
+    dag=dag,
+)
+
 notify_governance = PythonOperator(
     task_id="notify_governance_eval_surfaces",
     python_callable=governance_notification_pending,
@@ -79,5 +92,6 @@ notify_governance = PythonOperator(
     >> write_seed_registry
     >> build_refresh_plan
     >> dispatch_handoff
+    >> run_pipeline
     >> notify_governance
 )

@@ -37,7 +37,7 @@ SERP eval DAG contracts:
   | D17 `serp_model_catalog_promotion` | Planned gap | Model promotion/deprecation DAG is not implemented yet. |
   | D18 `serp_chaos_restore_game_day` | Planned gap | Restore/game-day DAG is not implemented yet. |
   | D19 `serp_benchmark_improvement_wave` | Scaffolded deterministic contract | Writes deterministic improvement artifacts in-task; live improvement runner wiring is still planned. |
-  | D20 `serp_web_seed_crawl_refresh` | Implemented scheduled handoff contract | Validates governed public-docs seed registries and emits deterministic pipeline handoff artifacts daily; live crawler/frontier execution and D4 child dispatch remain planned. |
+  | D20 `serp_web_seed_crawl_refresh` | Implemented scheduled pipeline CLI bridge in current source | Uses a default stack-inventory anchored seed registry when no `dag_run.conf` is supplied, writes deterministic seed/refresh artifacts, and runs the packaged SERP pipeline CLI bridge. Live crawler/frontier expansion, publish activation, and deployed GitOps image refresh remain planned. |
 
 - `serp_nightly_regression_suite` is the D6 contract DAG. Its `dag_run.conf`
   must provide tenant id, pack version ids, retrieval/reranker profile versions,
@@ -104,30 +104,29 @@ SERP eval DAG contracts:
   governance metadata, raw secrets, malformed or tampered artifacts, or
   below-floor candidate scores fail closed.
 - `serp_web_seed_crawl_refresh` is the D20 scheduled public-docs seed refresh
-  handoff DAG. Its `dag_run.conf` must provide tenant id, pack id/version,
-  registry resource identity, approved actor id, generated timestamp, a
-  governed `seed_registry`, and either `artifact_root_path` or
+  DAG. When `dag_run.conf` is empty, it builds the default public-docs seed
+  registry from the stack-inventory anchored source set. Override
+  `dag_run.conf` may still provide tenant id, pack id/version, registry
+  resource identity, approved actor id, generated timestamp, a governed
+  `seed_registry`, and either `artifact_root_path` or
   `ADAPSTORY_AIRFLOW_ARTIFACT_ROOT`. The seed registry is intentionally limited
   to currently executable connector types: `git`, `website`, `openapi`, and
   `pdf`. Markdown/file-upload intake, Confluence, Notion, and Google Docs are
   taxonomy or planned adapters until their connectors exist in the SERP
-  pipeline. Each seed
-  must be approved, public or external-ok, reference the
+  pipeline. Each seed must be approved, public or external-ok, reference the
   `tmp/stack-inventory-2026-07-02.md` inventory evidence, include official-docs
   URI, license/distribution state, daily/nightly refresh policy, and a bounded
   crawl policy with robots enforcement, sitemap intent, allowlist, denylist,
   max depth, max pages, and user agent. The DAG derives `airflow-plan.json`,
   `public-docs-seed-registry.json`, and
-  `public-docs-seed-refresh-plan.json` under a deterministic operation
-  directory. The refresh plan emits fetch requests and pipeline run specs for
-  the existing fetch/parse/chunk/embed/index path and marks the post-index
-  state as activation-pending. It does not perform network crawling directly;
-  frontier expansion, changed-page fetch execution, D4 dispatch, publish
-  activation, and deployed GitOps wiring remain planned runtime work.
-- The current executable D20 processing surface after this handoff is the
-  `adapstory_serp_pipeline.orchestration.seed_refresh` library runner in the
-  SERP pipeline package. Airflow emits validated handoff artifacts for that
-  runner; it does not expose or execute a standalone ingest CLI today.
+  `public-docs-seed-refresh-plan.json`, then runs
+  `python -m adapstory_serp_pipeline.orchestration.seed_refresh_cli` without
+  shell expansion and persists `public-docs-seed-refresh-result.json`. The
+  packaged CLI executes the current fetch/parse/chunk/embed/index path through
+  the SERP pipeline ports and writes deterministic batch evidence. It does not
+  perform crawler frontier expansion, changed-page discovery, approval,
+  signing, publish activation, or live store credential management; those
+  remain planned runtime work.
 - Runtime status in this document means current source-level contract unless a
   deployed runtime is explicitly named. The production Airflow image and
   `gitSync` revision are pinned in GitOps by `Adapstory-GitOps/infra/airflow`;

@@ -28,9 +28,12 @@ from dags.serp_eval_contracts import (
     build_tenant_golden_registry_cli_spec,
     build_tenant_golden_regression_plan,
     build_tenant_golden_runner_cli_spec,
+    default_public_docs_seed_refresh_conf,
+    dispatch_public_docs_seed_refresh_handoff,
     evaluate_nightly_regression_gate,
     evaluate_tenant_golden_gate,
     execute_gateway_cli_spec,
+    execute_pipeline_cli_spec,
     write_airflow_plan_artifact,
     write_benchmark_improvement_decision_artifact,
     write_benchmark_improvement_scoreboard_artifact,
@@ -364,6 +367,64 @@ def test_execute_gateway_cli_spec_runs_without_shell_and_persists_stdout(
     )
 
     assert calls == [(["python", "-m", "safe.module", "run"], True, False, True)]
+    assert output_path.exists()
+    assert json.loads(output_path.read_text(encoding="utf-8")) == payload
+    assert result["payload"] == payload
+    assert result["artifactPath"] == str(output_path)
+
+
+def test_execute_pipeline_cli_spec_runs_without_shell_and_persists_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output_path = tmp_path / "public-docs-seed-refresh-result.json"
+    payload = {"artifact_type": "public_docs_seed_refresh_batch_evidence", "status": "indexed"}
+    calls: list[object] = []
+
+    def fake_run(
+        argv: list[str],
+        *,
+        capture_output: bool,
+        check: bool,
+        text: bool,
+    ) -> object:
+        calls.append((argv, capture_output, check, text))
+
+        class Result:
+            returncode = 0
+            stdout = json.dumps(payload)
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr("dags.serp_eval_contracts.subprocess.run", fake_run)
+
+    result = execute_pipeline_cli_spec(
+        {
+            "argv": [
+                "python",
+                "-m",
+                "adapstory_serp_pipeline.orchestration.seed_refresh_cli",
+            ],
+            "contract_version": "serp-airflow-pipeline-cli-bridge/v1",
+            "dag_id": "serp_web_seed_crawl_refresh",
+            "input_paths": [str(tmp_path / "public-docs-seed-refresh-plan.json")],
+            "operation_id": "op-1",
+            "status": "ready_for_pipeline_cli_runner",
+            "stdout_path": str(output_path),
+            "task_id": "public_docs_seed_refresh_pipeline",
+            "tenant_id": TENANT_ID,
+        }
+    )
+
+    assert calls == [
+        (
+            ["python", "-m", "adapstory_serp_pipeline.orchestration.seed_refresh_cli"],
+            True,
+            False,
+            True,
+        )
+    ]
     assert output_path.exists()
     assert json.loads(output_path.read_text(encoding="utf-8")) == payload
     assert result["payload"] == payload
@@ -875,6 +936,9 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
         "public_docs_seed_refresh_plan": "/".join(
             (str(tmp_path), plan.payload["operation_id"], "public-docs-seed-refresh-plan.json")
         ),
+        "public_docs_seed_refresh_result": "/".join(
+            (str(tmp_path), plan.payload["operation_id"], "public-docs-seed-refresh-result.json")
+        ),
         "public_docs_seed_registry": "/".join(
             (str(tmp_path), plan.payload["operation_id"], "public-docs-seed-registry.json")
         ),
@@ -884,6 +948,7 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
         "write_public_docs_seed_registry",
         "build_public_docs_seed_refresh_plan",
         "dispatch_pipeline_seed_refresh_handoff",
+        "run_public_docs_seed_refresh_pipeline",
         "notify_governance_eval_surfaces",
     ]
 
@@ -922,6 +987,46 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
         request["pipeline_run_spec"]["pack_id"]
         for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
     } == {PACK_ID}
+    cli_spec = dispatch_public_docs_seed_refresh_handoff(plan.to_canonical_json())
+    assert cli_spec["status"] == "ready_for_pipeline_cli_runner"
+    assert cli_spec["task_id"] == "public_docs_seed_refresh_pipeline"
+    assert (
+        cli_spec["stdout_path"] == plan.payload["artifact_paths"]["public_docs_seed_refresh_result"]
+    )
+    assert "pending_pipeline_dispatch" not in json.dumps(cli_spec, sort_keys=True)
+    assert cli_spec["argv"][:3] == [
+        "python",
+        "-m",
+        "adapstory_serp_pipeline.orchestration.seed_refresh_cli",
+    ]
+
+
+def test_default_public_docs_seed_refresh_conf_materializes_autonomous_d20_plan(
+    tmp_path: Path,
+) -> None:
+    conf = default_public_docs_seed_refresh_conf(
+        generated_at="2026-07-08T21:00:00Z",
+        artifact_root_path=str(tmp_path),
+    )
+
+    plan = build_public_docs_seed_refresh_plan(conf)
+
+    assert conf["seed_registry"]
+    assert plan.payload["dag_id"] == "serp_web_seed_crawl_refresh"
+    assert plan.payload["status"] == "ready_for_public_docs_seed_refresh"
+    assert plan.payload["seed_count"] == 4
+    assert plan.payload["source_type_counts"] == {
+        "git": 1,
+        "openapi": 1,
+        "pdf": 1,
+        "website": 1,
+    }
+    assert {
+        seed["inventory_evidence"]["stack_inventory_path"] for seed in plan.payload["seed_registry"]
+    } == {"tmp/stack-inventory-2026-07-02.md"}
+    assert {seed["metadata"]["origin"] for seed in plan.payload["seed_registry"]} == {
+        "tmp/stack-inventory-2026-07-02.md"
+    }
 
 
 def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> None:
@@ -1010,6 +1115,7 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
                 "write_public_docs_seed_registry",
                 "build_public_docs_seed_refresh_plan",
                 "dispatch_pipeline_seed_refresh_handoff",
+                "run_public_docs_seed_refresh_pipeline",
                 "notify_governance_eval_surfaces",
             ],
         ),
@@ -1057,6 +1163,16 @@ def test_serp_nightly_dag_uses_live_gateway_cli_for_d6_path() -> None:
     assert "build_nightly_registry_submit_cli_spec" in source
     assert "write_nightly_report_artifact" not in source
     assert "write_nightly_registry_receipts_artifact" not in source
+
+
+def test_serp_public_docs_dag_runs_default_seed_registry_pipeline_path() -> None:
+    source = (REPO_ROOT / "dags" / "serp_web_seed_crawl_refresh.py").read_text(encoding="utf-8")
+
+    assert "default_public_docs_seed_refresh_conf" in source
+    assert "if not conf:" in source
+    assert "datetime.now(UTC)" in source
+    assert "execute_pipeline_cli_spec" in source
+    assert "run_public_docs_seed_refresh_pipeline" in source
 
 
 def test_serp_improvement_dag_uses_native_artifact_writers_for_d19_path() -> None:

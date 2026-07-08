@@ -34,9 +34,11 @@ MANDATORY_SERP_BENCHMARK_SUITES = (
 SERP_NORMALIZED_GATE_FLOOR = 0.75
 GATEWAY_CLI_MODULE = "adapstory_serp_mcp_gateway.airflow_eval_cli"
 GATEWAY_CLI_PYTHON = "python"
+PIPELINE_CLI_MODULE = "adapstory_serp_pipeline.orchestration.seed_refresh_cli"
 
 _RESOURCE_TYPES = frozenset({"pack", "tenant", "workflow"})
 _GATEWAY_CLI_CONTRACT_VERSION = "serp-airflow-gateway-cli-bridge/v1"
+_PIPELINE_CLI_CONTRACT_VERSION = "serp-airflow-pipeline-cli-bridge/v1"
 _AIRFLOW_ARTIFACT_CONTRACT_VERSION = "serp-airflow-artifact-writer/v1"
 _EVAL_CONTRACT_VERSION = "2026.07.2"
 _DRY_RUN_SUITE_VERSION = "dry-run@2026.07.2"
@@ -45,6 +47,12 @@ _PUBLIC_DOCS_NAMESPACE = UUID("018f5e13-2d73-7a77-a052-8d1bcbf96600")
 _PUBLIC_DOCS_EXECUTABLE_SOURCE_TYPES = frozenset({"git", "openapi", "pdf", "website"})
 _PUBLIC_DOCS_DATA_CLASSES = frozenset({"PUBLIC", "INTERNAL_EXTERNAL_OK"})
 _PUBLIC_DOCS_DISTRIBUTION_RULES = frozenset({"cite-and-cache", "cite-only", "internal-cache-only"})
+_PUBLIC_DOCS_DEFAULT_TENANT_ID = "00000000-0000-4000-a000-000000000001"
+_PUBLIC_DOCS_DEFAULT_PACK_ID = "00000000-0000-4000-a000-000000000201"
+_PUBLIC_DOCS_DEFAULT_PACK_VERSION_ID = "018f5e13-2d73-7a77-a052-8d1bcbf96541"
+_PUBLIC_DOCS_DEFAULT_ACTOR_ID = "airflow-serp-public-docs-refresh"
+_PUBLIC_DOCS_DEFAULT_ARTIFACT_ROOT = "/var/opt/adapstory/serp-public-docs-refresh"
+_PUBLIC_DOCS_STACK_INVENTORY_PATH = "tmp/stack-inventory-2026-07-02.md"
 _ARTIFACT_ROOT_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_ROOT"
 _ARTIFACT_S3_ENDPOINT_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT"
 _ARTIFACT_S3_REGION_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION"
@@ -463,6 +471,10 @@ def build_public_docs_seed_refresh_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
                     "public_docs_seed_refresh_plan",
                     "public-docs-seed-refresh-plan.json",
                 ),
+                (
+                    "public_docs_seed_refresh_result",
+                    "public-docs-seed-refresh-result.json",
+                ),
             ),
         ),
         "contract_version": _EVAL_CONTRACT_VERSION,
@@ -484,12 +496,65 @@ def build_public_docs_seed_refresh_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
                 "write_public_docs_seed_registry",
                 "build_public_docs_seed_refresh_plan",
                 "dispatch_pipeline_seed_refresh_handoff",
+                "run_public_docs_seed_refresh_pipeline",
                 "notify_governance_eval_surfaces",
             )
         ),
         "tenant_id": str(tenant_id),
     }
     return SerpDagPlan(plan_payload)
+
+
+def default_public_docs_seed_refresh_conf(
+    *,
+    generated_at: str,
+    artifact_root_path: str | None = None,
+) -> dict[str, Any]:
+    generated_at = _required_datetime_string({"generated_at": generated_at}, "generated_at")
+    root_path = artifact_root_path or os.environ.get(
+        _ARTIFACT_ROOT_ENV,
+        _PUBLIC_DOCS_DEFAULT_ARTIFACT_ROOT,
+    )
+    return {
+        "actor_id": _PUBLIC_DOCS_DEFAULT_ACTOR_ID,
+        "artifact_root_path": root_path,
+        "generated_at": generated_at,
+        "pack_id": _PUBLIC_DOCS_DEFAULT_PACK_ID,
+        "pack_version_id": _PUBLIC_DOCS_DEFAULT_PACK_VERSION_ID,
+        "registry_resource_id": _PUBLIC_DOCS_DEFAULT_PACK_VERSION_ID,
+        "registry_resource_type": "pack",
+        "seed_registry": [
+            _default_public_docs_seed(
+                "k3s-docs",
+                "website",
+                "https://docs.k3s.io/",
+                component="K3s",
+                version="v1.34.3+k3s1",
+            ),
+            _default_public_docs_seed(
+                "spring-boot-openapi-docs",
+                "openapi",
+                "https://docs.spring.io/spring-boot/4.0/api/rest/application.yaml",
+                component="Spring Boot",
+                version="4.0.7",
+            ),
+            _default_public_docs_seed(
+                "react-reference-pdf",
+                "pdf",
+                "https://react.dev/reference/react.pdf",
+                component="React",
+                version="19.2.6",
+            ),
+            _default_public_docs_seed(
+                "adapstory-gitops-docs",
+                "git",
+                "git+file:///opt/adapstory/Adapstory-GitOps.git?ref=HEAD&path=README.md",
+                component="Adapstory GitOps",
+                version="main",
+            ),
+        ],
+        "tenant_id": _PUBLIC_DOCS_DEFAULT_TENANT_ID,
+    }
 
 
 def write_airflow_plan_artifact(plan: SerpDagPlan) -> str:
@@ -631,6 +696,41 @@ def execute_gateway_cli_spec(cli_spec: Mapping[str, Any] | str) -> dict[str, Any
             f"returncode={completed.returncode} stderr_sha256={stderr_sha256}"
         )
     payload = _json_object(completed.stdout, "gateway_cli_stdout")
+    _reject_raw_secrets(payload)
+    _write_json_artifact(stdout_path, payload)
+    return _artifact_result(
+        stdout_path,
+        artifact_type=_required_str(spec, "task_id"),
+        operation_id=_required_str(spec, "operation_id"),
+        payload=payload,
+    )
+
+
+def execute_pipeline_cli_spec(cli_spec: Mapping[str, Any] | str) -> dict[str, Any]:
+    spec = _json_object(cli_spec, "cli_spec")
+    _reject_raw_secrets(spec)
+    if _required_str(spec, "contract_version") != _PIPELINE_CLI_CONTRACT_VERSION:
+        raise ValueError("pipeline cli spec contract version is unsupported")
+    if _required_str(spec, "status") != "ready_for_pipeline_cli_runner":
+        raise ValueError("pipeline cli spec is not ready for execution")
+    argv = _required_str_list(spec, "argv")
+    if any(value in {";", "&&", "|"} for value in argv):
+        raise ValueError("pipeline cli spec argv must not contain shell operators")
+    stdout_path = _artifact_path("stdout_path", _required_str(spec, "stdout_path"))
+    completed = subprocess.run(
+        argv,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if completed.returncode != 0:
+        stderr_sha256 = sha256(completed.stderr.encode("utf-8")).hexdigest()
+        raise ValueError(
+            "pipeline cli execution failed: "
+            f"task_id={_required_str(spec, 'task_id')} "
+            f"returncode={completed.returncode} stderr_sha256={stderr_sha256}"
+        )
+    payload = _json_object(completed.stdout, "pipeline_cli_stdout")
     _reject_raw_secrets(payload)
     _write_json_artifact(stdout_path, payload)
     return _artifact_result(
@@ -1076,14 +1176,49 @@ def dispatch_public_docs_seed_refresh_handoff(plan_json: str) -> dict[str, Any]:
     plan = _json_object(plan_json, "plan_json")
     if _required_str(plan, "dag_id") != "serp_web_seed_crawl_refresh":
         raise ValueError("plan dag_id does not match public docs seed-refresh dispatch")
+    artifact_paths = _required_artifact_paths(
+        plan,
+        (
+            "public_docs_seed_refresh_plan",
+            "public_docs_seed_refresh_result",
+        ),
+    )
+    refresh_plan_path = artifact_paths["public_docs_seed_refresh_plan"]
+    result_path = artifact_paths["public_docs_seed_refresh_result"]
+    artifact_root_path = str(PurePosixPath(result_path).parent)
     return {
+        "argv": [
+            GATEWAY_CLI_PYTHON,
+            "-m",
+            PIPELINE_CLI_MODULE,
+            "--refresh-plan",
+            refresh_plan_path,
+            "--artifact-root",
+            artifact_root_path,
+            "--evidence-output",
+            result_path,
+            "--clock-at",
+            _required_datetime_string(plan, "generated_at"),
+            "--embedding-mode",
+            "deterministic-dev",
+            "--tenant-id",
+            _required_str(plan, "tenant_id"),
+            "--pack-id",
+            _required_str(plan, "pack_id"),
+            "--pack-version-id",
+            _required_str(plan, "pack_version_id"),
+        ],
+        "contract_version": _PIPELINE_CLI_CONTRACT_VERSION,
         "dag_id": "serp_web_seed_crawl_refresh",
         "d4_dispatch_target": "serp_scan_parse_index",
+        "input_paths": [refresh_plan_path],
         "operation_id": _required_str(plan, "operation_id"),
         "plan_sha256": sha256(_canonical_json(plan).encode("utf-8")).hexdigest(),
         "seed_count": len(_required_object_list(plan, "seed_registry")),
         "seed_registry_sha256": _required_str(plan, "seed_registry_sha256"),
-        "status": "pending_pipeline_dispatch",
+        "status": "ready_for_pipeline_cli_runner",
+        "stdout_path": result_path,
+        "task_id": "public_docs_seed_refresh_pipeline",
         "tenant_id": _required_str(plan, "tenant_id"),
     }
 
@@ -2222,6 +2357,55 @@ def _public_docs_seed_registry(payload: Mapping[str, Any]) -> list[dict[str, Any
     seeds = [_public_docs_seed(seed) for seed in raw_seeds]
     _require_unique_public_docs_seed_values(seeds)
     return sorted(seeds, key=lambda seed: _required_str(seed, "seed_id"))
+
+
+def _default_public_docs_seed(
+    seed_id: str,
+    source_type: str,
+    source_uri: str,
+    *,
+    component: str,
+    version: str,
+) -> dict[str, Any]:
+    parsed = urlparse(source_uri)
+    allowed_domain = parsed.hostname or "opt.adapstory"
+    return {
+        "approved": True,
+        "connector_name": source_type,
+        "crawl_policy": {
+            "allowed_domains": [allowed_domain],
+            "deny_patterns": ["/login", "/admin"],
+            "max_depth": 2,
+            "max_pages": 50,
+            "respect_robots_txt": True,
+            "sitemap_discovery": True,
+            "user_agent": "AdapstorySERPDocsRefresh/2026.07",
+        },
+        "data_class": "PUBLIC",
+        "inventory_evidence": {
+            "component": component,
+            "evidence_sha256": sha256(f"{component}:{version}".encode()).hexdigest(),
+            "stack_inventory_path": _PUBLIC_DOCS_STACK_INVENTORY_PATH,
+            "version": version,
+        },
+        "license": {
+            "distribution_rule": "cite-and-cache",
+            "obligation_state": "reviewed-public-docs",
+        },
+        "metadata": {
+            "origin": _PUBLIC_DOCS_STACK_INVENTORY_PATH,
+            "purpose": "public-docs-seed-to-serve",
+        },
+        "official_docs_uri": source_uri,
+        "refresh_policy": {
+            "cadence": "daily",
+            "max_age_hours": 24,
+        },
+        "seed_id": seed_id,
+        "source_id": str(uuid5(NAMESPACE_URL, f"adapstory-serp-public-docs:{seed_id}")),
+        "source_type": source_type,
+        "source_uri": source_uri,
+    }
 
 
 def _public_docs_seed(seed: Mapping[str, Any]) -> dict[str, Any]:
