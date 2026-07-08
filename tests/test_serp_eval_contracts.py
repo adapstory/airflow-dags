@@ -381,7 +381,9 @@ def test_execute_pipeline_cli_spec_runs_without_shell_and_persists_stdout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    input_path = tmp_path / "public-docs-seed-refresh-plan.json"
     output_path = tmp_path / "public-docs-seed-refresh-result.json"
+    input_path.write_text("{}", encoding="utf-8")
     payload = {"artifact_type": "public_docs_seed_refresh_batch_evidence", "status": "indexed"}
     calls: list[object] = []
 
@@ -412,7 +414,7 @@ def test_execute_pipeline_cli_spec_runs_without_shell_and_persists_stdout(
             ],
             "contract_version": "serp-airflow-pipeline-cli-bridge/v1",
             "dag_id": "serp_web_seed_crawl_refresh",
-            "input_paths": [str(tmp_path / "public-docs-seed-refresh-plan.json")],
+            "input_paths": [str(input_path)],
             "operation_id": "op-1",
             "status": "ready_for_pipeline_cli_runner",
             "stdout_path": str(output_path),
@@ -433,6 +435,117 @@ def test_execute_pipeline_cli_spec_runs_without_shell_and_persists_stdout(
     assert json.loads(output_path.read_text(encoding="utf-8")) == payload
     assert result["payload"] == payload
     assert result["artifactPath"] == str(output_path)
+
+
+def test_execute_pipeline_cli_spec_materializes_s3_inputs_and_uploads_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = {
+        (
+            "airflow-serp-artifacts",
+            "serp-evals/op/public-docs-seed-refresh-plan.json",
+        ): b"{}",
+    }
+    payload = {"artifact_type": "public_docs_seed_refresh_batch_evidence", "status": "indexed"}
+    put_calls: list[tuple[str, str, str, str]] = []
+    run_calls: list[list[str]] = []
+
+    class FakeS3Client:
+        def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
+            return {"Body": io.BytesIO(storage[(Bucket, Key)])}
+
+        def put_object(
+            self,
+            *,
+            Bucket: str,
+            Key: str,
+            Body: bytes,
+            ContentType: str,
+        ) -> None:
+            put_calls.append((Bucket, Key, Body.decode("utf-8"), ContentType))
+
+    def fake_run(
+        argv: list[str],
+        *,
+        capture_output: bool,
+        check: bool,
+        text: bool,
+    ) -> object:
+        run_calls.append(argv)
+        assert capture_output is True
+        assert check is False
+        assert text is True
+        assert "s3://" not in " ".join(argv)
+        refresh_plan = Path(argv[argv.index("--refresh-plan") + 1])
+        artifact_root = Path(argv[argv.index("--artifact-root") + 1])
+        evidence_output = Path(argv[argv.index("--evidence-output") + 1])
+        assert refresh_plan.is_file()
+        assert artifact_root.is_dir()
+        assert evidence_output.is_absolute()
+
+        class Result:
+            returncode = 0
+            stdout = json.dumps(payload)
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr("dags.serp_eval_contracts._s3_client", lambda: FakeS3Client())
+    monkeypatch.setattr("dags.serp_eval_contracts.subprocess.run", fake_run)
+
+    result = execute_pipeline_cli_spec(
+        {
+            "argv": [
+                "python",
+                "-m",
+                "adapstory_serp_pipeline.orchestration.seed_refresh_cli",
+                "--refresh-plan",
+                "s3://airflow-serp-artifacts/serp-evals/op/public-docs-seed-refresh-plan.json",
+                "--artifact-root",
+                "s3://airflow-serp-artifacts/serp-evals/op",
+                "--evidence-output",
+                "s3://airflow-serp-artifacts/serp-evals/op/public-docs-seed-refresh-result.json",
+            ],
+            "contract_version": "serp-airflow-pipeline-cli-bridge/v1",
+            "dag_id": "serp_web_seed_crawl_refresh",
+            "input_paths": [
+                "s3://airflow-serp-artifacts/serp-evals/op/public-docs-seed-refresh-plan.json"
+            ],
+            "operation_id": "op-1",
+            "status": "ready_for_pipeline_cli_runner",
+            "stdout_path": (
+                "s3://airflow-serp-artifacts/serp-evals/op/public-docs-seed-refresh-result.json"
+            ),
+            "task_id": "public_docs_seed_refresh_pipeline",
+            "tenant_id": TENANT_ID,
+        }
+    )
+
+    assert run_calls
+    assert put_calls == [
+        (
+            "airflow-serp-artifacts",
+            "serp-evals/op/public-docs-seed-refresh-result.json",
+            json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+            "application/json",
+        )
+    ]
+    assert result["payload"] == payload
+    assert result["artifactPath"] == (
+        "s3://airflow-serp-artifacts/serp-evals/op/public-docs-seed-refresh-result.json"
+    )
+
+
+def test_dispatch_public_docs_seed_refresh_handoff_preserves_s3_artifact_root_uri() -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = "s3://airflow-serp-artifacts/serp-evals"
+    plan = build_public_docs_seed_refresh_plan(conf)
+
+    cli_spec = dispatch_public_docs_seed_refresh_handoff(plan.to_canonical_json())
+
+    artifact_root = cli_spec["argv"][cli_spec["argv"].index("--artifact-root") + 1]
+    assert artifact_root.startswith("s3://airflow-serp-artifacts/serp-evals/")
+    assert not artifact_root.startswith("s3:/airflow-serp-artifacts")
 
 
 def test_execute_gateway_cli_spec_materializes_s3_inputs_and_uploads_stdout(

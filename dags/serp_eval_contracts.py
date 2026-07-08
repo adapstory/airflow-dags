@@ -943,13 +943,21 @@ def execute_pipeline_cli_spec(cli_spec: Mapping[str, Any] | str) -> dict[str, An
     argv = _required_str_list(spec, "argv")
     if any(value in {";", "&&", "|"} for value in argv):
         raise ValueError("pipeline cli spec argv must not contain shell operators")
+    input_paths = _required_str_list(spec, "input_paths")
     stdout_path = _artifact_path("stdout_path", _required_str(spec, "stdout_path"))
-    completed = subprocess.run(
-        argv,
-        capture_output=True,
-        check=False,
-        text=True,
-    )
+    with TemporaryDirectory(prefix="airflow-pipeline-artifacts-") as temp_dir:
+        argv = _materialize_pipeline_cli_argv(
+            argv,
+            input_paths,
+            stdout_path=stdout_path,
+            temp_dir=temp_dir,
+        )
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            check=False,
+            text=True,
+        )
     if completed.returncode != 0:
         stderr_sha256 = sha256(completed.stderr.encode("utf-8")).hexdigest()
         raise ValueError(
@@ -1436,7 +1444,7 @@ def dispatch_public_docs_seed_refresh_handoff(plan_json: str) -> dict[str, Any]:
     )
     refresh_plan_path = artifact_paths["public_docs_seed_refresh_plan"]
     result_path = artifact_paths["public_docs_seed_refresh_result"]
-    artifact_root_path = str(PurePosixPath(result_path).parent)
+    artifact_root_path = _artifact_parent_path(result_path)
     refresh_payload = _public_docs_seed_refresh_payload(plan)
     refresh_status = _required_str(refresh_payload, "status")
     argv = [
@@ -3834,6 +3842,33 @@ def _write_artifact_text(path: str, raw: str) -> None:
     )
 
 
+def _artifact_parent_path(path: str) -> str:
+    artifact = _artifact_ref("artifact_path", path)
+    if artifact.kind == "s3":
+        parent = str(PurePosixPath(_required_str_ref(artifact.key)).parent).strip("/")
+        if not parent or parent == ".":
+            raise ValueError("artifact_path parent must include an S3 object prefix")
+        return f"s3://{_required_str_ref(artifact.bucket)}/{parent}"
+    return str(Path(_required_str_ref(artifact.local_path)).parent)
+
+
+def _replace_cli_option_value(
+    argv: Sequence[str],
+    option_name: str,
+    replacement_value: str,
+) -> list[str]:
+    result = list(argv)
+    try:
+        option_index = result.index(option_name)
+    except ValueError:
+        return result
+    value_index = option_index + 1
+    if value_index >= len(result):
+        raise ValueError(f"{option_name} requires a value")
+    result[value_index] = replacement_value
+    return result
+
+
 def _materialize_gateway_cli_argv(
     argv: Sequence[str],
     input_paths: Sequence[str],
@@ -3858,6 +3893,38 @@ def _materialize_gateway_cli_argv(
         target_path.write_text(_read_artifact_text(input_path, "input_path"), encoding="utf-8")
         materialized[input_path] = str(target_path)
     return [materialized.get(value, value) for value in argv]
+
+
+def _materialize_pipeline_cli_argv(
+    argv: Sequence[str],
+    input_paths: Sequence[str],
+    *,
+    stdout_path: str,
+    temp_dir: str,
+) -> list[str]:
+    materialized = _materialize_gateway_cli_argv(argv, input_paths, temp_dir=temp_dir)
+    stdout_artifact = _artifact_ref("stdout_path", stdout_path)
+    if stdout_artifact.kind == "s3":
+        local_stdout_path = (
+            Path(temp_dir) / "stdout" / Path(_required_str_ref(stdout_artifact.key)).name
+        )
+        local_stdout_path.parent.mkdir(parents=True, exist_ok=True)
+        materialized = _replace_cli_option_value(
+            materialized,
+            "--evidence-output",
+            str(local_stdout_path),
+        )
+    if "--artifact-root" in materialized:
+        artifact_root = materialized[materialized.index("--artifact-root") + 1]
+        if _artifact_ref("artifact_root", artifact_root).kind == "s3":
+            local_artifact_root = Path(temp_dir) / "pipeline-artifacts"
+            local_artifact_root.mkdir(parents=True, exist_ok=True)
+            materialized = _replace_cli_option_value(
+                materialized,
+                "--artifact-root",
+                str(local_artifact_root),
+            )
+    return materialized
 
 
 @lru_cache(maxsize=1)
