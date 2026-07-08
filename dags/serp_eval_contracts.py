@@ -691,7 +691,7 @@ def default_public_docs_seed_refresh_conf(
             _default_public_docs_seed(
                 "adapstory-gitops-docs",
                 "git",
-                "git+file:///opt/adapstory/Adapstory-GitOps.git?ref=HEAD&path=README.md",
+                "git+file:///opt/adapstory/Adapstory-GitOps.git?ref=HEAD&path=readme.md",
                 component="Adapstory GitOps",
                 version="main",
             ),
