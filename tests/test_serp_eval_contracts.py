@@ -1310,7 +1310,7 @@ def test_d20_trigger_conf_includes_bc21_base_url_from_env(
 ) -> None:
     monkeypatch.setenv(
         "ADAPSTORY_SERP_BC21_BASE_URL",
-        "http://prod-serp-context-platform.env-prod.svc.cluster.local",
+        "http://prod-serp-context-platform-svc.env-prod.svc.cluster.local:8080",
     )
     conf = _public_docs_seed_refresh_conf()
     conf["artifact_root_path"] = str(tmp_path)
@@ -1326,7 +1326,7 @@ def test_d20_trigger_conf_includes_bc21_base_url_from_env(
     )
 
     assert plan.payload["bc21_base_url"] == (
-        "http://prod-serp-context-platform.env-prod.svc.cluster.local"
+        "http://prod-serp-context-platform-svc.env-prod.svc.cluster.local:8080"
     )
     assert trigger_artifact["payload"]["governance_required_fields"] == [
         "activation_idempotency_key",
@@ -1336,7 +1336,7 @@ def test_d20_trigger_conf_includes_bc21_base_url_from_env(
         "evidence_seal_hash",
     ]
     assert trigger_artifact["payload"]["target_dag_run_conf"]["bc21_base_url"] == (
-        "http://prod-serp-context-platform.env-prod.svc.cluster.local"
+        "http://prod-serp-context-platform-svc.env-prod.svc.cluster.local:8080"
     )
 
 
