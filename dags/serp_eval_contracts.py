@@ -47,6 +47,9 @@ _PUBLIC_DOCS_NAMESPACE = UUID("018f5e13-2d73-7a77-a052-8d1bcbf96600")
 _PUBLIC_DOCS_EXECUTABLE_SOURCE_TYPES = frozenset({"git", "openapi", "pdf", "website"})
 _PUBLIC_DOCS_DATA_CLASSES = frozenset({"PUBLIC", "INTERNAL_EXTERNAL_OK"})
 _PUBLIC_DOCS_DISTRIBUTION_RULES = frozenset({"cite-and-cache", "cite-only", "internal-cache-only"})
+_PUBLIC_DOCS_FRESHNESS_STATUSES = frozenset(
+    {"failed", "indexed", "never_indexed", "partial_failure", "quarantined"}
+)
 _PUBLIC_DOCS_DEFAULT_TENANT_ID = "00000000-0000-4000-a000-000000000001"
 _PUBLIC_DOCS_DEFAULT_PACK_ID = "00000000-0000-4000-a000-000000000201"
 _PUBLIC_DOCS_DEFAULT_PACK_VERSION_ID = "018f5e13-2d73-7a77-a052-8d1bcbf96541"
@@ -711,7 +714,10 @@ def execute_pipeline_cli_spec(cli_spec: Mapping[str, Any] | str) -> dict[str, An
     _reject_raw_secrets(spec)
     if _required_str(spec, "contract_version") != _PIPELINE_CLI_CONTRACT_VERSION:
         raise ValueError("pipeline cli spec contract version is unsupported")
-    if _required_str(spec, "status") != "ready_for_pipeline_cli_runner":
+    status = _required_str(spec, "status")
+    if status == "no_due_sources":
+        return _execute_pipeline_noop_spec(spec)
+    if status != "ready_for_pipeline_cli_runner":
         raise ValueError("pipeline cli spec is not ready for execution")
     argv = _required_str_list(spec, "argv")
     if any(value in {";", "&&", "|"} for value in argv):
@@ -732,6 +738,29 @@ def execute_pipeline_cli_spec(cli_spec: Mapping[str, Any] | str) -> dict[str, An
         )
     payload = _json_object(completed.stdout, "pipeline_cli_stdout")
     _reject_raw_secrets(payload)
+    _write_json_artifact(stdout_path, payload)
+    return _artifact_result(
+        stdout_path,
+        artifact_type=_required_str(spec, "task_id"),
+        operation_id=_required_str(spec, "operation_id"),
+        payload=payload,
+    )
+
+
+def _execute_pipeline_noop_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
+    stdout_path = _artifact_path("stdout_path", _required_str(spec, "stdout_path"))
+    payload = {
+        "artifact_type": "public_docs_seed_refresh_noop",
+        "contract_version": _PIPELINE_CLI_CONTRACT_VERSION,
+        "dag_id": _required_str(spec, "dag_id"),
+        "operation_id": _required_str(spec, "operation_id"),
+        "plan_sha256": _required_str(spec, "plan_sha256"),
+        "seed_count": 0,
+        "seed_registry_sha256": _required_str(spec, "seed_registry_sha256"),
+        "skipped_seed_count": int(spec.get("skipped_seed_count", 0)),
+        "status": "no_due_sources",
+        "tenant_id": _required_str(spec, "tenant_id"),
+    }
     _write_json_artifact(stdout_path, payload)
     return _artifact_result(
         stdout_path,
@@ -1186,37 +1215,46 @@ def dispatch_public_docs_seed_refresh_handoff(plan_json: str) -> dict[str, Any]:
     refresh_plan_path = artifact_paths["public_docs_seed_refresh_plan"]
     result_path = artifact_paths["public_docs_seed_refresh_result"]
     artifact_root_path = str(PurePosixPath(result_path).parent)
+    refresh_payload = _public_docs_seed_refresh_payload(plan)
+    refresh_status = _required_str(refresh_payload, "status")
+    argv = [
+        GATEWAY_CLI_PYTHON,
+        "-m",
+        PIPELINE_CLI_MODULE,
+        "--refresh-plan",
+        refresh_plan_path,
+        "--artifact-root",
+        artifact_root_path,
+        "--evidence-output",
+        result_path,
+        "--clock-at",
+        _required_datetime_string(plan, "generated_at"),
+        "--embedding-mode",
+        "deterministic-dev",
+        "--tenant-id",
+        _required_str(plan, "tenant_id"),
+        "--pack-id",
+        _required_str(plan, "pack_id"),
+        "--pack-version-id",
+        _required_str(plan, "pack_version_id"),
+    ]
+    if refresh_status == "no_due_sources":
+        argv = []
+        cli_status = "no_due_sources"
+    else:
+        cli_status = "ready_for_pipeline_cli_runner"
     return {
-        "argv": [
-            GATEWAY_CLI_PYTHON,
-            "-m",
-            PIPELINE_CLI_MODULE,
-            "--refresh-plan",
-            refresh_plan_path,
-            "--artifact-root",
-            artifact_root_path,
-            "--evidence-output",
-            result_path,
-            "--clock-at",
-            _required_datetime_string(plan, "generated_at"),
-            "--embedding-mode",
-            "deterministic-dev",
-            "--tenant-id",
-            _required_str(plan, "tenant_id"),
-            "--pack-id",
-            _required_str(plan, "pack_id"),
-            "--pack-version-id",
-            _required_str(plan, "pack_version_id"),
-        ],
+        "argv": argv,
         "contract_version": _PIPELINE_CLI_CONTRACT_VERSION,
         "dag_id": "serp_web_seed_crawl_refresh",
         "d4_dispatch_target": "serp_scan_parse_index",
         "input_paths": [refresh_plan_path],
         "operation_id": _required_str(plan, "operation_id"),
         "plan_sha256": sha256(_canonical_json(plan).encode("utf-8")).hexdigest(),
-        "seed_count": len(_required_object_list(plan, "seed_registry")),
+        "seed_count": int(refresh_payload["seed_count"]),
         "seed_registry_sha256": _required_str(plan, "seed_registry_sha256"),
-        "status": "ready_for_pipeline_cli_runner",
+        "skipped_seed_count": int(refresh_payload["skipped_seed_count"]),
+        "status": cli_status,
         "stdout_path": result_path,
         "task_id": "public_docs_seed_refresh_pipeline",
         "tenant_id": _required_str(plan, "tenant_id"),
@@ -1232,23 +1270,28 @@ def _public_docs_seed_refresh_payload(plan: Mapping[str, Any]) -> dict[str, Any]
             "public_docs_seed_refresh_plan",
         ),
     )
-    source_fetch_requests = [
-        _public_docs_source_fetch_request(plan, seed)
-        for seed in _required_object_list(plan, "seed_registry")
-    ]
+    generated_at = _required_datetime_string(plan, "generated_at")
+    due_seeds, skipped_seed_refreshes = _public_docs_due_seed_selection(
+        _required_object_list(plan, "seed_registry"),
+        generated_at,
+    )
+    source_fetch_requests = [_public_docs_source_fetch_request(plan, seed) for seed in due_seeds]
+    status = "ready_for_pipeline_dispatch" if source_fetch_requests else "no_due_sources"
     return {
         "artifact_paths": artifact_paths,
         "contract_version": _EVAL_CONTRACT_VERSION,
         "d4_dispatch_target": "serp_scan_parse_index",
         "dag_id": "serp_web_seed_crawl_refresh",
-        "generated_at": _required_datetime_string(plan, "generated_at"),
+        "generated_at": generated_at,
         "operation_id": _required_str(plan, "operation_id"),
         "pack_id": _required_str(plan, "pack_id"),
         "pack_version_id": _required_str(plan, "pack_version_id"),
         "seed_count": len(source_fetch_requests),
         "seed_registry_sha256": _required_str(plan, "seed_registry_sha256"),
+        "skipped_seed_count": len(skipped_seed_refreshes),
+        "skipped_seed_refreshes": skipped_seed_refreshes,
         "source_fetch_requests": source_fetch_requests,
-        "status": "ready_for_pipeline_dispatch",
+        "status": status,
         "tenant_id": _required_str(plan, "tenant_id"),
     }
 
@@ -1287,6 +1330,7 @@ def _public_docs_source_fetch_request(
             "inventory_evidence": dict(_required_mapping(seed, "inventory_evidence")),
             "license": dict(_required_mapping(seed, "license")),
             "refresh_policy": dict(_required_mapping(seed, "refresh_policy")),
+            "refresh_selection": dict(_required_mapping(seed, "refresh_selection")),
         }
     )
     return {
@@ -2427,6 +2471,7 @@ def _public_docs_seed(seed: Mapping[str, Any]) -> dict[str, Any]:
         "connector_name": _required_public_docs_connector_name(seed, source_type),
         "crawl_policy": crawl_policy,
         "data_class": _required_public_docs_data_class(seed),
+        "freshness_state": _public_docs_freshness_state(seed),
         "inventory_evidence": inventory_evidence,
         "license": license_contract,
         "metadata": dict(metadata),
@@ -2549,6 +2594,107 @@ def _public_docs_refresh_policy(seed: Mapping[str, Any]) -> dict[str, Any]:
         "cadence": cadence,
         "max_age_hours": _required_positive_int(policy, "max_age_hours"),
     }
+
+
+def _public_docs_freshness_state(seed: Mapping[str, Any]) -> dict[str, Any]:
+    freshness = seed.get("freshness_state")
+    if freshness is None:
+        return {"status": "never_indexed"}
+    if not isinstance(freshness, Mapping):
+        raise ValueError("freshness_state must be an object")
+    _reject_raw_secrets(freshness)
+    status = _required_str(freshness, "status")
+    if status not in _PUBLIC_DOCS_FRESHNESS_STATUSES:
+        raise ValueError("freshness_state status is unsupported")
+    result: dict[str, Any] = {"status": status}
+    last_success_at = freshness.get("last_success_at")
+    if last_success_at is not None:
+        result["last_success_at"] = _normalized_datetime_string(
+            last_success_at,
+            "freshness_state.last_success_at",
+        )
+    last_attempt_at = freshness.get("last_attempt_at")
+    if last_attempt_at is not None:
+        result["last_attempt_at"] = _normalized_datetime_string(
+            last_attempt_at,
+            "freshness_state.last_attempt_at",
+        )
+    for field_name in ("last_pipeline_evidence_sha256", "last_source_uri_hash"):
+        value = freshness.get(field_name)
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise ValueError(f"freshness_state {field_name} must be a string")
+        normalized = value.removeprefix("sha256:")
+        if not re.fullmatch(r"[a-f0-9]{64}", normalized):
+            raise ValueError(f"freshness_state {field_name} must be sha256 hex")
+        result[field_name] = f"sha256:{normalized}"
+    return result
+
+
+def _public_docs_due_seed_selection(
+    seeds: Sequence[Mapping[str, Any]],
+    generated_at: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    generated_at_dt = _datetime_value(generated_at, "generated_at")
+    due_seeds: list[dict[str, Any]] = []
+    skipped_seed_refreshes: list[dict[str, Any]] = []
+    for seed in seeds:
+        decision = _public_docs_seed_refresh_decision(seed, generated_at_dt)
+        if decision["status"] == "due":
+            selected_seed = dict(seed)
+            selected_seed["refresh_selection"] = decision
+            due_seeds.append(selected_seed)
+        else:
+            skipped_seed_refreshes.append(
+                {
+                    "freshness_state": dict(_required_mapping(seed, "freshness_state")),
+                    "reason": _required_str(decision, "reason"),
+                    "seed_id": _required_str(seed, "seed_id"),
+                    "source_id": _required_str(seed, "source_id"),
+                    "source_type": _required_str(seed, "source_type"),
+                    "source_uri_hash": _public_docs_source_uri_hash(seed),
+                    "status": "skipped",
+                }
+            )
+    return due_seeds, skipped_seed_refreshes
+
+
+def _public_docs_seed_refresh_decision(
+    seed: Mapping[str, Any],
+    generated_at: datetime,
+) -> dict[str, str]:
+    freshness_state = _required_mapping(seed, "freshness_state")
+    last_success_at = freshness_state.get("last_success_at")
+    refresh_policy = _required_mapping(seed, "refresh_policy")
+    max_age_hours = _required_positive_int(refresh_policy, "max_age_hours")
+    base = {
+        "generated_at": generated_at.isoformat().replace("+00:00", "Z"),
+        "max_age_hours": str(max_age_hours),
+    }
+    if not isinstance(last_success_at, str) or not last_success_at.strip():
+        return {**base, "reason": "never_indexed", "status": "due"}
+    last_success_dt = _datetime_value(last_success_at, "freshness_state.last_success_at")
+    if last_success_dt > generated_at:
+        raise ValueError("freshness_state.last_success_at must not be after generated_at")
+    age_seconds = (generated_at - last_success_dt).total_seconds()
+    if age_seconds >= max_age_hours * 3600:
+        return {
+            **base,
+            "last_success_at": last_success_at,
+            "reason": "max_age_exceeded",
+            "status": "due",
+        }
+    return {
+        **base,
+        "last_success_at": last_success_at,
+        "reason": "within_max_age",
+        "status": "skipped",
+    }
+
+
+def _public_docs_source_uri_hash(seed: Mapping[str, Any]) -> str:
+    return f"sha256:{sha256(_required_str(seed, 'source_uri').encode('utf-8')).hexdigest()}"
 
 
 def _public_docs_license(seed: Mapping[str, Any]) -> dict[str, Any]:
@@ -2886,10 +3032,21 @@ def _is_kubernetes_service_host(hostname: str | None) -> bool:
 
 def _required_datetime_string(payload: Mapping[str, Any], field_name: str) -> str:
     value = _required_str(payload, field_name)
+    return _normalized_datetime_string(value, field_name)
+
+
+def _normalized_datetime_string(value: Any, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a datetime string")
+    parsed = _datetime_value(value, field_name)
+    return parsed.isoformat().replace("+00:00", "Z")
+
+
+def _datetime_value(value: str, field_name: str) -> datetime:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"{field_name} must include timezone")
-    return parsed.isoformat().replace("+00:00", "Z")
+    return parsed
 
 
 def _required_str(payload: Mapping[str, Any], field_name: str) -> str:

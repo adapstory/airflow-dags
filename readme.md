@@ -37,7 +37,7 @@ SERP eval DAG contracts:
   | D17 `serp_model_catalog_promotion` | Planned gap | Model promotion/deprecation DAG is not implemented yet. |
   | D18 `serp_chaos_restore_game_day` | Planned gap | Restore/game-day DAG is not implemented yet. |
   | D19 `serp_benchmark_improvement_wave` | Scaffolded deterministic contract | Writes deterministic improvement artifacts in-task; live improvement runner wiring is still planned. |
-  | D20 `serp_web_seed_crawl_refresh` | Implemented scheduled pipeline CLI bridge in current source | Uses a default stack-inventory anchored seed registry when no `dag_run.conf` is supplied, writes deterministic seed/refresh artifacts, and runs the packaged SERP pipeline CLI bridge. Live crawler/frontier expansion, publish activation, and deployed GitOps image refresh remain planned. |
+  | D20 `serp_web_seed_crawl_refresh` | Implemented scheduled pipeline CLI bridge in current source | Uses a default stack-inventory anchored seed registry when no `dag_run.conf` is supplied, selects due seeds from `refresh_policy` and optional `freshness_state`, writes deterministic seed/refresh artifacts, and runs the packaged SERP pipeline CLI bridge only when sources are due. Live crawler/frontier expansion, publish activation, and deployed GitOps image refresh remain planned. |
 
 - `serp_nightly_regression_suite` is the D6 contract DAG. Its `dag_run.conf`
   must provide tenant id, pack version ids, retrieval/reranker profile versions,
@@ -117,16 +117,21 @@ SERP eval DAG contracts:
   `tmp/stack-inventory-2026-07-02.md` inventory evidence, include official-docs
   URI, license/distribution state, daily/nightly refresh policy, and a bounded
   crawl policy with robots enforcement, sitemap intent, allowlist, denylist,
-  max depth, max pages, and user agent. The DAG derives `airflow-plan.json`,
-  `public-docs-seed-registry.json`, and
-  `public-docs-seed-refresh-plan.json`, then runs
+  max depth, max pages, and user agent. Optional `freshness_state` is accepted
+  per seed; seeds without a previous `last_success_at` are due, and indexed
+  seeds are refreshed only after `refresh_policy.max_age_hours`. The DAG
+  derives `airflow-plan.json`, `public-docs-seed-registry.json`, and
+  `public-docs-seed-refresh-plan.json` with due `source_fetch_requests` plus
+  skipped-seed evidence. If no seed is due, the pipeline bridge writes a
+  deterministic `no_due_sources` result without spawning the CLI process.
+  Otherwise it runs
   `python -m adapstory_serp_pipeline.orchestration.seed_refresh_cli` without
   shell expansion and persists `public-docs-seed-refresh-result.json`. The
   packaged CLI executes the current fetch/parse/chunk/embed/index path through
   the SERP pipeline ports and writes deterministic batch evidence. It does not
-  perform crawler frontier expansion, changed-page discovery, approval,
-  signing, publish activation, or live store credential management; those
-  remain planned runtime work.
+  perform crawler frontier expansion, changed-page discovery beyond seed
+  freshness, approval, signing, publish activation, or live store credential
+  management; those remain planned runtime work.
 - Runtime status in this document means current source-level contract unless a
   deployed runtime is explicitly named. The production Airflow image and
   `gitSync` revision are pinned in GitOps by `Adapstory-GitOps/infra/airflow`;

@@ -962,6 +962,7 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
         == plan.payload["seed_registry_sha256"]
     )
     assert refresh_plan_artifact["payload"]["status"] == "ready_for_pipeline_dispatch"
+    assert refresh_plan_artifact["payload"]["skipped_seed_count"] == 0
     assert [
         request["pipeline_run_spec"]["pipeline_stages"]
         for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
@@ -994,11 +995,83 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
         cli_spec["stdout_path"] == plan.payload["artifact_paths"]["public_docs_seed_refresh_result"]
     )
     assert "pending_pipeline_dispatch" not in json.dumps(cli_spec, sort_keys=True)
+    assert cli_spec["seed_count"] == 4
+    assert cli_spec["skipped_seed_count"] == 0
     assert cli_spec["argv"][:3] == [
         "python",
         "-m",
         "adapstory_serp_pipeline.orchestration.seed_refresh_cli",
     ]
+
+
+def test_public_docs_seed_refresh_selects_due_seeds_and_records_skips(
+    tmp_path: Path,
+) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    conf["seed_registry"][0]["freshness_state"] = {
+        "last_success_at": "2026-07-08T12:00:00Z",
+        "status": "indexed",
+    }
+    conf["seed_registry"][1]["freshness_state"] = {
+        "last_success_at": "2026-07-07T20:00:00Z",
+        "status": "indexed",
+    }
+
+    plan = build_public_docs_seed_refresh_plan(conf)
+    refresh_plan_artifact = write_public_docs_seed_refresh_plan_artifact(plan.to_canonical_json())
+    payload = refresh_plan_artifact["payload"]
+
+    assert payload["status"] == "ready_for_pipeline_dispatch"
+    assert payload["seed_count"] == 3
+    assert payload["skipped_seed_count"] == 1
+    assert [skip["seed_id"] for skip in payload["skipped_seed_refreshes"]] == ["k3s-docs"]
+    assert {
+        request["seed_id"]
+        for request in payload["source_fetch_requests"]
+    } == {"adapstory-gitops-docs", "react-docs", "spring-boot-docs"}
+    assert {
+        request["source_metadata"]["refresh_selection"]["reason"]
+        for request in payload["source_fetch_requests"]
+    } == {"max_age_exceeded", "never_indexed"}
+
+    cli_spec = dispatch_public_docs_seed_refresh_handoff(plan.to_canonical_json())
+
+    assert cli_spec["status"] == "ready_for_pipeline_cli_runner"
+    assert cli_spec["seed_count"] == 3
+    assert cli_spec["skipped_seed_count"] == 1
+
+
+def test_public_docs_seed_refresh_noops_when_no_seed_is_due(tmp_path: Path) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    for seed in conf["seed_registry"]:
+        seed["freshness_state"] = {
+            "last_success_at": "2026-07-08T20:30:00Z",
+            "status": "indexed",
+        }
+
+    plan = build_public_docs_seed_refresh_plan(conf)
+    refresh_plan_artifact = write_public_docs_seed_refresh_plan_artifact(plan.to_canonical_json())
+    payload = refresh_plan_artifact["payload"]
+
+    assert payload["status"] == "no_due_sources"
+    assert payload["seed_count"] == 0
+    assert payload["source_fetch_requests"] == []
+    assert payload["skipped_seed_count"] == 4
+
+    cli_spec = dispatch_public_docs_seed_refresh_handoff(plan.to_canonical_json())
+
+    assert cli_spec["status"] == "no_due_sources"
+    assert cli_spec["argv"] == []
+    assert cli_spec["seed_count"] == 0
+    assert cli_spec["skipped_seed_count"] == 4
+
+    result = execute_pipeline_cli_spec(cli_spec)
+
+    assert Path(result["artifactPath"]).exists()
+    assert result["payload"]["status"] == "no_due_sources"
+    assert result["payload"]["skipped_seed_count"] == 4
 
 
 def test_default_public_docs_seed_refresh_conf_materializes_autonomous_d20_plan(
