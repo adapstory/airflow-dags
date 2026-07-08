@@ -24,6 +24,8 @@ from dags.serp_eval_contracts import (
     build_online_eval_registry_cli_spec,
     build_online_eval_rollup_cli_spec,
     build_online_eval_rollup_plan,
+    build_public_docs_publish_activation_cli_spec,
+    build_public_docs_publish_activation_plan,
     build_public_docs_seed_refresh_plan,
     build_tenant_golden_registry_cli_spec,
     build_tenant_golden_regression_plan,
@@ -65,7 +67,7 @@ def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:
     assert plan.payload["normalized_gate_floor"] == SERP_NORMALIZED_GATE_FLOOR
     assert plan.payload["artifact_paths"] == {
         "airflow_plan": (
-            "/var/opt/adapstory/serp-evals/" f"{plan.payload['operation_id']}/airflow-plan.json"
+            f"/var/opt/adapstory/serp-evals/{plan.payload['operation_id']}/airflow-plan.json"
         ),
         "nightly_registry_submissions": (
             "/var/opt/adapstory/serp-evals/"
@@ -76,14 +78,14 @@ def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:
             f"{plan.payload['operation_id']}/nightly-registry-receipts.json"
         ),
         "nightly_report": (
-            "/var/opt/adapstory/serp-evals/" f"{plan.payload['operation_id']}/nightly-report.json"
+            f"/var/opt/adapstory/serp-evals/{plan.payload['operation_id']}/nightly-report.json"
         ),
         "benchmark_gate_export": (
             "/var/opt/adapstory/serp-evals/"
             f"{plan.payload['operation_id']}/benchmark-gate-export.json"
         ),
         "suite_plan": (
-            "/var/opt/adapstory/serp-evals/" f"{plan.payload['operation_id']}/suite-plan.json"
+            f"/var/opt/adapstory/serp-evals/{plan.payload['operation_id']}/suite-plan.json"
         ),
     }
     assert plan.payload["selected_suite_ids"] == list(MANDATORY_SERP_BENCHMARK_SUITES)
@@ -590,10 +592,10 @@ def test_build_tenant_golden_regression_plan_preserves_workflow_provenance() -> 
     assert plan.payload["changed_pack_version_ids"] == [PACK_VERSION_ID]
     assert plan.payload["artifact_paths"] == {
         "airflow_plan": (
-            "/var/opt/adapstory/serp-evals/" f"{plan.payload['operation_id']}/airflow-plan.json"
+            f"/var/opt/adapstory/serp-evals/{plan.payload['operation_id']}/airflow-plan.json"
         ),
         "golden_set": (
-            "/var/opt/adapstory/serp-evals/" f"{plan.payload['operation_id']}/golden-set.json"
+            f"/var/opt/adapstory/serp-evals/{plan.payload['operation_id']}/golden-set.json"
         ),
         "tenant_golden_registry_submissions": (
             "/var/opt/adapstory/serp-evals/"
@@ -699,7 +701,7 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
     assert plan.payload["baseline_run_id"] == "evalrun_public_reranker_baseline_001"
     assert plan.payload["artifact_paths"] == {
         "airflow_plan": (
-            "/var/opt/adapstory/serp-evals/" f"{plan.payload['operation_id']}/airflow-plan.json"
+            f"/var/opt/adapstory/serp-evals/{plan.payload['operation_id']}/airflow-plan.json"
         ),
         "candidate_eval_report": (
             "/var/opt/adapstory/serp-evals/"
@@ -710,7 +712,7 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
             f"{plan.payload['operation_id']}/improvement-scoreboard.json"
         ),
         "improvement_spec": (
-            "/var/opt/adapstory/serp-evals/" f"{plan.payload['operation_id']}/improvement-spec.json"
+            f"/var/opt/adapstory/serp-evals/{plan.payload['operation_id']}/improvement-spec.json"
         ),
         "keep_discard_decision": (
             "/var/opt/adapstory/serp-evals/"
@@ -1112,6 +1114,72 @@ def test_public_docs_seed_refresh_noops_when_no_seed_is_due(tmp_path: Path) -> N
     assert result["payload"]["skipped_seed_count"] == 4
 
 
+def test_public_docs_publish_activation_plan_dispatches_d5_handoff(tmp_path: Path) -> None:
+    seed_refresh_result = tmp_path / "public-docs-seed-refresh-result.json"
+    seed_refresh_result.write_text('{"artifact_type":"public_docs_seed_refresh_batch_evidence"}')
+    conf = _public_docs_publish_activation_conf(str(seed_refresh_result))
+    conf["artifact_root_path"] = str(tmp_path)
+
+    plan = build_public_docs_publish_activation_plan(conf)
+    repeated = build_public_docs_publish_activation_plan(json.loads(plan.to_canonical_json()))
+    cli_spec = build_public_docs_publish_activation_cli_spec(plan.to_canonical_json())
+
+    assert plan.to_canonical_json() == repeated.to_canonical_json()
+    assert plan.payload["dag_id"] == "serp_publish_signed_pack"
+    assert plan.payload["status"] == "ready_for_publish_activation_handoff"
+    assert plan.payload["artifact_paths"] == {
+        "airflow_plan": "/".join(
+            (str(tmp_path), plan.payload["operation_id"], "airflow-plan.json")
+        ),
+        "public_docs_publish_activation_request": "/".join(
+            (
+                str(tmp_path),
+                plan.payload["operation_id"],
+                "public-docs-publish-activation-request.json",
+            )
+        ),
+    }
+    assert [task["task_id"] for task in plan.payload["tasks"]] == [
+        "validate_publish_signed_pack_plan",
+        "dispatch_publish_activation_handoff",
+        "run_publish_activation_handoff",
+        "notify_governance_eval_surfaces",
+    ]
+    assert cli_spec["status"] == "ready_for_pipeline_cli_runner"
+    assert cli_spec["task_id"] == "public_docs_publish_activation_handoff"
+    assert cli_spec["d5_publish_target"] == "serp_publish_signed_pack"
+    assert cli_spec["input_paths"] == [str(seed_refresh_result)]
+    assert (
+        cli_spec["stdout_path"]
+        == plan.payload["artifact_paths"]["public_docs_publish_activation_request"]
+    )
+    assert cli_spec["argv"][:3] == [
+        "python",
+        "-m",
+        "adapstory_serp_pipeline.registry.publish_activation_cli",
+    ]
+    assert cli_spec["argv"][cli_spec["argv"].index("--seed-refresh-result") + 1] == str(
+        seed_refresh_result
+    )
+    assert cli_spec["argv"][cli_spec["argv"].index("--benchmark-gate-export-sha256") + 1] == (
+        "sha256:" + "c" * 64
+    )
+
+
+def test_public_docs_publish_activation_plan_requires_governed_inputs(tmp_path: Path) -> None:
+    missing_result = _public_docs_publish_activation_conf(str(tmp_path / "missing.json"))
+    missing_result["artifact_root_path"] = str(tmp_path)
+    with pytest.raises(ValueError, match="public_docs_seed_refresh_result_path must exist"):
+        build_public_docs_publish_activation_plan(missing_result)
+
+    bad_seal = _public_docs_publish_activation_conf(str(tmp_path / "result.json"))
+    bad_seal_path = str(bad_seal["public_docs_seed_refresh_result_path"])
+    Path(bad_seal_path).write_text("{}", encoding="utf-8")
+    bad_seal["evidence_seal_hash"] = "b" * 64
+    with pytest.raises(ValueError, match="evidence_seal_hash"):
+        build_public_docs_publish_activation_plan(bad_seal)
+
+
 def test_default_public_docs_seed_refresh_conf_materializes_autonomous_d20_plan(
     tmp_path: Path,
 ) -> None:
@@ -1240,6 +1308,16 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
             ],
         ),
         (
+            "serp_publish_signed_pack.py",
+            "serp_publish_signed_pack",
+            [
+                "validate_publish_signed_pack_plan",
+                "dispatch_publish_activation_handoff",
+                "run_publish_activation_handoff",
+                "notify_governance_eval_surfaces",
+            ],
+        ),
+        (
             "serp_web_seed_crawl_refresh.py",
             "serp_web_seed_crawl_refresh",
             [
@@ -1277,6 +1355,7 @@ def test_serp_dag_files_import_helpers_from_packaged_dags_namespace() -> None:
         "serp_online_eval_rollup.py",
         "serp_tenant_golden_set_regression.py",
         "serp_benchmark_improvement_wave.py",
+        "serp_publish_signed_pack.py",
         "serp_web_seed_crawl_refresh.py",
     ):
         source = (REPO_ROOT / "dags" / dag_file).read_text(encoding="utf-8")
@@ -1530,6 +1609,26 @@ def _public_docs_seed_refresh_conf() -> dict[str, Any]:
                 version="main",
             ),
         ],
+        "tenant_id": TENANT_ID,
+    }
+
+
+def _public_docs_publish_activation_conf(seed_refresh_result_path: str) -> dict[str, object]:
+    return {
+        "activation_idempotency_key": "018f5e13-2d73-7a77-a052-" + "8d1bcbf96603",
+        "activation_reason_code": "public-docs-d20-indexed",
+        "actor_id": "airflow-serp-public-docs-refresh",
+        "approval_run_id": "018f5e13-2d73-7a77-a052-8d1bcbf96601",
+        "artifact_root_path": "/var/opt/adapstory/serp-public-docs-publish",
+        "benchmark_gate_export_sha256": "sha256:" + "c" * 64,
+        "evidence_bundle_id": "018f5e13-2d73-7a77-a052-8d1bcbf96602",
+        "evidence_seal_hash": "sha256:" + "b" * 64,
+        "generated_at": "2026-07-08T22:00:00Z",
+        "pack_id": PACK_ID,
+        "pack_version_id": PACK_VERSION_ID,
+        "public_docs_seed_refresh_result_path": seed_refresh_result_path,
+        "registry_resource_id": REGISTRY_RESOURCE_ID,
+        "registry_resource_type": "pack",
         "tenant_id": TENANT_ID,
     }
 

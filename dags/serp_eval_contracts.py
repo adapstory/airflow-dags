@@ -35,6 +35,7 @@ SERP_NORMALIZED_GATE_FLOOR = 0.75
 GATEWAY_CLI_MODULE = "adapstory_serp_mcp_gateway.airflow_eval_cli"
 GATEWAY_CLI_PYTHON = "python"
 PIPELINE_CLI_MODULE = "adapstory_serp_pipeline.orchestration.seed_refresh_cli"
+PIPELINE_PUBLISH_ACTIVATION_CLI_MODULE = "adapstory_serp_pipeline.registry.publish_activation_cli"
 
 _RESOURCE_TYPES = frozenset({"pack", "tenant", "workflow"})
 _GATEWAY_CLI_CONTRACT_VERSION = "serp-airflow-gateway-cli-bridge/v1"
@@ -438,6 +439,85 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
                 "run_targeted_benchmark_eval_harness",
                 "decide_keep_or_discard_candidate",
                 "publish_improvement_scoreboard",
+                "notify_governance_eval_surfaces",
+            )
+        ),
+        "tenant_id": str(tenant_id),
+    }
+    return SerpDagPlan(plan_payload)
+
+
+def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
+    payload = _payload(conf)
+    _reject_raw_secrets(payload)
+    tenant_id = _required_uuid(payload, "tenant_id")
+    generated_at = _required_datetime_string(payload, "generated_at")
+    registry_resource_type = _required_resource_type(payload, "registry_resource_type")
+    registry_resource_id = _required_uuid(payload, "registry_resource_id")
+    pack_id = _required_uuid(payload, "pack_id")
+    pack_version_id = _required_uuid(payload, "pack_version_id")
+    approval_run_id = _required_uuid(payload, "approval_run_id")
+    evidence_bundle_id = _required_uuid(payload, "evidence_bundle_id")
+    activation_idempotency_key = _required_uuid(payload, "activation_idempotency_key")
+    evidence_seal_hash = _required_sha256_prefixed(payload, "evidence_seal_hash")
+    benchmark_gate_export_sha256 = _required_sha256_prefixed(
+        payload,
+        "benchmark_gate_export_sha256",
+    )
+    seed_refresh_result_path = _required_existing_local_artifact_path(
+        payload,
+        "public_docs_seed_refresh_result_path",
+    )
+    activation_reason_code = _required_str(payload, "activation_reason_code")
+    artifact_root_path = _required_artifact_root_path(payload)
+    operation_id = _operation_id(
+        "serp-airflow-publish-signed-pack",
+        tenant_id,
+        registry_resource_type,
+        registry_resource_id,
+        pack_id,
+        pack_version_id,
+        generated_at,
+        seed_refresh_result_path,
+        approval_run_id,
+        evidence_bundle_id,
+        evidence_seal_hash,
+        benchmark_gate_export_sha256,
+    )
+    plan_payload = {
+        "activation_idempotency_key": str(activation_idempotency_key),
+        "activation_reason_code": activation_reason_code,
+        "actor_id": _required_str(payload, "actor_id"),
+        "approval_run_id": str(approval_run_id),
+        "artifact_root_path": artifact_root_path,
+        "artifact_paths": _artifact_paths(
+            artifact_root_path,
+            operation_id,
+            (
+                ("airflow_plan", "airflow-plan.json"),
+                (
+                    "public_docs_publish_activation_request",
+                    "public-docs-publish-activation-request.json",
+                ),
+            ),
+        ),
+        "benchmark_gate_export_sha256": benchmark_gate_export_sha256,
+        "dag_id": "serp_publish_signed_pack",
+        "evidence_bundle_id": str(evidence_bundle_id),
+        "evidence_seal_hash": evidence_seal_hash,
+        "generated_at": generated_at,
+        "operation_id": operation_id,
+        "pack_id": str(pack_id),
+        "pack_version_id": str(pack_version_id),
+        "public_docs_seed_refresh_result_path": seed_refresh_result_path,
+        "registry_resource_id": str(registry_resource_id),
+        "registry_resource_type": registry_resource_type,
+        "status": "ready_for_publish_activation_handoff",
+        "tasks": _tasks(
+            (
+                "validate_publish_signed_pack_plan",
+                "dispatch_publish_activation_handoff",
+                "run_publish_activation_handoff",
                 "notify_governance_eval_surfaces",
             )
         ),
@@ -1309,6 +1389,65 @@ def dispatch_public_docs_seed_refresh_handoff(plan_json: str) -> dict[str, Any]:
         "qdrant_collection": _required_str(plan, "qdrant_collection"),
         "opensearch_index": _required_str(plan, "opensearch_index"),
         "neo4j_database": _required_str(plan, "neo4j_database"),
+    }
+
+
+def build_public_docs_publish_activation_cli_spec(
+    plan_json: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != "serp_publish_signed_pack":
+        raise ValueError("plan dag_id does not match public docs publish activation dispatch")
+    if _required_str(plan, "status") != "ready_for_publish_activation_handoff":
+        raise ValueError("publish activation plan is not ready for handoff")
+    artifact_paths = _required_artifact_paths(
+        plan,
+        ("public_docs_publish_activation_request",),
+    )
+    seed_refresh_result_path = _required_existing_local_artifact_path(
+        plan,
+        "public_docs_seed_refresh_result_path",
+    )
+    output_path = artifact_paths["public_docs_publish_activation_request"]
+    argv = [
+        GATEWAY_CLI_PYTHON,
+        "-m",
+        PIPELINE_PUBLISH_ACTIVATION_CLI_MODULE,
+        "--seed-refresh-result",
+        seed_refresh_result_path,
+        "--evidence-output",
+        output_path,
+        "--actor-id",
+        _required_str(plan, "actor_id"),
+        "--activation-idempotency-key",
+        _required_str(plan, "activation_idempotency_key"),
+        "--approval-run-id",
+        _required_str(plan, "approval_run_id"),
+        "--evidence-bundle-id",
+        _required_str(plan, "evidence_bundle_id"),
+        "--evidence-seal-hash",
+        _required_sha256_prefixed(plan, "evidence_seal_hash"),
+        "--activation-reason-code",
+        _required_str(plan, "activation_reason_code"),
+        "--benchmark-gate-export-sha256",
+        _required_sha256_prefixed(plan, "benchmark_gate_export_sha256"),
+    ]
+    return {
+        "actor_id": _required_str(plan, "actor_id"),
+        "argv": argv,
+        "contract_version": _PIPELINE_CLI_CONTRACT_VERSION,
+        "d5_publish_target": "serp_publish_signed_pack",
+        "dag_id": "serp_publish_signed_pack",
+        "input_paths": [seed_refresh_result_path],
+        "operation_id": _required_str(plan, "operation_id"),
+        "pack_id": _required_str(plan, "pack_id"),
+        "pack_version_id": _required_str(plan, "pack_version_id"),
+        "plan_sha256": sha256(_canonical_json(plan).encode("utf-8")).hexdigest(),
+        "status": "ready_for_pipeline_cli_runner",
+        "stdout_path": output_path,
+        "task_id": "public_docs_publish_activation_handoff",
+        "tenant_id": _required_str(plan, "tenant_id"),
     }
 
 
@@ -3086,6 +3225,23 @@ def _required_uuid_list(payload: Mapping[str, Any], field_name: str) -> list[UUI
 
 def _required_uuid(payload: Mapping[str, Any], field_name: str) -> UUID:
     return _uuid_value(field_name, _required_str(payload, field_name))
+
+
+def _required_sha256_prefixed(payload: Mapping[str, Any], field_name: str) -> str:
+    value = _required_str(payload, field_name)
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+        raise ValueError(f"{field_name} must be sha256:<64 lowercase hex>")
+    return value
+
+
+def _required_existing_local_artifact_path(payload: Mapping[str, Any], field_name: str) -> str:
+    value = _artifact_path(field_name, _required_str(payload, field_name))
+    if value.startswith("s3://"):
+        raise ValueError(f"{field_name} must be a local artifact path for pipeline CLI handoff")
+    path = Path(value)
+    if not path.exists() or not path.is_file():
+        raise ValueError(f"{field_name} must exist")
+    return str(path)
 
 
 def _uuid_value(field_name: str, value: str) -> UUID:

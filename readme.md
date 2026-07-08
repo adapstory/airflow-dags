@@ -22,7 +22,7 @@ SERP eval DAG contracts:
   | D2 `serp_refresh_due_sources` | Planned gap | Scheduled freshness/popularity refresh DAG is not implemented yet. |
   | D3 `serp_reparse_pack_version` | Planned gap | Pack-version reparse DAG is not implemented yet. |
   | D4 `serp_scan_parse_index` | Planned gap | Scan/parse/enrich/index child DAG or task group is not implemented yet. |
-  | D5 `serp_publish_signed_pack` | Planned gap | Approval/sign/publish DAG is not implemented yet. |
+  | D5 `serp_publish_signed_pack` | Implemented executable handoff contract | Builds the governed public-docs BC-21 publish activation request from indexed D20 batch evidence after approval, evidence bundle, evidence seal, and benchmark gate inputs are supplied. Live BC-21 submission and active-version mutation remain BC-21/runtime work. |
   | D6 `serp_nightly_regression_suite` | Implemented, runtime-backed in current source | Production GitOps image/DAG refs must be refreshed before claiming deployed-current runtime. |
   | D7 `serp_online_eval_rollup` | Implemented, runtime-backed in current source | DAG is manual/event-triggered today; backlog frequent scheduling remains planned. Production GitOps refs must be refreshed before claiming deployed-current runtime. |
   | D8 `serp_expire_revoke_packs` | Planned gap | Freshness expiration/revocation DAG is not implemented yet. |
@@ -143,8 +143,8 @@ SERP eval DAG contracts:
   Live index mode is implemented in the packaged pipeline via HTTP embedding
   and store adapters, but deployed-current GitOps image/package refs, runtime
   env wiring, OpenSearch/Neo4j/Qdrant network-policy allowances, crawler
-  frontier expansion, changed-page discovery beyond seed freshness, approval,
-  signing, and publish activation remain planned runtime work.
+  frontier expansion, changed-page discovery beyond seed freshness, and live
+  BC-21 activation submission remain planned runtime work.
 - Runtime status in this document means current source-level contract unless a
   deployed runtime is explicitly named. The production Airflow image and
   `gitSync` revision are pinned in GitOps by `Adapstory-GitOps/infra/airflow`;
@@ -164,6 +164,20 @@ SERP eval DAG contracts:
   DAG default path and fails closed when BC-21 submission is not configured.
   D19 still keeps native deterministic artifact writers until its live
   improvement runner is wired through GitOps.
+- `serp_publish_signed_pack` is the D5 public-docs publish activation handoff
+  DAG. Its `dag_run.conf` must provide tenant id, pack id/version, registry
+  resource identity, approved actor id, generated timestamp,
+  `public_docs_seed_refresh_result_path`, `approval_run_id`,
+  `evidence_bundle_id`, `evidence_seal_hash`,
+  `activation_idempotency_key`, `activation_reason_code`, and
+  `benchmark_gate_export_sha256`. The DAG writes `airflow-plan.json`, builds a
+  packaged pipeline CLI spec, and runs
+  `python -m adapstory_serp_pipeline.registry.publish_activation_cli` without
+  shell expansion. The CLI verifies the D20 batch evidence hash, requires every
+  source to be indexed with `activation_pending`, and writes
+  `public-docs-publish-activation-request.json`. This is not an auto-publish
+  path: BC-21 remains responsible for signature validation, approval/seal
+  validation, idempotent submission acceptance, and active-pack mutation.
 - `artifact_root_path` must be an absolute local path or `s3://bucket/prefix`
   URI. Unsupported URL schemes, parent traversal, multiline values, and raw
   secret material are rejected before any runner handoff is emitted.
