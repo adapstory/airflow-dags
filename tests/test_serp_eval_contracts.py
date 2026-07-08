@@ -968,6 +968,7 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
     assert refresh_plan_artifact["payload"]["status"] == "ready_for_pipeline_dispatch"
     assert refresh_plan_artifact["payload"]["index_mode"] == "evidence-only"
     assert refresh_plan_artifact["payload"]["skipped_seed_count"] == 0
+    assert refresh_plan_artifact["payload"]["seed_count"] == 6
     assert [
         request["pipeline_run_spec"]["pipeline_stages"]
         for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
@@ -976,7 +977,32 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
         ["fetch", "parse", "chunk", "embed", "index"],
         ["fetch", "parse", "chunk", "embed", "index"],
         ["fetch", "parse", "chunk", "embed", "index"],
+        ["fetch", "parse", "chunk", "embed", "index"],
+        ["fetch", "parse", "chunk", "embed", "index"],
     ]
+    assert [
+        request["seed_id"]
+        for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
+        if request["source_type"] == "website"
+    ] == [
+        "k3s-docs",
+        "k3s-docs--d15cca4a1ed9",
+        "k3s-docs--906d7d24fe52",
+    ]
+    assert [
+        request["source_uri"]
+        for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
+        if request["source_type"] == "website"
+    ] == [
+        "https://docs.k3s.io/",
+        "https://docs.k3s.io/quick-start",
+        "https://docs.k3s.io/installation/requirements",
+    ]
+    assert {
+        request["source_metadata"]["frontier"]["discovery_mode"]
+        for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
+        if request["source_type"] == "website"
+    } == {"governed-seed-frontier"}
     assert {
         request["source_type"]
         for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
@@ -1000,7 +1026,7 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
         cli_spec["stdout_path"] == plan.payload["artifact_paths"]["public_docs_seed_refresh_result"]
     )
     assert "pending_pipeline_dispatch" not in json.dumps(cli_spec, sort_keys=True)
-    assert cli_spec["seed_count"] == 4
+    assert cli_spec["seed_count"] == 6
     assert cli_spec["skipped_seed_count"] == 0
     assert "--index-mode" in cli_spec["argv"]
     assert cli_spec["argv"][cli_spec["argv"].index("--index-mode") + 1] == "evidence-only"
@@ -1013,6 +1039,75 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
         "python",
         "-m",
         "adapstory_serp_pipeline.orchestration.seed_refresh_cli",
+    ]
+
+
+def test_public_docs_seed_refresh_uses_single_website_request_when_frontier_disabled(
+    tmp_path: Path,
+) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    conf["seed_registry"][0]["crawl_policy"]["sitemap_discovery"] = False
+    conf["seed_registry"][0]["crawl_policy"].pop("frontier_urls", None)
+
+    plan = build_public_docs_seed_refresh_plan(conf)
+    refresh_plan_artifact = write_public_docs_seed_refresh_plan_artifact(plan.to_canonical_json())
+
+    website_requests = [
+        request
+        for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
+        if request["source_type"] == "website"
+    ]
+    assert len(website_requests) == 1
+    assert website_requests[0]["seed_id"] == "k3s-docs"
+    assert website_requests[0]["source_uri"] == "https://docs.k3s.io/"
+
+
+def test_public_docs_seed_refresh_allows_manual_frontier_without_sitemap_discovery(
+    tmp_path: Path,
+) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    conf["seed_registry"][0]["crawl_policy"]["sitemap_discovery"] = False
+
+    plan = build_public_docs_seed_refresh_plan(conf)
+    refresh_plan_artifact = write_public_docs_seed_refresh_plan_artifact(plan.to_canonical_json())
+
+    website_requests = [
+        request
+        for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
+        if request["source_type"] == "website"
+    ]
+    assert [request["source_uri"] for request in website_requests] == [
+        "https://docs.k3s.io/",
+        "https://docs.k3s.io/quick-start",
+        "https://docs.k3s.io/installation/requirements",
+    ]
+
+
+def test_public_docs_seed_refresh_deduplicates_canonical_frontier_urls(
+    tmp_path: Path,
+) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    conf["seed_registry"][0]["crawl_policy"]["frontier_urls"] = [
+        "https://docs.k3s.io",
+        "https://docs.k3s.io/#overview",
+        "https://docs.k3s.io/quick-start#install",
+        "https://docs.k3s.io/quick-start",
+    ]
+
+    plan = build_public_docs_seed_refresh_plan(conf)
+    refresh_plan_artifact = write_public_docs_seed_refresh_plan_artifact(plan.to_canonical_json())
+
+    website_requests = [
+        request
+        for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
+        if request["source_type"] == "website"
+    ]
+    assert [request["source_uri"] for request in website_requests] == [
+        "https://docs.k3s.io/",
+        "https://docs.k3s.io/quick-start#install",
     ]
 
 
@@ -1299,6 +1394,13 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
     missing_robot_policy["seed_registry"][1]["crawl_policy"]["respect_robots_txt"] = False
     with pytest.raises(ValueError, match="respect_robots_txt must be true"):
         build_public_docs_seed_refresh_plan(missing_robot_policy)
+
+    cross_domain_frontier = _public_docs_seed_refresh_conf()
+    cross_domain_frontier["seed_registry"][0]["crawl_policy"]["frontier_urls"] = [
+        "https://evil.example.com/k3s"
+    ]
+    with pytest.raises(ValueError, match="frontier_urls host must be in allowed_domains"):
+        build_public_docs_seed_refresh_plan(cross_domain_frontier)
 
     secret_in_metadata = _public_docs_seed_refresh_conf()
     secret_in_metadata["seed_registry"][2]["metadata"] = {"api_key": "sk-abcdefghijklmnop"}
@@ -1715,12 +1817,21 @@ def _public_docs_seed(
     component: str,
     version: str,
 ) -> dict[str, Any]:
+    frontier_urls = (
+        [
+            "https://docs.k3s.io/quick-start",
+            "https://docs.k3s.io/installation/requirements",
+        ]
+        if seed_id == "k3s-docs"
+        else []
+    )
     return {
         "approved": True,
         "connector_name": source_type,
         "crawl_policy": {
             "allowed_domains": ["docs.k3s.io", "docs.spring.io", "react.dev", "opt.adapstory"],
             "deny_patterns": ["/login", "/admin"],
+            "frontier_urls": frontier_urls,
             "max_depth": 2,
             "max_pages": 50,
             "respect_robots_txt": True,

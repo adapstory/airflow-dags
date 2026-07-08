@@ -1546,7 +1546,9 @@ def _public_docs_seed_refresh_payload(plan: Mapping[str, Any]) -> dict[str, Any]
         _required_object_list(plan, "seed_registry"),
         generated_at,
     )
-    source_fetch_requests = [_public_docs_source_fetch_request(plan, seed) for seed in due_seeds]
+    source_fetch_requests = [
+        request for seed in due_seeds for request in _public_docs_source_fetch_requests(plan, seed)
+    ]
     status = "ready_for_pipeline_dispatch" if source_fetch_requests else "no_due_sources"
     return {
         "artifact_paths": artifact_paths,
@@ -1570,6 +1572,16 @@ def _public_docs_seed_refresh_payload(plan: Mapping[str, Any]) -> dict[str, Any]
         "status": status,
         "tenant_id": _required_str(plan, "tenant_id"),
     }
+
+
+def _public_docs_source_fetch_requests(
+    plan: Mapping[str, Any],
+    seed: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    return [
+        _public_docs_source_fetch_request(plan, expanded_seed)
+        for expanded_seed in _expanded_public_docs_seed_frontier(seed)
+    ]
 
 
 def _public_docs_source_fetch_request(
@@ -1605,6 +1617,7 @@ def _public_docs_source_fetch_request(
             "crawl_policy": dict(_required_mapping(seed, "crawl_policy")),
             "inventory_evidence": dict(_required_mapping(seed, "inventory_evidence")),
             "license": dict(_required_mapping(seed, "license")),
+            "frontier": dict(_required_mapping(seed, "frontier")),
             "refresh_policy": dict(_required_mapping(seed, "refresh_policy")),
             "refresh_selection": dict(_required_mapping(seed, "refresh_selection")),
         }
@@ -1634,6 +1647,85 @@ def _public_docs_source_fetch_request(
         "source_uri": source_uri,
         "source_uri_hash": f"sha256:{sha256(source_uri.encode('utf-8')).hexdigest()}",
         "status": "ready_for_fetch",
+    }
+
+
+def _expanded_public_docs_seed_frontier(seed: Mapping[str, Any]) -> list[dict[str, Any]]:
+    source_type = _required_str(seed, "source_type")
+    source_uri = _required_str(seed, "source_uri")
+    crawl_policy = _required_mapping(seed, "crawl_policy")
+    frontier_urls = list(crawl_policy.get("frontier_urls", []))
+    if source_type != "website" or not frontier_urls:
+        singleton = dict(seed)
+        singleton["frontier"] = _frontier_metadata(
+            parent_seed=seed,
+            source_uri=source_uri,
+            frontier_index=0,
+            frontier_role="seed-root",
+            frontier_url_count=1,
+        )
+        return [singleton]
+    max_pages = _required_positive_int(crawl_policy, "max_pages")
+    bounded_urls = [source_uri, *frontier_urls[: max_pages - 1]]
+    frontier_url_count = len(bounded_urls)
+    expanded = [
+        _frontier_seed(
+            seed,
+            source_uri=url,
+            frontier_index=index,
+            frontier_role="seed-root" if index == 0 else "sitemap-frontier",
+            frontier_url_count=frontier_url_count,
+        )
+        for index, url in enumerate(bounded_urls)
+    ]
+    return expanded
+
+
+def _frontier_seed(
+    seed: Mapping[str, Any],
+    *,
+    source_uri: str,
+    frontier_index: int,
+    frontier_role: str,
+    frontier_url_count: int,
+) -> dict[str, Any]:
+    parent_seed_id = _required_str(seed, "seed_id")
+    expanded = dict(seed)
+    expanded["source_uri"] = source_uri
+    expanded["official_docs_uri"] = source_uri
+    if frontier_index > 0:
+        expanded["seed_id"] = f"{parent_seed_id}--{sha256(source_uri.encode()).hexdigest()[:12]}"
+        expanded["source_id"] = str(
+            uuid5(
+                _PUBLIC_DOCS_NAMESPACE, f"frontier|{_required_str(seed, 'source_id')}|{source_uri}"
+            )
+        )
+    expanded["frontier"] = _frontier_metadata(
+        parent_seed=seed,
+        source_uri=source_uri,
+        frontier_index=frontier_index,
+        frontier_role=frontier_role,
+        frontier_url_count=frontier_url_count,
+    )
+    return expanded
+
+
+def _frontier_metadata(
+    *,
+    parent_seed: Mapping[str, Any],
+    source_uri: str,
+    frontier_index: int,
+    frontier_role: str,
+    frontier_url_count: int,
+) -> dict[str, Any]:
+    return {
+        "discovery_mode": "governed-seed-frontier",
+        "frontier_index": frontier_index,
+        "frontier_role": frontier_role,
+        "frontier_url_count": frontier_url_count,
+        "parent_seed_id": _required_str(parent_seed, "seed_id"),
+        "parent_source_id": _required_str(parent_seed, "source_id"),
+        "source_uri_hash": f"sha256:{sha256(source_uri.encode('utf-8')).hexdigest()}",
     }
 
 
@@ -2695,6 +2787,7 @@ def _default_public_docs_seed(
         "crawl_policy": {
             "allowed_domains": [allowed_domain],
             "deny_patterns": ["/login", "/admin"],
+            "frontier_urls": _default_public_docs_frontier_urls(seed_id, source_uri),
             "max_depth": 2,
             "max_pages": 50,
             "respect_robots_txt": True,
@@ -2726,6 +2819,15 @@ def _default_public_docs_seed(
         "source_type": source_type,
         "source_uri": source_uri,
     }
+
+
+def _default_public_docs_frontier_urls(seed_id: str, source_uri: str) -> list[str]:
+    if seed_id == "k3s-docs":
+        return [
+            "https://docs.k3s.io/quick-start",
+            "https://docs.k3s.io/installation/requirements",
+        ]
+    return []
 
 
 def _public_docs_seed(seed: Mapping[str, Any]) -> dict[str, Any]:
@@ -2850,15 +2952,87 @@ def _public_docs_crawl_policy(
         hostname = urlparse(source_uri).hostname
         if hostname not in set(allowed_domains):
             raise ValueError("source_uri host must be in allowed_domains")
+    frontier_urls = _public_docs_frontier_urls(
+        policy,
+        source_uri=source_uri,
+        source_type=source_type,
+        allowed_domains=allowed_domains,
+        deny_patterns=list(deny_patterns),
+        sitemap_discovery=sitemap_discovery,
+        max_pages=max_pages,
+    )
     return {
         "allowed_domains": allowed_domains,
         "deny_patterns": list(deny_patterns),
+        "frontier_urls": frontier_urls,
         "max_depth": max_depth,
         "max_pages": max_pages,
         "respect_robots_txt": True,
         "sitemap_discovery": sitemap_discovery,
         "user_agent": _required_str(policy, "user_agent"),
     }
+
+
+def _public_docs_frontier_urls(
+    policy: Mapping[str, Any],
+    *,
+    source_uri: str,
+    source_type: str,
+    allowed_domains: Sequence[str],
+    deny_patterns: Sequence[str],
+    sitemap_discovery: bool,
+    max_pages: int,
+) -> list[str]:
+    raw_urls = policy.get("frontier_urls", [])
+    if raw_urls is None:
+        raw_urls = []
+    if not isinstance(raw_urls, list) or not all(isinstance(value, str) for value in raw_urls):
+        raise ValueError("frontier_urls must be a list of strings")
+    if source_type != "website":
+        if raw_urls:
+            raise ValueError("frontier_urls are supported only for website seeds")
+        return []
+    if len(raw_urls) >= max_pages:
+        raise ValueError("frontier_urls must leave room for the seed source_uri")
+    allowed_domain_set = set(allowed_domains)
+    source_host = urlparse(source_uri).hostname
+    normalized: list[str] = []
+    seen = {_canonical_public_docs_url(source_uri)}
+    for value in raw_urls:
+        url = value.strip()
+        if not url:
+            raise ValueError("frontier_urls entries must be non-empty")
+        if _contains_raw_secret(url):
+            raise ValueError("frontier_urls must not contain raw secret material")
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise ValueError("frontier_urls must use https")
+        if parsed.hostname not in allowed_domain_set:
+            raise ValueError("frontier_urls host must be in allowed_domains")
+        if source_host and parsed.hostname != source_host:
+            raise ValueError("frontier_urls host must match source_uri host")
+        if any(pattern and pattern in parsed.path for pattern in deny_patterns):
+            raise ValueError("frontier_urls must not match deny_patterns")
+        canonical_url = _canonical_public_docs_url(url)
+        if canonical_url in seen:
+            continue
+        seen.add(canonical_url)
+        normalized.append(url)
+    return normalized
+
+
+def _canonical_public_docs_url(value: str) -> str:
+    parsed = urlparse(value)
+    scheme = parsed.scheme.lower()
+    hostname = (parsed.hostname or "").lower()
+    port = f":{parsed.port}" if parsed.port else ""
+    path = parsed.path or "/"
+    if path == "":
+        path = "/"
+    if path != "/" and path.endswith("/"):
+        path = path.rstrip("/")
+    query = f"?{parsed.query}" if parsed.query else ""
+    return f"{scheme}://{hostname}{port}{path}{query}"
 
 
 def _public_docs_refresh_policy(seed: Mapping[str, Any]) -> dict[str, Any]:

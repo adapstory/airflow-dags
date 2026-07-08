@@ -37,7 +37,7 @@ SERP eval DAG contracts:
   | D17 `serp_model_catalog_promotion` | Planned gap | Model promotion/deprecation DAG is not implemented yet. |
   | D18 `serp_chaos_restore_game_day` | Planned gap | Restore/game-day DAG is not implemented yet. |
   | D19 `serp_benchmark_improvement_wave` | Scaffolded deterministic contract | Writes deterministic improvement artifacts in-task; live improvement runner wiring is still planned. |
-  | D20 `serp_web_seed_crawl_refresh` | Implemented scheduled pipeline CLI bridge in current source | Uses a default stack-inventory anchored seed registry when no `dag_run.conf` is supplied, selects due seeds from `refresh_policy` and optional `freshness_state`, writes deterministic seed/refresh artifacts, and runs the packaged SERP pipeline CLI bridge only when sources are due. Live crawler/frontier expansion, D4 child dispatch, and deployed GitOps image refresh remain planned; publish activation is handled by D5 after indexed D20 evidence is approved and sealed. |
+  | D20 `serp_web_seed_crawl_refresh` | Implemented scheduled pipeline CLI bridge in current source | Uses a default stack-inventory anchored seed registry when no `dag_run.conf` is supplied, expands approved website `frontier_urls` into deterministic per-page fetch requests, selects due seeds from `refresh_policy` and optional `freshness_state`, writes deterministic seed/refresh artifacts, and runs the packaged SERP pipeline CLI bridge only when sources are due. Live robots/sitemap discovery, D4 child dispatch, and deployed GitOps image refresh remain planned; publish activation is handled by D5 after indexed D20 evidence is approved and sealed. |
 
 - `serp_nightly_regression_suite` is the D6 contract DAG. Its `dag_run.conf`
   must provide tenant id, pack version ids, retrieval/reranker profile versions,
@@ -120,12 +120,16 @@ SERP eval DAG contracts:
   `tmp/stack-inventory-2026-07-02.md` inventory evidence, include official-docs
   URI, license/distribution state, daily/nightly refresh policy, and a bounded
   crawl policy with robots enforcement, sitemap intent, allowlist, denylist,
-  max depth, max pages, and user agent. Optional `freshness_state` is accepted
-  per seed; seeds without a previous `last_success_at` are due, and indexed
-  seeds are refreshed only after `refresh_policy.max_age_hours`. The DAG
-  derives `airflow-plan.json`, `public-docs-seed-registry.json`, and
-  `public-docs-seed-refresh-plan.json` with due `source_fetch_requests` plus
-  skipped-seed evidence. If no seed is due, the pipeline bridge writes a
+  optional governed `frontier_urls`, max depth, max pages, and user agent.
+  Website seeds with approved `frontier_urls` are expanded into deterministic
+  per-page `source_fetch_requests` before the packaged pipeline CLI runs, so
+  D20 evidence records the exact pages selected for fetch/parse/chunk/embed/
+  index. Optional `freshness_state` is accepted per seed; seeds without a
+  previous `last_success_at` are due, and indexed seeds are refreshed only after
+  `refresh_policy.max_age_hours`. The DAG derives `airflow-plan.json`,
+  `public-docs-seed-registry.json`, and `public-docs-seed-refresh-plan.json`
+  with due `source_fetch_requests` plus skipped-seed evidence. If no seed is
+  due, the pipeline bridge writes a
   deterministic `no_due_sources` result without spawning the CLI process.
   Otherwise it runs
   `python -m adapstory_serp_pipeline.orchestration.seed_refresh_cli` without
@@ -141,10 +145,11 @@ SERP eval DAG contracts:
   `ADAPSTORY_SERP_PUBLIC_DOCS_OPENSEARCH_INDEX`, and
   `ADAPSTORY_SERP_PUBLIC_DOCS_NEO4J_DATABASE`.
   Live index mode is implemented in the packaged pipeline via HTTP embedding
-  and store adapters, but deployed-current GitOps image/package refs, runtime
-  env wiring, OpenSearch/Neo4j/Qdrant network-policy allowances, crawler
-  frontier expansion, changed-page discovery beyond seed freshness, and live
-  BC-21 activation submission remain planned runtime work.
+  and store adapters, and governed seed-frontier expansion is implemented in
+  the Airflow D20 handoff. Deployed-current GitOps image/package refs, runtime
+  env wiring, OpenSearch/Neo4j/Qdrant network-policy allowances, live
+  robots/sitemap traversal, and changed-page discovery beyond seed freshness
+  remain planned runtime work.
 - Runtime status in this document means current source-level contract unless a
   deployed runtime is explicitly named. The production Airflow image and
   `gitSync` revision are pinned in GitOps by `Adapstory-GitOps/infra/airflow`;
