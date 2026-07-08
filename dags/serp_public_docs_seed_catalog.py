@@ -76,13 +76,16 @@ P0_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
     },
     {
         "component": "Qdrant",
-        "docs_url": "https://qdrant.tech/documentation/",
+        "docs_url": (
+            "https://raw.githubusercontent.com/qdrant/landing_page/master/"
+            "qdrant-landing/content/documentation/_index.md"
+        ),
         "priority": "P0",
         "seed_id": "qdrant-docs",
     },
     {
         "component": "Neo4j",
-        "docs_url": "https://neo4j.com/docs/",
+        "docs_url": "https://raw.githubusercontent.com/neo4j/docs-operations/dev/README.adoc",
         "priority": "P0",
         "seed_id": "neo4j-docs",
     },
@@ -100,7 +103,7 @@ P0_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
     },
     {
         "component": "Redis",
-        "docs_url": "https://redis.io/docs/latest/",
+        "docs_url": "https://raw.githubusercontent.com/redis/redis/unstable/README.md",
         "priority": "P0",
         "seed_id": "redis-docs",
     },
@@ -130,19 +133,25 @@ P0_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
     },
     {
         "component": "Jenkins",
-        "docs_url": "https://www.jenkins.io/doc/",
+        "docs_url": (
+            "https://raw.githubusercontent.com/jenkins-infra/docs.jenkins.io/main/"
+            "docs/user-docs/modules/ROOT/pages/index.adoc"
+        ),
         "priority": "P0",
         "seed_id": "jenkins-docs",
     },
     {
         "component": "Harbor",
-        "docs_url": "https://goharbor.io/docs/",
+        "docs_url": "https://raw.githubusercontent.com/goharbor/website/main/docs/_index.md",
         "priority": "P0",
         "seed_id": "harbor-docs",
     },
     {
         "component": "cert-manager",
-        "docs_url": "https://cert-manager.io/docs/",
+        "docs_url": (
+            "https://raw.githubusercontent.com/cert-manager/website/master/"
+            "content/docs/installation/README.md"
+        ),
         "priority": "P0",
         "seed_id": "cert-manager-docs",
     },
@@ -154,19 +163,28 @@ P0_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
     },
     {
         "component": "Cilium",
-        "docs_url": "https://docs.cilium.io/en/stable/",
+        "docs_url": (
+            "https://raw.githubusercontent.com/cilium/cilium/master/"
+            "Documentation/gettingstarted/k8s-install-default.rst"
+        ),
         "priority": "P0",
         "seed_id": "cilium-docs",
     },
     {
         "component": "Kyverno",
-        "docs_url": "https://kyverno.io/docs/",
+        "docs_url": (
+            "https://raw.githubusercontent.com/kyverno/website/main/"
+            "src/content/docs/docs/installation/installation.mdx"
+        ),
         "priority": "P0",
         "seed_id": "kyverno-docs",
     },
     {
         "component": "OpenEBS",
-        "docs_url": "https://openebs.io/docs/",
+        "docs_url": (
+            "https://raw.githubusercontent.com/openebs/website/main/"
+            "docs/main/quickstart-guide/installation.md"
+        ),
         "priority": "P0",
         "seed_id": "openebs-docs",
     },
