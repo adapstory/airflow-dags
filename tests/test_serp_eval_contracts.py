@@ -1088,8 +1088,7 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
     assert plan.payload["source_type_counts"] == {
         "git": 1,
         "openapi": 1,
-        "pdf": 1,
-        "website": 1,
+        "website": 2,
     }
     assert plan.payload["artifact_paths"] == {
         "airflow_plan": "/".join(
@@ -1134,22 +1133,16 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
     assert refresh_plan_artifact["payload"]["status"] == "ready_for_pipeline_dispatch"
     assert refresh_plan_artifact["payload"]["index_mode"] == "evidence-only"
     assert refresh_plan_artifact["payload"]["skipped_seed_count"] == 0
-    assert refresh_plan_artifact["payload"]["seed_count"] == 6
-    assert [
+    assert refresh_plan_artifact["payload"]["seed_count"] == 9
+    assert all(
         request["pipeline_run_spec"]["pipeline_stages"]
+        == ["fetch", "parse", "chunk", "embed", "index"]
         for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
-    ] == [
-        ["fetch", "parse", "chunk", "embed", "index"],
-        ["fetch", "parse", "chunk", "embed", "index"],
-        ["fetch", "parse", "chunk", "embed", "index"],
-        ["fetch", "parse", "chunk", "embed", "index"],
-        ["fetch", "parse", "chunk", "embed", "index"],
-        ["fetch", "parse", "chunk", "embed", "index"],
-    ]
+    )
     assert [
         request["seed_id"]
         for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
-        if request["source_type"] == "website"
+        if request["seed_id"].startswith("k3s-docs")
     ] == [
         "k3s-docs",
         "k3s-docs--d15cca4a1ed9",
@@ -1158,7 +1151,7 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
     assert [
         request["source_uri"]
         for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
-        if request["source_type"] == "website"
+        if request["seed_id"].startswith("k3s-docs")
     ] == [
         "https://docs.k3s.io/",
         "https://docs.k3s.io/quick-start",
@@ -1167,12 +1160,12 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
     assert {
         request["source_metadata"]["frontier"]["discovery_mode"]
         for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
-        if request["source_type"] == "website"
+        if request["seed_id"].startswith("k3s-docs")
     } == {"governed-seed-frontier"}
     assert {
         request["source_type"]
         for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
-    } == {"git", "openapi", "pdf", "website"}
+    } == {"git", "openapi", "website"}
     assert all(
         request["source_uri_hash"].startswith("sha256:")
         for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
@@ -1192,7 +1185,7 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
         cli_spec["stdout_path"] == plan.payload["artifact_paths"]["public_docs_seed_refresh_result"]
     )
     assert "pending_pipeline_dispatch" not in json.dumps(cli_spec, sort_keys=True)
-    assert cli_spec["seed_count"] == 6
+    assert cli_spec["seed_count"] == 9
     assert cli_spec["skipped_seed_count"] == 0
     assert "--index-mode" in cli_spec["argv"]
     assert cli_spec["argv"][cli_spec["argv"].index("--index-mode") + 1] == "evidence-only"
@@ -1436,7 +1429,7 @@ def test_public_docs_seed_refresh_uses_single_website_request_when_frontier_disa
     website_requests = [
         request
         for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
-        if request["source_type"] == "website"
+        if request["seed_id"].startswith("k3s-docs")
     ]
     assert len(website_requests) == 1
     assert website_requests[0]["seed_id"] == "k3s-docs"
@@ -1456,7 +1449,7 @@ def test_public_docs_seed_refresh_allows_manual_frontier_without_sitemap_discove
     website_requests = [
         request
         for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
-        if request["source_type"] == "website"
+        if request["seed_id"].startswith("k3s-docs")
     ]
     assert [request["source_uri"] for request in website_requests] == [
         "https://docs.k3s.io/",
@@ -1483,7 +1476,7 @@ def test_public_docs_seed_refresh_deduplicates_canonical_frontier_urls(
     website_requests = [
         request
         for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
-        if request["source_type"] == "website"
+        if request["seed_id"].startswith("k3s-docs")
     ]
     assert [request["source_uri"] for request in website_requests] == [
         "https://docs.k3s.io/",
@@ -1510,13 +1503,17 @@ def test_public_docs_seed_refresh_selects_due_seeds_and_records_skips(
     payload = refresh_plan_artifact["payload"]
 
     assert payload["status"] == "ready_for_pipeline_dispatch"
-    assert payload["seed_count"] == 3
+    assert payload["seed_count"] == 6
     assert payload["skipped_seed_count"] == 1
     assert [skip["seed_id"] for skip in payload["skipped_seed_refreshes"]] == ["k3s-docs"]
-    assert {request["seed_id"] for request in payload["source_fetch_requests"]} == {
+    assert {
+        request["seed_id"]
+        for request in payload["source_fetch_requests"]
+        if "--" not in request["seed_id"]
+    } == {
         "adapstory-gitops-docs",
         "kubernetes-openapi-docs",
-        "postgresql-reference-pdf",
+        "postgresql-reference-docs",
     }
     assert {
         request["source_metadata"]["refresh_selection"]["reason"]
@@ -1526,7 +1523,7 @@ def test_public_docs_seed_refresh_selects_due_seeds_and_records_skips(
     cli_spec = dispatch_public_docs_seed_refresh_handoff(plan.to_canonical_json())
 
     assert cli_spec["status"] == "ready_for_pipeline_cli_runner"
-    assert cli_spec["seed_count"] == 3
+    assert cli_spec["seed_count"] == 6
     assert cli_spec["skipped_seed_count"] == 1
 
 
@@ -1863,8 +1860,7 @@ def test_default_public_docs_seed_refresh_conf_materializes_autonomous_d20_plan(
     assert plan.payload["source_type_counts"] == {
         "git": 1,
         "openapi": 1,
-        "pdf": 1,
-        "website": 1,
+        "website": 2,
     }
     assert {
         seed["inventory_evidence"]["stack_inventory_path"] for seed in plan.payload["seed_registry"]
@@ -1880,9 +1876,7 @@ def test_default_public_docs_seed_refresh_conf_materializes_autonomous_d20_plan(
         "kubernetes-openapi-docs": (
             "https://raw.githubusercontent.com/kubernetes/kubernetes/master/api/openapi-spec/swagger.json"
         ),
-        "postgresql-reference-pdf": (
-            "https://www.postgresql.org/files/documentation/pdf/16/postgresql-16-US.pdf"
-        ),
+        "postgresql-reference-docs": "https://www.postgresql.org/docs/16/",
     }
 
 
@@ -2098,7 +2092,7 @@ def test_serp_public_docs_dag_overlays_partial_run_conf_on_default_seed_registry
         "adapstory-gitops-docs",
         "k3s-docs",
         "kubernetes-openapi-docs",
-        "postgresql-reference-pdf",
+        "postgresql-reference-docs",
     }
     assert all(path.startswith(str(tmp_path)) for path in plan["artifact_paths"].values())
 
@@ -2360,9 +2354,9 @@ def _public_docs_seed_refresh_conf() -> dict[str, Any]:
                 version="v1.34.3",
             ),
             _public_docs_seed(
-                "postgresql-reference-pdf",
-                "pdf",
-                "https://www.postgresql.org/files/documentation/pdf/16/postgresql-16-US.pdf",
+                "postgresql-reference-docs",
+                "website",
+                "https://www.postgresql.org/docs/16/",
                 component="PostgreSQL",
                 version="16.1.0",
             ),
@@ -2439,6 +2433,12 @@ def _public_docs_seed(
         if seed_id == "k3s-docs"
         else []
     )
+    if seed_id == "postgresql-reference-docs":
+        frontier_urls = [
+            "https://www.postgresql.org/docs/16/tutorial.html",
+            "https://www.postgresql.org/docs/16/sql.html",
+            "https://www.postgresql.org/docs/16/index.html",
+        ]
     parsed = urlparse(source_uri)
     allowed_domain = parsed.hostname or "opt.adapstory"
     return {

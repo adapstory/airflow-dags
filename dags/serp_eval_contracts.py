@@ -682,9 +682,9 @@ def default_public_docs_seed_refresh_conf(
                 version="v1.34.3",
             ),
             _default_public_docs_seed(
-                "postgresql-reference-pdf",
-                "pdf",
-                "https://www.postgresql.org/files/documentation/pdf/16/postgresql-16-US.pdf",
+                "postgresql-reference-docs",
+                "website",
+                "https://www.postgresql.org/docs/16/",
                 component="PostgreSQL",
                 version="16.1.0",
             ),
@@ -2941,6 +2941,12 @@ def _default_public_docs_frontier_urls(seed_id: str, source_uri: str) -> list[st
         return [
             "https://docs.k3s.io/quick-start",
             "https://docs.k3s.io/installation/requirements",
+        ]
+    if seed_id == "postgresql-reference-docs":
+        return [
+            "https://www.postgresql.org/docs/16/tutorial.html",
+            "https://www.postgresql.org/docs/16/sql.html",
+            "https://www.postgresql.org/docs/16/index.html",
         ]
     return []
 
