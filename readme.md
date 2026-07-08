@@ -37,7 +37,7 @@ SERP eval DAG contracts:
   | D17 `serp_model_catalog_promotion` | Planned gap | Model promotion/deprecation DAG is not implemented yet. |
   | D18 `serp_chaos_restore_game_day` | Planned gap | Restore/game-day DAG is not implemented yet. |
   | D19 `serp_benchmark_improvement_wave` | Scaffolded deterministic contract | Writes deterministic improvement artifacts in-task; live improvement runner wiring is still planned. |
-  | D20 `serp_web_seed_crawl_refresh` | Implemented scheduled pipeline CLI bridge in current source | Uses a default stack-inventory anchored seed registry when no `dag_run.conf` is supplied, expands approved website `frontier_urls` into deterministic per-page fetch requests, selects due seeds from `refresh_policy` and optional `freshness_state`, writes deterministic seed/refresh artifacts, and runs the packaged SERP pipeline CLI bridge only when sources are due. Live robots/sitemap discovery, D4 child dispatch, and deployed GitOps image refresh remain planned; publish activation is handled by D5 after indexed D20 evidence is approved and sealed. |
+  | D20 `serp_web_seed_crawl_refresh` | Implemented scheduled pipeline CLI bridge in current source | Uses a default stack-inventory anchored seed registry when no `dag_run.conf` is supplied, expands approved website `frontier_urls` into deterministic per-page fetch requests, selects due seeds from `refresh_policy` and optional `freshness_state`, writes deterministic seed/refresh artifacts, runs the packaged SERP pipeline CLI bridge only when sources are due, and emits a governed D5 trigger-conf artifact once indexed D20 evidence exists. Live robots/sitemap discovery, D4 child dispatch, and deployed GitOps image refresh remain planned; publish activation is handled by D5 after approvals, evidence seal, benchmark gate, and BC-21 target are supplied. |
 
 - `serp_nightly_regression_suite` is the D6 contract DAG. Its `dag_run.conf`
   must provide tenant id, pack version ids, retrieval/reranker profile versions,
@@ -127,9 +127,15 @@ SERP eval DAG contracts:
   index. Optional `freshness_state` is accepted per seed; seeds without a
   previous `last_success_at` are due, and indexed seeds are refreshed only after
   `refresh_policy.max_age_hours`. The DAG derives `airflow-plan.json`,
-  `public-docs-seed-registry.json`, and `public-docs-seed-refresh-plan.json`
-  with due `source_fetch_requests` plus skipped-seed evidence. If no seed is
-  due, the pipeline bridge writes a
+  `public-docs-seed-registry.json`, `public-docs-seed-refresh-plan.json`, and
+  after successful indexed D20 evidence,
+  `public-docs-publish-activation-trigger-conf.json` with the exact D5
+  `public_docs_seed_refresh_result_path` and canonical tenant/pack/version
+  identity. The trigger-conf deliberately carries no approval/seal/benchmark
+  secrets; it marks the governance inputs that D5 must still receive before
+  publish activation can run. The refresh plan contains due
+  `source_fetch_requests` plus skipped-seed evidence. If no seed is due, the
+  pipeline bridge writes a
   deterministic `no_due_sources` result without spawning the CLI process.
   Otherwise it runs
   `python -m adapstory_serp_pipeline.orchestration.seed_refresh_cli` without
@@ -187,6 +193,12 @@ SERP eval DAG contracts:
   `public-docs-publish-activation-receipt.json`. BC-21 remains responsible for
   signature validation, approval/seal validation, idempotent submission
   acceptance, and active-pack mutation.
+- D20-to-D5 continuation is artifact-governed, not an approval bypass. The
+  D20 trigger-conf can be used as the base `dag_run.conf` for
+  `serp_publish_signed_pack`, but D5 still fails closed until
+  `approval_run_id`, `evidence_bundle_id`, `evidence_seal_hash`,
+  `activation_idempotency_key`, `benchmark_gate_export_sha256`, and
+  `bc21_base_url` are supplied by the governance/evidence seal flow.
 - `artifact_root_path` must be an absolute local path or `s3://bucket/prefix`
   URI. Unsupported URL schemes, parent traversal, multiline values, and raw
   secret material are rejected before any runner handoff is emitted.

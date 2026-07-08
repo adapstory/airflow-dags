@@ -604,6 +604,10 @@ def build_public_docs_seed_refresh_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
                     "public_docs_seed_refresh_result",
                     "public-docs-seed-refresh-result.json",
                 ),
+                (
+                    "public_docs_publish_activation_trigger_conf",
+                    "public-docs-publish-activation-trigger-conf.json",
+                ),
             ),
         ),
         "contract_version": _EVAL_CONTRACT_VERSION,
@@ -631,6 +635,7 @@ def build_public_docs_seed_refresh_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
                 "build_public_docs_seed_refresh_plan",
                 "dispatch_pipeline_seed_refresh_handoff",
                 "run_public_docs_seed_refresh_pipeline",
+                "write_public_docs_publish_activation_trigger_conf",
                 "notify_governance_eval_surfaces",
             )
         ),
@@ -749,6 +754,75 @@ def write_public_docs_seed_refresh_plan_artifact(
     return _artifact_result(
         artifact_path,
         artifact_type="public_docs_seed_refresh_plan",
+        operation_id=_required_str(plan, "operation_id"),
+        payload=payload,
+    )
+
+
+def write_public_docs_publish_activation_trigger_conf_artifact(
+    plan_json: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != "serp_web_seed_crawl_refresh":
+        raise ValueError("plan dag_id does not match public docs publish trigger-conf writer")
+    artifact_paths = _required_artifact_paths(
+        plan,
+        (
+            "public_docs_seed_refresh_result",
+            "public_docs_publish_activation_trigger_conf",
+        ),
+    )
+    seed_refresh_result_path = _required_existing_local_artifact_path(
+        {"public_docs_seed_refresh_result_path": artifact_paths["public_docs_seed_refresh_result"]},
+        "public_docs_seed_refresh_result_path",
+    )
+    seed_refresh_identity = _public_docs_seed_refresh_result_identity(seed_refresh_result_path)
+    if seed_refresh_identity["tenant_id"] != _required_str(plan, "tenant_id"):
+        raise ValueError("public_docs_seed_refresh_result identity must match tenant_id")
+    if seed_refresh_identity["pack_id"] != _required_str(plan, "pack_id"):
+        raise ValueError("public_docs_seed_refresh_result identity must match pack_id")
+    if seed_refresh_identity["pack_version_id"] != _required_str(plan, "pack_version_id"):
+        raise ValueError("public_docs_seed_refresh_result identity must match pack_version_id")
+
+    trigger_conf = {
+        "activation_reason_code": "public-docs-d20-indexed",
+        "actor_id": _required_str(plan, "actor_id"),
+        "artifact_root_path": _required_str(plan, "artifact_root_path"),
+        "generated_at": _required_datetime_string(plan, "generated_at"),
+        "pack_id": _required_str(plan, "pack_id"),
+        "pack_version_id": _required_str(plan, "pack_version_id"),
+        "public_docs_seed_refresh_result_path": seed_refresh_result_path,
+        "registry_resource_id": _required_str(plan, "registry_resource_id"),
+        "registry_resource_type": _required_str(plan, "registry_resource_type"),
+        "tenant_id": _required_str(plan, "tenant_id"),
+    }
+    payload = {
+        "artifact_type": "public_docs_publish_activation_trigger_conf",
+        "contract_version": _EVAL_CONTRACT_VERSION,
+        "dag_id": "serp_web_seed_crawl_refresh",
+        "d5_publish_target": "serp_publish_signed_pack",
+        "generated_at": _required_datetime_string(plan, "generated_at"),
+        "governance_required_fields": [
+            "activation_idempotency_key",
+            "approval_run_id",
+            "benchmark_gate_export_sha256",
+            "bc21_base_url",
+            "evidence_bundle_id",
+            "evidence_seal_hash",
+        ],
+        "operation_id": _required_str(plan, "operation_id"),
+        "source_seed_refresh_result_path": seed_refresh_result_path,
+        "status": "governance_inputs_required",
+        "target_dag_id": "serp_publish_signed_pack",
+        "target_dag_run_conf": trigger_conf,
+        "tenant_id": _required_str(plan, "tenant_id"),
+    }
+    artifact_path = artifact_paths["public_docs_publish_activation_trigger_conf"]
+    _write_json_artifact(artifact_path, payload)
+    return _artifact_result(
+        artifact_path,
+        artifact_type="public_docs_publish_activation_trigger_conf",
         operation_id=_required_str(plan, "operation_id"),
         payload=payload,
     )

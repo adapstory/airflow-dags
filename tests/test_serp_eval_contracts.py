@@ -48,6 +48,7 @@ from dags.serp_eval_contracts import (
     write_nightly_report_artifact,
     write_nightly_suite_plan_artifact,
     write_online_eval_rollup_plan_artifact,
+    write_public_docs_publish_activation_trigger_conf_artifact,
     write_public_docs_seed_refresh_plan_artifact,
     write_public_docs_seed_registry_artifact,
 )
@@ -943,6 +944,13 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
         "public_docs_seed_refresh_result": "/".join(
             (str(tmp_path), plan.payload["operation_id"], "public-docs-seed-refresh-result.json")
         ),
+        "public_docs_publish_activation_trigger_conf": "/".join(
+            (
+                str(tmp_path),
+                plan.payload["operation_id"],
+                "public-docs-publish-activation-trigger-conf.json",
+            )
+        ),
         "public_docs_seed_registry": "/".join(
             (str(tmp_path), plan.payload["operation_id"], "public-docs-seed-registry.json")
         ),
@@ -953,6 +961,7 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
         "build_public_docs_seed_refresh_plan",
         "dispatch_pipeline_seed_refresh_handoff",
         "run_public_docs_seed_refresh_pipeline",
+        "write_public_docs_publish_activation_trigger_conf",
         "notify_governance_eval_surfaces",
     ]
 
@@ -1040,6 +1049,118 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
         "-m",
         "adapstory_serp_pipeline.orchestration.seed_refresh_cli",
     ]
+
+
+def test_d20_writes_public_docs_publish_activation_trigger_conf_artifact(
+    tmp_path: Path,
+) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    plan = build_public_docs_seed_refresh_plan(conf)
+    seed_refresh_result_path = Path(
+        plan.payload["artifact_paths"]["public_docs_seed_refresh_result"]
+    )
+    seed_refresh_result_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_public_docs_seed_refresh_result(seed_refresh_result_path)
+
+    trigger_artifact = write_public_docs_publish_activation_trigger_conf_artifact(
+        plan.to_canonical_json()
+    )
+
+    assert Path(trigger_artifact["artifactPath"]).exists()
+    assert trigger_artifact["artifactType"] == "public_docs_publish_activation_trigger_conf"
+    assert (
+        trigger_artifact["artifactPath"]
+        == plan.payload["artifact_paths"]["public_docs_publish_activation_trigger_conf"]
+    )
+    payload = trigger_artifact["payload"]
+    assert payload["status"] == "governance_inputs_required"
+    assert payload["target_dag_id"] == "serp_publish_signed_pack"
+    assert payload["d5_publish_target"] == "serp_publish_signed_pack"
+    assert payload["source_seed_refresh_result_path"] == str(seed_refresh_result_path)
+    assert payload["governance_required_fields"] == [
+        "activation_idempotency_key",
+        "approval_run_id",
+        "benchmark_gate_export_sha256",
+        "bc21_base_url",
+        "evidence_bundle_id",
+        "evidence_seal_hash",
+    ]
+    assert payload["target_dag_run_conf"] == {
+        "activation_reason_code": "public-docs-d20-indexed",
+        "actor_id": "airflow-serp-public-docs-refresh",
+        "artifact_root_path": str(tmp_path),
+        "generated_at": "2026-07-08T21:00:00Z",
+        "pack_id": PACK_ID,
+        "pack_version_id": PACK_VERSION_ID,
+        "public_docs_seed_refresh_result_path": str(seed_refresh_result_path),
+        "registry_resource_id": REGISTRY_RESOURCE_ID,
+        "registry_resource_type": "pack",
+        "tenant_id": TENANT_ID,
+    }
+    repeated_artifact = write_public_docs_publish_activation_trigger_conf_artifact(
+        json.loads(plan.to_canonical_json())
+    )
+    assert trigger_artifact["artifactSha256"] == repeated_artifact["artifactSha256"]
+
+
+def test_d20_trigger_conf_rejects_invalid_seed_refresh_result(tmp_path: Path) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    plan = build_public_docs_seed_refresh_plan(conf)
+
+    with pytest.raises(ValueError, match="public_docs_seed_refresh_result_path must exist"):
+        write_public_docs_publish_activation_trigger_conf_artifact(plan.to_canonical_json())
+
+    seed_refresh_result_path = Path(
+        plan.payload["artifact_paths"]["public_docs_seed_refresh_result"]
+    )
+    seed_refresh_result_path.parent.mkdir(parents=True, exist_ok=True)
+    seed_refresh_result_path.write_text(
+        json.dumps(
+            {
+                "artifact_type": "unsupported",
+                "batch_evidence": {
+                    "pack_id": PACK_ID,
+                    "pack_version_id": PACK_VERSION_ID,
+                    "tenant_id": TENANT_ID,
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="artifact_type is unsupported"):
+        write_public_docs_publish_activation_trigger_conf_artifact(plan.to_canonical_json())
+
+    _write_public_docs_seed_refresh_result(
+        seed_refresh_result_path,
+        tenant_id="00000000-0000-4000-a000-000000000099",
+    )
+    with pytest.raises(ValueError, match="identity must match tenant_id"):
+        write_public_docs_publish_activation_trigger_conf_artifact(plan.to_canonical_json())
+
+
+def test_d5_still_requires_governance_inputs_from_d20_trigger_conf(
+    tmp_path: Path,
+) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    plan = build_public_docs_seed_refresh_plan(conf)
+    seed_refresh_result_path = Path(
+        plan.payload["artifact_paths"]["public_docs_seed_refresh_result"]
+    )
+    seed_refresh_result_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_public_docs_seed_refresh_result(seed_refresh_result_path)
+    trigger_artifact = write_public_docs_publish_activation_trigger_conf_artifact(
+        plan.to_canonical_json()
+    )
+
+    with pytest.raises(ValueError, match="approval_run_id is required"):
+        build_public_docs_publish_activation_plan(
+            trigger_artifact["payload"]["target_dag_run_conf"]
+        )
 
 
 def test_public_docs_seed_refresh_uses_single_website_request_when_frontier_disabled(
@@ -1477,6 +1598,7 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
                 "build_public_docs_seed_refresh_plan",
                 "dispatch_pipeline_seed_refresh_handoff",
                 "run_public_docs_seed_refresh_pipeline",
+                "write_public_docs_publish_activation_trigger_conf",
                 "notify_governance_eval_surfaces",
             ],
         ),

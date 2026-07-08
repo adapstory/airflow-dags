@@ -15,6 +15,7 @@ from dags.serp_eval_contracts import (
     execute_pipeline_cli_spec,
     governance_notification_pending,
     write_airflow_plan_artifact,
+    write_public_docs_publish_activation_trigger_conf_artifact,
     write_public_docs_seed_refresh_plan_artifact,
     write_public_docs_seed_registry_artifact,
 )
@@ -80,6 +81,13 @@ run_pipeline = PythonOperator(
     dag=dag,
 )
 
+write_publish_trigger_conf = PythonOperator(
+    task_id="write_public_docs_publish_activation_trigger_conf",
+    python_callable=write_public_docs_publish_activation_trigger_conf_artifact,
+    op_args=["{{ ti.xcom_pull(task_ids='validate_public_docs_seed_registry') }}"],
+    dag=dag,
+)
+
 notify_governance = PythonOperator(
     task_id="notify_governance_eval_surfaces",
     python_callable=governance_notification_pending,
@@ -93,5 +101,6 @@ notify_governance = PythonOperator(
     >> build_refresh_plan
     >> dispatch_handoff
     >> run_pipeline
+    >> write_publish_trigger_conf
     >> notify_governance
 )
