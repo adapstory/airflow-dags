@@ -468,6 +468,13 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
         payload,
         "public_docs_seed_refresh_result_path",
     )
+    seed_refresh_identity = _public_docs_seed_refresh_result_identity(seed_refresh_result_path)
+    if seed_refresh_identity["tenant_id"] != str(tenant_id):
+        raise ValueError("public_docs_seed_refresh_result identity must match tenant_id")
+    if seed_refresh_identity["pack_id"] != str(pack_id):
+        raise ValueError("public_docs_seed_refresh_result identity must match pack_id")
+    if seed_refresh_identity["pack_version_id"] != str(pack_version_id):
+        raise ValueError("public_docs_seed_refresh_result identity must match pack_version_id")
     activation_reason_code = _required_str(payload, "activation_reason_code")
     artifact_root_path = _required_artifact_root_path(payload)
     operation_id = _operation_id(
@@ -499,9 +506,14 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
                     "public_docs_publish_activation_request",
                     "public-docs-publish-activation-request.json",
                 ),
+                (
+                    "public_docs_publish_activation_receipt",
+                    "public-docs-publish-activation-receipt.json",
+                ),
             ),
         ),
         "benchmark_gate_export_sha256": benchmark_gate_export_sha256,
+        "bc21_base_url": _required_bc21_base_url(payload),
         "dag_id": "serp_publish_signed_pack",
         "evidence_bundle_id": str(evidence_bundle_id),
         "evidence_seal_hash": evidence_seal_hash,
@@ -518,6 +530,8 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
                 "validate_publish_signed_pack_plan",
                 "dispatch_publish_activation_handoff",
                 "run_publish_activation_handoff",
+                "dispatch_publish_activation_submit",
+                "submit_publish_activation_to_bc21",
                 "notify_governance_eval_surfaces",
             )
         ),
@@ -1448,6 +1462,73 @@ def build_public_docs_publish_activation_cli_spec(
         "stdout_path": output_path,
         "task_id": "public_docs_publish_activation_handoff",
         "tenant_id": _required_str(plan, "tenant_id"),
+    }
+
+
+def build_public_docs_publish_activation_submit_cli_spec(
+    plan_json: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != "serp_publish_signed_pack":
+        raise ValueError("plan dag_id does not match public docs publish activation submit")
+    if _required_str(plan, "status") != "ready_for_publish_activation_handoff":
+        raise ValueError("publish activation plan is not ready for BC-21 submit")
+    artifact_paths = _required_artifact_paths(
+        plan,
+        (
+            "public_docs_publish_activation_request",
+            "public_docs_publish_activation_receipt",
+        ),
+    )
+    request_path = _required_existing_local_artifact_path(
+        {
+            "public_docs_publish_activation_request": artifact_paths[
+                "public_docs_publish_activation_request"
+            ]
+        },
+        "public_docs_publish_activation_request",
+    )
+    receipt_path = artifact_paths["public_docs_publish_activation_receipt"]
+    argv = [
+        GATEWAY_CLI_PYTHON,
+        "-m",
+        PIPELINE_PUBLISH_ACTIVATION_CLI_MODULE,
+        "submit",
+        "--publish-activation-request",
+        request_path,
+        "--activation-receipt-output",
+        receipt_path,
+        "--bc21-base-url",
+        _required_bc21_base_url(plan),
+    ]
+    return {
+        "actor_id": _required_str(plan, "actor_id"),
+        "argv": argv,
+        "contract_version": _PIPELINE_CLI_CONTRACT_VERSION,
+        "d5_publish_target": "serp_publish_signed_pack",
+        "dag_id": "serp_publish_signed_pack",
+        "input_paths": [request_path],
+        "operation_id": _required_str(plan, "operation_id"),
+        "pack_id": _required_str(plan, "pack_id"),
+        "pack_version_id": _required_str(plan, "pack_version_id"),
+        "plan_sha256": sha256(_canonical_json(plan).encode("utf-8")).hexdigest(),
+        "status": "ready_for_pipeline_cli_runner",
+        "stdout_path": receipt_path,
+        "task_id": "public_docs_publish_activation_submit",
+        "tenant_id": _required_str(plan, "tenant_id"),
+    }
+
+
+def _public_docs_seed_refresh_result_identity(seed_refresh_result_path: str) -> dict[str, str]:
+    result = _read_json_file(seed_refresh_result_path, "public_docs_seed_refresh_result")
+    if _required_str(result, "artifact_type") != "public_docs_seed_refresh_batch_evidence":
+        raise ValueError("public_docs_seed_refresh_result artifact_type is unsupported")
+    batch_evidence = _required_mapping(result, "batch_evidence")
+    return {
+        "pack_id": _required_str(batch_evidence, "pack_id"),
+        "pack_version_id": _required_str(batch_evidence, "pack_version_id"),
+        "tenant_id": _required_str(batch_evidence, "tenant_id"),
     }
 
 

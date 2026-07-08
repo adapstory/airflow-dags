@@ -9,6 +9,7 @@ from airflow.sdk import DAG
 from dags.serp_eval_contracts import (
     build_public_docs_publish_activation_cli_spec,
     build_public_docs_publish_activation_plan,
+    build_public_docs_publish_activation_submit_cli_spec,
     execute_pipeline_cli_spec,
     governance_notification_pending,
     write_airflow_plan_artifact,
@@ -57,6 +58,20 @@ run_handoff = PythonOperator(
     dag=dag,
 )
 
+dispatch_submit = PythonOperator(
+    task_id="dispatch_publish_activation_submit",
+    python_callable=build_public_docs_publish_activation_submit_cli_spec,
+    op_args=["{{ ti.xcom_pull(task_ids='validate_publish_signed_pack_plan') }}"],
+    dag=dag,
+)
+
+submit_activation = PythonOperator(
+    task_id="submit_publish_activation_to_bc21",
+    python_callable=execute_pipeline_cli_spec,
+    op_args=["{{ ti.xcom_pull(task_ids='dispatch_publish_activation_submit') }}"],
+    dag=dag,
+)
+
 notify_governance = PythonOperator(
     task_id="notify_governance_eval_surfaces",
     python_callable=governance_notification_pending,
@@ -64,4 +79,11 @@ notify_governance = PythonOperator(
     dag=dag,
 )
 
-validate_plan >> dispatch_handoff >> run_handoff >> notify_governance
+(
+    validate_plan
+    >> dispatch_handoff
+    >> run_handoff
+    >> dispatch_submit
+    >> submit_activation
+    >> notify_governance
+)

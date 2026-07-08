@@ -26,6 +26,7 @@ from dags.serp_eval_contracts import (
     build_online_eval_rollup_plan,
     build_public_docs_publish_activation_cli_spec,
     build_public_docs_publish_activation_plan,
+    build_public_docs_publish_activation_submit_cli_spec,
     build_public_docs_seed_refresh_plan,
     build_tenant_golden_registry_cli_spec,
     build_tenant_golden_regression_plan,
@@ -1116,7 +1117,7 @@ def test_public_docs_seed_refresh_noops_when_no_seed_is_due(tmp_path: Path) -> N
 
 def test_public_docs_publish_activation_plan_dispatches_d5_handoff(tmp_path: Path) -> None:
     seed_refresh_result = tmp_path / "public-docs-seed-refresh-result.json"
-    seed_refresh_result.write_text('{"artifact_type":"public_docs_seed_refresh_batch_evidence"}')
+    _write_public_docs_seed_refresh_result(seed_refresh_result)
     conf = _public_docs_publish_activation_conf(str(seed_refresh_result))
     conf["artifact_root_path"] = str(tmp_path)
 
@@ -1138,11 +1139,20 @@ def test_public_docs_publish_activation_plan_dispatches_d5_handoff(tmp_path: Pat
                 "public-docs-publish-activation-request.json",
             )
         ),
+        "public_docs_publish_activation_receipt": "/".join(
+            (
+                str(tmp_path),
+                plan.payload["operation_id"],
+                "public-docs-publish-activation-receipt.json",
+            )
+        ),
     }
     assert [task["task_id"] for task in plan.payload["tasks"]] == [
         "validate_publish_signed_pack_plan",
         "dispatch_publish_activation_handoff",
         "run_publish_activation_handoff",
+        "dispatch_publish_activation_submit",
+        "submit_publish_activation_to_bc21",
         "notify_governance_eval_surfaces",
     ]
     assert cli_spec["status"] == "ready_for_pipeline_cli_runner"
@@ -1164,6 +1174,33 @@ def test_public_docs_publish_activation_plan_dispatches_d5_handoff(tmp_path: Pat
     assert cli_spec["argv"][cli_spec["argv"].index("--benchmark-gate-export-sha256") + 1] == (
         "sha256:" + "c" * 64
     )
+    request_artifact_path = Path(
+        plan.payload["artifact_paths"]["public_docs_publish_activation_request"]
+    )
+    request_artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    request_artifact_path.write_text(
+        '{"artifact_type":"public_docs_publish_activation_submission"}',
+        encoding="utf-8",
+    )
+    submit_spec = build_public_docs_publish_activation_submit_cli_spec(plan.to_canonical_json())
+    assert submit_spec["status"] == "ready_for_pipeline_cli_runner"
+    assert submit_spec["task_id"] == "public_docs_publish_activation_submit"
+    assert submit_spec["input_paths"] == [
+        plan.payload["artifact_paths"]["public_docs_publish_activation_request"]
+    ]
+    assert (
+        submit_spec["stdout_path"]
+        == plan.payload["artifact_paths"]["public_docs_publish_activation_receipt"]
+    )
+    assert submit_spec["argv"][:4] == [
+        "python",
+        "-m",
+        "adapstory_serp_pipeline.registry.publish_activation_cli",
+        "submit",
+    ]
+    assert submit_spec["argv"][submit_spec["argv"].index("--bc21-base-url") + 1] == (
+        "http://serp-context-platform.env-dev.svc.cluster.local"
+    )
 
 
 def test_public_docs_publish_activation_plan_requires_governed_inputs(tmp_path: Path) -> None:
@@ -1178,6 +1215,16 @@ def test_public_docs_publish_activation_plan_requires_governed_inputs(tmp_path: 
     bad_seal["evidence_seal_hash"] = "b" * 64
     with pytest.raises(ValueError, match="evidence_seal_hash"):
         build_public_docs_publish_activation_plan(bad_seal)
+
+    identity_drift_path = tmp_path / "identity-drift-result.json"
+    _write_public_docs_seed_refresh_result(
+        identity_drift_path,
+        pack_id="00000000-0000-4000-a000-000000000299",
+    )
+    identity_drift = _public_docs_publish_activation_conf(str(identity_drift_path))
+    identity_drift["artifact_root_path"] = str(tmp_path)
+    with pytest.raises(ValueError, match="identity must match pack_id"):
+        build_public_docs_publish_activation_plan(identity_drift)
 
 
 def test_default_public_docs_seed_refresh_conf_materializes_autonomous_d20_plan(
@@ -1314,6 +1361,8 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
                 "validate_publish_signed_pack_plan",
                 "dispatch_publish_activation_handoff",
                 "run_publish_activation_handoff",
+                "dispatch_publish_activation_submit",
+                "submit_publish_activation_to_bc21",
                 "notify_governance_eval_surfaces",
             ],
         ),
@@ -1621,6 +1670,7 @@ def _public_docs_publish_activation_conf(seed_refresh_result_path: str) -> dict[
         "approval_run_id": "018f5e13-2d73-7a77-a052-8d1bcbf96601",
         "artifact_root_path": "/var/opt/adapstory/serp-public-docs-publish",
         "benchmark_gate_export_sha256": "sha256:" + "c" * 64,
+        "bc21_base_url": "http://serp-context-platform.env-dev.svc.cluster.local",
         "evidence_bundle_id": "018f5e13-2d73-7a77-a052-8d1bcbf96602",
         "evidence_seal_hash": "sha256:" + "b" * 64,
         "generated_at": "2026-07-08T22:00:00Z",
@@ -1631,6 +1681,30 @@ def _public_docs_publish_activation_conf(seed_refresh_result_path: str) -> dict[
         "registry_resource_type": "pack",
         "tenant_id": TENANT_ID,
     }
+
+
+def _write_public_docs_seed_refresh_result(
+    path: Path,
+    *,
+    tenant_id: str = TENANT_ID,
+    pack_id: str = PACK_ID,
+    pack_version_id: str = PACK_VERSION_ID,
+) -> None:
+    batch_evidence = {
+        "pack_id": pack_id,
+        "pack_version_id": pack_version_id,
+        "tenant_id": tenant_id,
+    }
+    path.write_text(
+        json.dumps(
+            {
+                "artifact_type": "public_docs_seed_refresh_batch_evidence",
+                "batch_evidence": batch_evidence,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
 
 
 def _public_docs_seed(
