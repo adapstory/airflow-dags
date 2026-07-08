@@ -56,6 +56,12 @@ from dags.serp_eval_contracts import (
     write_public_docs_seed_refresh_plan_artifact,
     write_public_docs_seed_registry_artifact,
 )
+from dags.serp_public_docs_seed_catalog import (
+    P0_PUBLIC_DOCS_SOURCES,
+    PUBLIC_DOCS_NIGHTLY_SOURCE_CATALOG_PATH,
+    STACK_INVENTORY_SOURCE_PATH,
+    p0_public_docs_sources,
+)
 
 TENANT_ID = "00000000-0000-4000-a000-000000000001"
 PACK_ID = "00000000-0000-4000-a000-000000000201"
@@ -1900,28 +1906,81 @@ def test_default_public_docs_seed_refresh_conf_materializes_autonomous_d20_plan(
     assert conf["seed_registry"]
     assert plan.payload["dag_id"] == "serp_web_seed_crawl_refresh"
     assert plan.payload["status"] == "ready_for_public_docs_seed_refresh"
-    assert plan.payload["seed_count"] == 4
+    assert plan.payload["seed_count"] == len(P0_PUBLIC_DOCS_SOURCES)
     assert plan.payload["source_type_counts"] == {
-        "git": 1,
         "openapi": 1,
-        "website": 2,
+        "website": len(P0_PUBLIC_DOCS_SOURCES) - 1,
     }
     assert {
         seed["inventory_evidence"]["stack_inventory_path"] for seed in plan.payload["seed_registry"]
-    } == {"tmp/stack-inventory-2026-07-02.md"}
+    } == {STACK_INVENTORY_SOURCE_PATH}
     assert {seed["metadata"]["origin"] for seed in plan.payload["seed_registry"]} == {
-        "tmp/stack-inventory-2026-07-02.md"
+        STACK_INVENTORY_SOURCE_PATH
     }
+    assert {
+        seed["metadata"]["nightly_source_catalog_path"] for seed in plan.payload["seed_registry"]
+    } == {PUBLIC_DOCS_NIGHTLY_SOURCE_CATALOG_PATH}
+    assert {seed["metadata"]["priority"] for seed in plan.payload["seed_registry"]} == {"P0"}
     assert {seed["seed_id"]: seed["source_uri"] for seed in plan.payload["seed_registry"]} == {
-        "adapstory-gitops-docs": (
-            "git+file:///opt/adapstory/Adapstory-GitOps.git?ref=HEAD&path=readme.md"
-        ),
-        "k3s-docs": "https://docs.k3s.io/",
-        "kubernetes-openapi-docs": (
-            "https://raw.githubusercontent.com/kubernetes/kubernetes/master/api/openapi-spec/swagger.json"
-        ),
-        "postgresql-reference-docs": "https://www.postgresql.org/docs/16/",
+        str(source["seed_id"]): str(source["docs_url"]) for source in P0_PUBLIC_DOCS_SOURCES
     }
+
+
+def test_default_public_docs_seed_refresh_conf_does_not_read_tmp_catalog(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert not (tmp_path / PUBLIC_DOCS_NIGHTLY_SOURCE_CATALOG_PATH).exists()
+    assert not (tmp_path / STACK_INVENTORY_SOURCE_PATH).exists()
+
+    conf = default_public_docs_seed_refresh_conf(
+        generated_at="2026-07-08T21:00:00Z",
+        artifact_root_path=str(tmp_path),
+    )
+    plan = build_public_docs_seed_refresh_plan(conf)
+
+    assert plan.payload["seed_count"] == len(P0_PUBLIC_DOCS_SOURCES)
+    assert {
+        seed["metadata"]["nightly_source_catalog_path"] for seed in plan.payload["seed_registry"]
+    } == {PUBLIC_DOCS_NIGHTLY_SOURCE_CATALOG_PATH}
+    assert {
+        seed["inventory_evidence"]["stack_inventory_path"] for seed in plan.payload["seed_registry"]
+    } == {STACK_INVENTORY_SOURCE_PATH}
+
+
+def test_p0_public_docs_seed_catalog_shape_is_runtime_safe() -> None:
+    allowed_source_types = {"git", "openapi", "pdf", "website"}
+    seen_seed_ids: set[str] = set()
+
+    for source in p0_public_docs_sources():
+        seed_id = str(source["seed_id"])
+        docs_url = str(source["docs_url"])
+        source_type = str(source.get("source_type", "website"))
+        docs_origin = urlparse(docs_url)
+
+        assert seed_id not in seen_seed_ids
+        assert seed_id
+        assert str(source["component"])
+        assert str(source.get("priority", "P0")) == "P0"
+        assert source_type in allowed_source_types
+        assert docs_origin.scheme in {"git+file", "https"}
+
+        if source_type == "git":
+            assert docs_url.startswith("git+file://")
+        if source_type == "pdf":
+            assert docs_url.endswith(".pdf")
+        if source_type in {"openapi", "website"}:
+            assert docs_origin.scheme == "https"
+
+        for frontier_url in source.get("frontier_urls", ()):
+            frontier_origin = urlparse(str(frontier_url))
+            assert frontier_origin.scheme == docs_origin.scheme
+            assert frontier_origin.netloc == docs_origin.netloc
+
+        seen_seed_ids.add(seed_id)
+
+    assert seen_seed_ids == {str(source["seed_id"]) for source in P0_PUBLIC_DOCS_SOURCES}
 
 
 def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> None:
@@ -2132,12 +2191,9 @@ def test_serp_public_docs_dag_overlays_partial_run_conf_on_default_seed_registry
     plan = json.loads(plan_json)
 
     assert plan["generated_at"] == "2026-07-08T21:30:00Z"
-    assert plan["seed_count"] == 4
+    assert plan["seed_count"] == len(P0_PUBLIC_DOCS_SOURCES)
     assert {seed["seed_id"] for seed in plan["seed_registry"]} == {
-        "adapstory-gitops-docs",
-        "k3s-docs",
-        "kubernetes-openapi-docs",
-        "postgresql-reference-docs",
+        str(source["seed_id"]) for source in P0_PUBLIC_DOCS_SOURCES
     }
     assert all(path.startswith(str(tmp_path)) for path in plan["artifact_paths"].values())
 

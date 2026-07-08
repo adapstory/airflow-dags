@@ -21,6 +21,12 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from dags.serp_public_docs_seed_catalog import (
+    PUBLIC_DOCS_NIGHTLY_SOURCE_CATALOG_PATH,
+    STACK_INVENTORY_SOURCE_PATH,
+    p0_public_docs_sources,
+)
+
 MANDATORY_SERP_BENCHMARK_SUITES = (
     "APIBench",
     "ARES",
@@ -59,7 +65,7 @@ _PUBLIC_DOCS_DEFAULT_PACK_ID = "00000000-0000-4000-a000-000000000201"
 _PUBLIC_DOCS_DEFAULT_PACK_VERSION_ID = "018f5e13-2d73-7a77-a052-8d1bcbf96541"
 _PUBLIC_DOCS_DEFAULT_ACTOR_ID = "airflow-serp-public-docs-refresh"
 _PUBLIC_DOCS_DEFAULT_ARTIFACT_ROOT = "/var/opt/adapstory/serp-public-docs-refresh"
-_PUBLIC_DOCS_STACK_INVENTORY_PATH = "tmp/stack-inventory-2026-07-02.md"
+_PUBLIC_DOCS_STACK_INVENTORY_PATH = STACK_INVENTORY_SOURCE_PATH
 _ARTIFACT_ROOT_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_ROOT"
 _PUBLIC_DOCS_INDEX_MODE_ENV = "ADAPSTORY_SERP_PUBLIC_DOCS_INDEX_MODE"
 _PUBLIC_DOCS_EMBEDDING_MODE_ENV = "ADAPSTORY_SERP_PUBLIC_DOCS_EMBEDDING_MODE"
@@ -672,36 +678,7 @@ def default_public_docs_seed_refresh_conf(
         "pack_version_id": _PUBLIC_DOCS_DEFAULT_PACK_VERSION_ID,
         "registry_resource_id": _PUBLIC_DOCS_DEFAULT_PACK_VERSION_ID,
         "registry_resource_type": "pack",
-        "seed_registry": [
-            _default_public_docs_seed(
-                "k3s-docs",
-                "website",
-                "https://docs.k3s.io/",
-                component="K3s",
-                version="v1.34.3+k3s1",
-            ),
-            _default_public_docs_seed(
-                "kubernetes-openapi-docs",
-                "openapi",
-                "https://raw.githubusercontent.com/kubernetes/kubernetes/master/api/openapi-spec/swagger.json",
-                component="Kubernetes OpenAPI",
-                version="v1.34.3",
-            ),
-            _default_public_docs_seed(
-                "postgresql-reference-docs",
-                "website",
-                "https://www.postgresql.org/docs/16/",
-                component="PostgreSQL",
-                version="16.1.0",
-            ),
-            _default_public_docs_seed(
-                "adapstory-gitops-docs",
-                "git",
-                "git+file:///opt/adapstory/Adapstory-GitOps.git?ref=HEAD&path=readme.md",
-                component="Adapstory GitOps",
-                version="main",
-            ),
-        ],
+        "seed_registry": _default_public_docs_seed_registry(),
         "tenant_id": _PUBLIC_DOCS_DEFAULT_TENANT_ID,
     }
     bc21_base_url = _optional_bc21_base_url(conf)
@@ -3065,12 +3042,29 @@ def _public_docs_seed_registry(payload: Mapping[str, Any]) -> list[dict[str, Any
     return sorted(seeds, key=lambda seed: _required_str(seed, "seed_id"))
 
 
+def _default_public_docs_seed_registry() -> list[dict[str, Any]]:
+    return [
+        _default_public_docs_seed(
+            str(source["seed_id"]),
+            str(source.get("source_type", "website")),
+            str(source["docs_url"]),
+            component=str(source["component"]),
+            frontier_urls=tuple(str(value) for value in source.get("frontier_urls", ())),
+            priority=str(source.get("priority", "P0")),
+            version=str(source.get("version", "catalog@2026-07-08")),
+        )
+        for source in p0_public_docs_sources()
+    ]
+
+
 def _default_public_docs_seed(
     seed_id: str,
     source_type: str,
     source_uri: str,
     *,
     component: str,
+    frontier_urls: Sequence[str] = (),
+    priority: str = "P0",
     version: str,
 ) -> dict[str, Any]:
     parsed = urlparse(source_uri)
@@ -3081,9 +3075,9 @@ def _default_public_docs_seed(
         "crawl_policy": {
             "allowed_domains": [allowed_domain],
             "deny_patterns": ["/login", "/admin"],
-            "frontier_urls": _default_public_docs_frontier_urls(seed_id, source_uri),
+            "frontier_urls": list(frontier_urls),
             "max_depth": 2,
-            "max_pages": 50,
+            "max_pages": 25,
             "respect_robots_txt": True,
             "sitemap_discovery": True,
             "user_agent": "AdapstorySERPDocsRefresh/2026.07",
@@ -3100,7 +3094,9 @@ def _default_public_docs_seed(
             "obligation_state": "reviewed-public-docs",
         },
         "metadata": {
+            "nightly_source_catalog_path": PUBLIC_DOCS_NIGHTLY_SOURCE_CATALOG_PATH,
             "origin": _PUBLIC_DOCS_STACK_INVENTORY_PATH,
+            "priority": priority,
             "purpose": "public-docs-seed-to-serve",
         },
         "official_docs_uri": source_uri,
@@ -3113,21 +3109,6 @@ def _default_public_docs_seed(
         "source_type": source_type,
         "source_uri": source_uri,
     }
-
-
-def _default_public_docs_frontier_urls(seed_id: str, source_uri: str) -> list[str]:
-    if seed_id == "k3s-docs":
-        return [
-            "https://docs.k3s.io/quick-start",
-            "https://docs.k3s.io/installation/requirements",
-        ]
-    if seed_id == "postgresql-reference-docs":
-        return [
-            "https://www.postgresql.org/docs/16/tutorial.html",
-            "https://www.postgresql.org/docs/16/sql.html",
-            "https://www.postgresql.org/docs/16/index.html",
-        ]
-    return []
 
 
 def _public_docs_seed(seed: Mapping[str, Any]) -> dict[str, Any]:
