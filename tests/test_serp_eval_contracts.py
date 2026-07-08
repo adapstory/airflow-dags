@@ -5,6 +5,7 @@ import io
 import json
 from hashlib import sha256
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -46,6 +47,7 @@ from dags.serp_eval_contracts import (
 )
 
 TENANT_ID = "00000000-0000-4000-a000-000000000001"
+PACK_ID = "00000000-0000-4000-a000-000000000201"
 PACK_VERSION_ID = "018f5e13-2d73-7a77-a052-8d1bcbf96541"
 REGISTRY_RESOURCE_ID = "018f5e13-2d73-7a77-a052-8d1bcbf96541"
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -908,6 +910,18 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
         request["source_type"]
         for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
     } == {"git", "openapi", "pdf", "website"}
+    assert all(
+        request["source_uri_hash"].startswith("sha256:")
+        for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
+    )
+    assert all(
+        "parse_run_id" in request["pipeline_run_spec"]
+        for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
+    )
+    assert {
+        request["pipeline_run_spec"]["pack_id"]
+        for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
+    } == {PACK_ID}
 
 
 def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> None:
@@ -915,6 +929,19 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
     disallowed_source_type["seed_registry"][0]["source_type"] = "confluence"
     with pytest.raises(ValueError, match="source_type is not executable by current connectors"):
         build_public_docs_seed_refresh_plan(disallowed_source_type)
+
+    planned_markdown = _public_docs_seed_refresh_conf()
+    planned_markdown["seed_registry"][0]["source_type"] = "markdown"
+    with pytest.raises(ValueError, match="source_type is not executable by current connectors"):
+        build_public_docs_seed_refresh_plan(planned_markdown)
+
+    remote_git = _public_docs_seed_refresh_conf()
+    remote_git["seed_registry"][3]["source_uri"] = "git+https://github.com/adapstory/docs.git"
+    remote_git["seed_registry"][3]["official_docs_uri"] = (
+        "git+https://github.com/adapstory/docs.git"
+    )
+    with pytest.raises(ValueError, match="git public docs seeds must use git\\+file"):
+        build_public_docs_seed_refresh_plan(remote_git)
 
     missing_robot_policy = _public_docs_seed_refresh_conf()
     missing_robot_policy["seed_registry"][1]["crawl_policy"]["respect_robots_txt"] = False
@@ -1216,12 +1243,12 @@ def _improvement_wave_conf() -> dict[str, object]:
     }
 
 
-def _public_docs_seed_refresh_conf() -> dict[str, object]:
+def _public_docs_seed_refresh_conf() -> dict[str, Any]:
     return {
         "actor_id": "airflow-serp-public-docs-refresh",
         "artifact_root_path": "/var/opt/adapstory/serp-public-docs-refresh",
         "generated_at": "2026-07-08T21:00:00Z",
-        "pack_id": "serp-public-docs-adapstory-stack",
+        "pack_id": PACK_ID,
         "pack_version_id": PACK_VERSION_ID,
         "registry_resource_id": REGISTRY_RESOURCE_ID,
         "registry_resource_type": "pack",
@@ -1266,7 +1293,7 @@ def _public_docs_seed(
     *,
     component: str,
     version: str,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     return {
         "approved": True,
         "connector_name": source_type,

@@ -108,9 +108,10 @@ SERP eval DAG contracts:
   registry resource identity, approved actor id, generated timestamp, a
   governed `seed_registry`, and either `artifact_root_path` or
   `ADAPSTORY_AIRFLOW_ARTIFACT_ROOT`. The seed registry is intentionally limited
-  to currently executable connector types: `git`, `website`, `openapi`,
-  `markdown`, and `pdf`. Confluence, Notion, and Google Docs are taxonomy or
-  planned adapters until their connectors exist in the SERP pipeline. Each seed
+  to currently executable connector types: `git`, `website`, `openapi`, and
+  `pdf`. Markdown/file-upload intake, Confluence, Notion, and Google Docs are
+  taxonomy or planned adapters until their connectors exist in the SERP
+  pipeline. Each seed
   must be approved, public or external-ok, reference the
   `tmp/stack-inventory-2026-07-02.md` inventory evidence, include official-docs
   URI, license/distribution state, daily/nightly refresh policy, and a bounded

@@ -42,7 +42,7 @@ _EVAL_CONTRACT_VERSION = "2026.07.2"
 _DRY_RUN_SUITE_VERSION = "dry-run@2026.07.2"
 _BENCHMARK_NAMESPACE = UUID("018f5e13-2d73-7a77-a052-8d1bcbf96599")
 _PUBLIC_DOCS_NAMESPACE = UUID("018f5e13-2d73-7a77-a052-8d1bcbf96600")
-_PUBLIC_DOCS_EXECUTABLE_SOURCE_TYPES = frozenset({"git", "markdown", "openapi", "pdf", "website"})
+_PUBLIC_DOCS_EXECUTABLE_SOURCE_TYPES = frozenset({"git", "openapi", "pdf", "website"})
 _PUBLIC_DOCS_DATA_CLASSES = frozenset({"PUBLIC", "INTERNAL_EXTERNAL_OK"})
 _PUBLIC_DOCS_DISTRIBUTION_RULES = frozenset({"cite-and-cache", "cite-only", "internal-cache-only"})
 _ARTIFACT_ROOT_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_ROOT"
@@ -432,8 +432,8 @@ def build_public_docs_seed_refresh_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
     generated_at = _required_datetime_string(payload, "generated_at")
     registry_resource_type = _required_resource_type(payload, "registry_resource_type")
     registry_resource_id = _required_uuid(payload, "registry_resource_id")
+    pack_id = _required_uuid(payload, "pack_id")
     pack_version_id = _required_uuid(payload, "pack_version_id")
-    pack_id = _required_str(payload, "pack_id")
     artifact_root_path = _required_artifact_root_path(payload)
     seeds = _public_docs_seed_registry(payload)
     seed_registry_sha256 = sha256(
@@ -469,7 +469,7 @@ def build_public_docs_seed_refresh_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
         "dag_id": "serp_web_seed_crawl_refresh",
         "generated_at": generated_at,
         "operation_id": operation_id,
-        "pack_id": pack_id,
+        "pack_id": str(pack_id),
         "pack_version_id": str(pack_version_id),
         "registry_resource_id": str(registry_resource_id),
         "registry_resource_type": registry_resource_type,
@@ -1128,6 +1128,7 @@ def _public_docs_source_fetch_request(
     source_type = _required_str(seed, "source_type")
     operation_id = _required_str(plan, "operation_id")
     fetch_run_id = str(uuid5(_PUBLIC_DOCS_NAMESPACE, f"fetch|{operation_id}|{seed_id}"))
+    parse_run_id = str(uuid5(_PUBLIC_DOCS_NAMESPACE, f"parse|{operation_id}|{seed_id}"))
     pipeline_run_id = str(uuid5(_PUBLIC_DOCS_NAMESPACE, f"pipeline|{operation_id}|{seed_id}"))
     idempotency_key = str(
         uuid5(
@@ -1163,6 +1164,7 @@ def _public_docs_source_fetch_request(
             "index_targets": ["qdrant", "opensearch", "neo4j"],
             "pack_id": _required_str(plan, "pack_id"),
             "pack_version_id": _required_str(plan, "pack_version_id"),
+            "parse_run_id": parse_run_id,
             "pipeline_run_id": pipeline_run_id,
             "pipeline_stages": ["fetch", "parse", "chunk", "embed", "index"],
             "publish_state_after_index": "activation_pending",
@@ -1175,7 +1177,7 @@ def _public_docs_source_fetch_request(
         "source_metadata": source_metadata,
         "source_type": source_type,
         "source_uri": source_uri,
-        "source_uri_hash": sha256(source_uri.encode("utf-8")).hexdigest(),
+        "source_uri_hash": f"sha256:{sha256(source_uri.encode('utf-8')).hexdigest()}",
         "status": "ready_for_fetch",
     }
 
@@ -2296,8 +2298,10 @@ def _required_public_docs_source_uri(seed: Mapping[str, Any], source_type: str) 
         raise ValueError("source_uri must not contain raw secret material")
     parsed = urlparse(source_uri)
     if source_type == "git":
-        if parsed.scheme not in {"git+file", "git+https"}:
-            raise ValueError("git public docs seeds must use git+file or git+https URI")
+        if parsed.scheme != "git+file":
+            raise ValueError(
+                "git public docs seeds must use git+file until remote git connector exists"
+            )
         return source_uri
     if parsed.scheme != "https" or not parsed.hostname:
         raise ValueError("public docs source_uri must use https")
@@ -2307,7 +2311,7 @@ def _required_public_docs_source_uri(seed: Mapping[str, Any], source_type: str) 
 def _required_public_docs_official_docs_uri(seed: Mapping[str, Any]) -> str:
     official_docs_uri = _required_str(seed, "official_docs_uri")
     parsed = urlparse(official_docs_uri)
-    if parsed.scheme not in {"https", "git+file", "git+https"}:
+    if parsed.scheme not in {"https", "git+file"}:
         raise ValueError("official_docs_uri must use an approved docs URI scheme")
     if parsed.scheme == "https" and not parsed.hostname:
         raise ValueError("official_docs_uri must include a host")
