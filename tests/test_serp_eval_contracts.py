@@ -1074,8 +1074,7 @@ def test_public_docs_seed_refresh_dispatches_live_index_mode(tmp_path: Path) -> 
     assert cli_spec["argv"][cli_spec["argv"].index("--index-mode") + 1] == "live"
     assert cli_spec["argv"][cli_spec["argv"].index("--embedding-mode") + 1] == "live-gateway"
     assert (
-        cli_spec["argv"][cli_spec["argv"].index("--qdrant-collection") + 1]
-        == "serp_vectors_prod"
+        cli_spec["argv"][cli_spec["argv"].index("--qdrant-collection") + 1] == "serp_vectors_prod"
     )
     assert cli_spec["argv"][cli_spec["argv"].index("--opensearch-index") + 1] == "serp_lexical_prod"
     assert cli_spec["argv"][cli_spec["argv"].index("--neo4j-database") + 1] == "neo4j"
