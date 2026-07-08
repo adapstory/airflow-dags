@@ -1634,10 +1634,154 @@ def test_public_docs_publish_activation_plan_dispatches_d5_handoff(tmp_path: Pat
     )
 
 
+def test_public_docs_publish_activation_plan_accepts_s3_d20_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed_refresh_result_path = (
+        "s3://airflow-serp-artifacts/serp-evals/d20/public-docs-seed-refresh-result.json"
+    )
+    request_path = (
+        "s3://airflow-serp-artifacts/serp-evals/d5/public-docs-publish-activation-request.json"
+    )
+    receipt_path = (
+        "s3://airflow-serp-artifacts/serp-evals/d5/public-docs-publish-activation-receipt.json"
+    )
+    result_bucket, result_key = seed_refresh_result_path.removeprefix("s3://").split("/", 1)
+    request_bucket, request_key = request_path.removeprefix("s3://").split("/", 1)
+    storage = {
+        (result_bucket, result_key): json.dumps(
+            {
+                "artifact_type": "public_docs_seed_refresh_batch_evidence",
+                "batch_evidence": {
+                    "pack_id": PACK_ID,
+                    "pack_version_id": PACK_VERSION_ID,
+                    "tenant_id": TENANT_ID,
+                },
+            },
+            sort_keys=True,
+        ).encode("utf-8"),
+        (request_bucket, request_key): json.dumps(
+            {
+                "artifact_type": "public_docs_publish_activation_submission",
+                "contract_version": "2026.07.1",
+                "status": "ready_for_bc21_publish_activation",
+                "submission": {"endpointPath": "/api/bc-21/serp/v1/packs/x"},
+                "submission_sha256": "a" * 64,
+            },
+            sort_keys=True,
+        ).encode("utf-8"),
+    }
+
+    class FakeS3Client:
+        def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
+            return {"Body": io.BytesIO(storage[(Bucket, Key)])}
+
+    monkeypatch.setattr("dags.serp_eval_contracts._s3_client", lambda: FakeS3Client())
+
+    conf = _public_docs_publish_activation_conf(seed_refresh_result_path)
+    conf["artifact_root_path"] = "s3://airflow-serp-artifacts/serp-evals"
+    plan = build_public_docs_publish_activation_plan(conf)
+    plan.payload["artifact_paths"]["public_docs_publish_activation_request"] = request_path
+    plan.payload["artifact_paths"]["public_docs_publish_activation_receipt"] = receipt_path
+
+    cli_spec = build_public_docs_publish_activation_cli_spec(plan.to_canonical_json())
+    submit_spec = build_public_docs_publish_activation_submit_cli_spec(plan.to_canonical_json())
+
+    assert plan.payload["public_docs_seed_refresh_result_path"] == seed_refresh_result_path
+    assert cli_spec["input_paths"] == [seed_refresh_result_path]
+    assert cli_spec["argv"][cli_spec["argv"].index("--seed-refresh-result") + 1] == (
+        seed_refresh_result_path
+    )
+    assert submit_spec["input_paths"] == [request_path]
+    assert submit_spec["argv"][submit_spec["argv"].index("--publish-activation-request") + 1] == (
+        request_path
+    )
+    assert submit_spec["argv"][submit_spec["argv"].index("--activation-receipt-output") + 1] == (
+        receipt_path
+    )
+
+
+def test_pipeline_cli_executor_materializes_s3_activation_receipt_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_path = (
+        "s3://airflow-serp-artifacts/serp-evals/d5/public-docs-publish-activation-request.json"
+    )
+    receipt_path = (
+        "s3://airflow-serp-artifacts/serp-evals/d5/public-docs-publish-activation-receipt.json"
+    )
+    request_bucket, request_key = request_path.removeprefix("s3://").split("/", 1)
+    bucket, key = receipt_path.removeprefix("s3://").split("/", 1)
+    storage = {
+        (
+            request_bucket,
+            request_key,
+        ): b'{"artifact_type":"public_docs_publish_activation_submission"}'
+    }
+    put_calls: list[tuple[str, str, str, str]] = []
+
+    class FakeS3Client:
+        def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
+            return {"Body": io.BytesIO(storage[(Bucket, Key)])}
+
+        def put_object(
+            self,
+            *,
+            Bucket: str,
+            Key: str,
+            Body: bytes,
+            ContentType: str,
+        ) -> None:
+            put_calls.append((Bucket, Key, Body.decode("utf-8"), ContentType))
+
+    monkeypatch.setattr("dags.serp_eval_contracts._s3_client", lambda: FakeS3Client())
+
+    cli_spec = {
+        "argv": [
+            "python",
+            "-c",
+            (
+                "import json, pathlib, sys; "
+                "request_arg = sys.argv.index('--publish-activation-request') + 1; "
+                "request = pathlib.Path(sys.argv[request_arg]); "
+                "assert request.exists(); "
+                "receipt_arg = sys.argv.index('--activation-receipt-output') + 1; "
+                "p = pathlib.Path(sys.argv[receipt_arg]); "
+                "assert not str(p).startswith('s3://'); "
+                "p.parent.mkdir(parents=True, exist_ok=True); "
+                "payload = {'artifact_type': 'public_docs_publish_activation_receipt', "
+                "'status': 'active'}; "
+                "p.write_text(json.dumps(payload), encoding='utf-8'); "
+                "print(json.dumps(payload))"
+            ),
+            "--publish-activation-request",
+            request_path,
+            "--activation-receipt-output",
+            receipt_path,
+        ],
+        "contract_version": "serp-airflow-pipeline-cli-bridge/v1",
+        "dag_id": "serp_publish_signed_pack",
+        "input_paths": [request_path],
+        "operation_id": "serp-airflow-publish-signed-pack-test",
+        "status": "ready_for_pipeline_cli_runner",
+        "stdout_path": receipt_path,
+        "task_id": "public_docs_publish_activation_submit",
+    }
+
+    result = execute_pipeline_cli_spec(cli_spec)
+
+    assert result["artifactPath"] == receipt_path
+    assert result["payload"]["status"] == "active"
+    assert put_calls
+    assert put_calls[0][0] == bucket
+    assert put_calls[0][1] == key
+    assert put_calls[0][3] == "application/json"
+
+
 def test_public_docs_publish_activation_plan_requires_governed_inputs(tmp_path: Path) -> None:
     missing_result = _public_docs_publish_activation_conf(str(tmp_path / "missing.json"))
     missing_result["artifact_root_path"] = str(tmp_path)
-    with pytest.raises(ValueError, match="public_docs_seed_refresh_result_path must exist"):
+    with pytest.raises(ValueError, match="public_docs_seed_refresh_result file is not readable"):
         build_public_docs_publish_activation_plan(missing_result)
 
     bad_seal = _public_docs_publish_activation_conf(str(tmp_path / "result.json"))

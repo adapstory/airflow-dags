@@ -465,9 +465,9 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
         payload,
         "benchmark_gate_export_sha256",
     )
-    seed_refresh_result_path = _required_existing_local_artifact_path(
-        payload,
+    seed_refresh_result_path = _artifact_path(
         "public_docs_seed_refresh_result_path",
+        _required_str(payload, "public_docs_seed_refresh_result_path"),
     )
     seed_refresh_identity = _public_docs_seed_refresh_result_identity(seed_refresh_result_path)
     if seed_refresh_identity["tenant_id"] != str(tenant_id):
@@ -1517,9 +1517,9 @@ def build_public_docs_publish_activation_cli_spec(
         plan,
         ("public_docs_publish_activation_request",),
     )
-    seed_refresh_result_path = _required_existing_local_artifact_path(
-        plan,
+    seed_refresh_result_path = _artifact_path(
         "public_docs_seed_refresh_result_path",
+        _required_str(plan, "public_docs_seed_refresh_result_path"),
     )
     output_path = artifact_paths["public_docs_publish_activation_request"]
     argv = [
@@ -1579,14 +1579,11 @@ def build_public_docs_publish_activation_submit_cli_spec(
             "public_docs_publish_activation_receipt",
         ),
     )
-    request_path = _required_existing_local_artifact_path(
-        {
-            "public_docs_publish_activation_request": artifact_paths[
-                "public_docs_publish_activation_request"
-            ]
-        },
+    request_path = _artifact_path(
         "public_docs_publish_activation_request",
+        artifact_paths["public_docs_publish_activation_request"],
     )
+    _read_json_file(request_path, "public_docs_publish_activation_request")
     receipt_path = artifact_paths["public_docs_publish_activation_receipt"]
     argv = [
         GATEWAY_CLI_PYTHON,
@@ -3909,11 +3906,13 @@ def _materialize_pipeline_cli_argv(
             Path(temp_dir) / "stdout" / Path(_required_str_ref(stdout_artifact.key)).name
         )
         local_stdout_path.parent.mkdir(parents=True, exist_ok=True)
-        materialized = _replace_cli_option_value(
-            materialized,
-            "--evidence-output",
-            str(local_stdout_path),
-        )
+        for output_option in ("--evidence-output", "--activation-receipt-output"):
+            if output_option in materialized:
+                materialized = _replace_cli_option_value(
+                    materialized,
+                    output_option,
+                    str(local_stdout_path),
+                )
     if "--artifact-root" in materialized:
         artifact_root = materialized[materialized.index("--artifact-root") + 1]
         if _artifact_ref("artifact_root", artifact_root).kind == "s3":
