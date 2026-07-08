@@ -6,6 +6,7 @@ import json
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import pytest
 
@@ -1471,8 +1472,8 @@ def test_public_docs_seed_refresh_selects_due_seeds_and_records_skips(
     assert [skip["seed_id"] for skip in payload["skipped_seed_refreshes"]] == ["k3s-docs"]
     assert {request["seed_id"] for request in payload["source_fetch_requests"]} == {
         "adapstory-gitops-docs",
-        "react-docs",
-        "spring-boot-docs",
+        "kubernetes-openapi-docs",
+        "postgresql-reference-pdf",
     }
     assert {
         request["source_metadata"]["refresh_selection"]["reason"]
@@ -1827,6 +1828,18 @@ def test_default_public_docs_seed_refresh_conf_materializes_autonomous_d20_plan(
     } == {"tmp/stack-inventory-2026-07-02.md"}
     assert {seed["metadata"]["origin"] for seed in plan.payload["seed_registry"]} == {
         "tmp/stack-inventory-2026-07-02.md"
+    }
+    assert {seed["seed_id"]: seed["source_uri"] for seed in plan.payload["seed_registry"]} == {
+        "adapstory-gitops-docs": (
+            "git+file:///opt/adapstory/Adapstory-GitOps.git?ref=HEAD&path=readme.md"
+        ),
+        "k3s-docs": "https://docs.k3s.io/",
+        "kubernetes-openapi-docs": (
+            "https://raw.githubusercontent.com/kubernetes/kubernetes/master/api/openapi-spec/swagger.json"
+        ),
+        "postgresql-reference-pdf": (
+            "https://www.postgresql.org/files/documentation/pdf/16/postgresql-16-US.pdf"
+        ),
     }
 
 
@@ -2220,18 +2233,18 @@ def _public_docs_seed_refresh_conf() -> dict[str, Any]:
                 version="v1.34.3+k3s1",
             ),
             _public_docs_seed(
-                "spring-boot-docs",
+                "kubernetes-openapi-docs",
                 "openapi",
-                "https://docs.spring.io/spring-boot/4.0/api/rest/application.yaml",
-                component="Spring Boot",
-                version="4.0.7",
+                "https://raw.githubusercontent.com/kubernetes/kubernetes/master/api/openapi-spec/swagger.json",
+                component="Kubernetes OpenAPI",
+                version="v1.34.3",
             ),
             _public_docs_seed(
-                "react-docs",
+                "postgresql-reference-pdf",
                 "pdf",
-                "https://react.dev/reference/react.pdf",
-                component="React",
-                version="19.2.6",
+                "https://www.postgresql.org/files/documentation/pdf/16/postgresql-16-US.pdf",
+                component="PostgreSQL",
+                version="16.1.0",
             ),
             _public_docs_seed(
                 "adapstory-gitops-docs",
@@ -2306,11 +2319,13 @@ def _public_docs_seed(
         if seed_id == "k3s-docs"
         else []
     )
+    parsed = urlparse(source_uri)
+    allowed_domain = parsed.hostname or "opt.adapstory"
     return {
         "approved": True,
         "connector_name": source_type,
         "crawl_policy": {
-            "allowed_domains": ["docs.k3s.io", "docs.spring.io", "react.dev", "opt.adapstory"],
+            "allowed_domains": [allowed_domain],
             "deny_patterns": ["/login", "/admin"],
             "frontier_urls": frontier_urls,
             "max_depth": 2,
