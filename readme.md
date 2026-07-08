@@ -41,6 +41,20 @@ SERP eval DAG contracts:
   `tenant-golden-registry-submissions.json`
   under a deterministic operation directory. Missing workflow or golden-set
   provenance fails closed.
+- `serp_online_eval_rollup` is the D7 sampled online-eval contract DAG. Its
+  `dag_run.conf` must provide tenant id, registry resource identity, approved
+  actor id, generated timestamp, and one or more online-eval reports produced
+  from sampled real requests. It must also provide `artifact_root_path` or rely
+  on `ADAPSTORY_AIRFLOW_ARTIFACT_ROOT`; artifact locations may be absolute
+  local paths or `s3://bucket/prefix` URIs. The DAG derives
+  `airflow-plan.json`, `online-eval-rollup-plan.json`,
+  `online-eval-rollup.json`, and
+  `online-eval-registry-submissions.json` under a deterministic operation
+  directory. D7 writes the rollup plan artifact, runs the packaged
+  `python -m adapstory_serp_mcp_gateway.airflow_eval_cli online-eval-rollup`
+  runner without shell expansion, persists stdout, then builds BC-21 registry
+  submissions for the same rollup. Its plan state is
+  `ready_for_po_capacity_approval`; it is not a 1M production approval.
 - `serp_benchmark_improvement_wave` is the D19 contract DAG. Its
   `dag_run.conf` must provide tenant id, improvement spec id, baseline run id,
   candidate id, registry resource identity, approved actor id, generated

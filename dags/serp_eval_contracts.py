@@ -289,6 +289,69 @@ def build_tenant_golden_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
     return SerpDagPlan(plan_payload)
 
 
+def build_online_eval_rollup_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
+    payload = _payload(conf)
+    _reject_raw_secrets(payload)
+    tenant_id = _required_uuid(payload, "tenant_id")
+    generated_at = _required_datetime_string(payload, "generated_at")
+    registry_resource_type = _required_resource_type(payload, "registry_resource_type")
+    registry_resource_id = _required_uuid(payload, "registry_resource_id")
+    reports = _required_object_list(payload, "reports")
+    normalized_gate_floor = _optional_unit_interval(
+        payload,
+        "normalized_gate_floor",
+        SERP_NORMALIZED_GATE_FLOOR,
+    )
+    artifact_root_path = _required_artifact_root_path(payload)
+    report_hashes = ",".join(
+        sha256(_canonical_json(report).encode("utf-8")).hexdigest() for report in reports
+    )
+    operation_id = _operation_id(
+        "serp-airflow-online-eval-rollup-plan",
+        tenant_id,
+        registry_resource_type,
+        registry_resource_id,
+        generated_at,
+        report_hashes,
+    )
+    plan_payload = {
+        "actor_id": _required_str(payload, "actor_id"),
+        "artifact_root_path": artifact_root_path,
+        "artifact_paths": _artifact_paths(
+            artifact_root_path,
+            operation_id,
+            (
+                ("airflow_plan", "airflow-plan.json"),
+                ("online_eval_rollup_plan", "online-eval-rollup-plan.json"),
+                ("online_eval_rollup", "online-eval-rollup.json"),
+                (
+                    "online_eval_registry_submissions",
+                    "online-eval-registry-submissions.json",
+                ),
+            ),
+        ),
+        "capacity_readiness_state": "ready_for_po_capacity_approval",
+        "dag_id": "serp_online_eval_rollup",
+        "generated_at": generated_at,
+        "normalized_gate_floor": normalized_gate_floor,
+        "operation_id": operation_id,
+        "registry_resource_id": str(registry_resource_id),
+        "registry_resource_type": registry_resource_type,
+        "reports": [dict(report) for report in reports],
+        "tasks": _tasks(
+            (
+                "validate_online_eval_rollup_plan",
+                "write_online_eval_rollup_plan",
+                "build_online_eval_rollup",
+                "build_online_eval_registry_submissions",
+                "notify_governance_eval_surfaces",
+            )
+        ),
+        "tenant_id": str(tenant_id),
+    }
+    return SerpDagPlan(plan_payload)
+
+
 def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
     payload = _payload(conf)
     _reject_raw_secrets(payload)
@@ -384,6 +447,35 @@ def write_nightly_suite_plan_artifact(
     return _artifact_result(
         artifact_path,
         artifact_type="suite_plan",
+        operation_id=_required_str(plan, "operation_id"),
+        payload=payload,
+    )
+
+
+def write_online_eval_rollup_plan_artifact(
+    plan_json: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != "serp_online_eval_rollup":
+        raise ValueError("plan dag_id does not match online eval rollup-plan writer")
+    artifact_paths = _required_artifact_paths(plan, ("online_eval_rollup_plan",))
+    payload = {
+        "contract_version": _EVAL_CONTRACT_VERSION,
+        "generated_at": _required_datetime_string(plan, "generated_at"),
+        "normalized_gate_floor": _optional_unit_interval(
+            plan,
+            "normalized_gate_floor",
+            SERP_NORMALIZED_GATE_FLOOR,
+        ),
+        "reports": [dict(report) for report in _required_object_list(plan, "reports")],
+        "rollup_id": "serp_online_eval_rollup",
+    }
+    artifact_path = artifact_paths["online_eval_rollup_plan"]
+    _write_json_artifact(artifact_path, payload)
+    return _artifact_result(
+        artifact_path,
+        artifact_type="online_eval_rollup_plan",
         operation_id=_required_str(plan, "operation_id"),
         payload=payload,
     )
@@ -710,6 +802,30 @@ def build_tenant_golden_registry_cli_spec(plan_json: str) -> dict[str, Any]:
         input_path_keys=("airflow_plan", "tenant_golden_report"),
         output_path_key="tenant_golden_registry_submissions",
         option_names=("--airflow-plan", "--tenant-golden-report"),
+    )
+
+
+def build_online_eval_rollup_cli_spec(plan_json: str) -> dict[str, Any]:
+    return _gateway_cli_spec(
+        plan_json,
+        dag_id="serp_online_eval_rollup",
+        task_id="build_online_eval_rollup",
+        command="online-eval-rollup",
+        input_path_keys=("online_eval_rollup_plan",),
+        output_path_key="online_eval_rollup",
+        option_names=("--rollup-plan",),
+    )
+
+
+def build_online_eval_registry_cli_spec(plan_json: str) -> dict[str, Any]:
+    return _gateway_cli_spec(
+        plan_json,
+        dag_id="serp_online_eval_rollup",
+        task_id="build_online_eval_registry_submissions",
+        command="online-eval-registry-submissions",
+        input_path_keys=("airflow_plan", "online_eval_rollup"),
+        output_path_key="online_eval_registry_submissions",
+        option_names=("--airflow-plan", "--online-eval-rollup"),
     )
 
 
@@ -2181,6 +2297,20 @@ def _required_number(payload: Mapping[str, Any], field_name: str) -> float:
     if not isinstance(value, int | float) or isinstance(value, bool) or not math.isfinite(value):
         raise ValueError(f"{field_name} must be numeric")
     return float(value)
+
+
+def _optional_unit_interval(
+    payload: Mapping[str, Any],
+    field_name: str,
+    default_value: float,
+) -> float:
+    value = payload.get(field_name, default_value)
+    if not isinstance(value, int | float) or isinstance(value, bool) or not math.isfinite(value):
+        raise ValueError(f"{field_name} must be numeric")
+    result = float(value)
+    if result < 0.0 or result > 1.0:
+        raise ValueError(f"{field_name} must be between 0 and 1")
+    return result
 
 
 def _required_number_from_string(payload: Mapping[str, Any], field_name: str) -> float:

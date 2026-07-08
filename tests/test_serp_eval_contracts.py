@@ -20,6 +20,9 @@ from dags.serp_eval_contracts import (
     build_nightly_registry_submit_cli_spec,
     build_nightly_regression_plan,
     build_nightly_runner_cli_spec,
+    build_online_eval_registry_cli_spec,
+    build_online_eval_rollup_cli_spec,
+    build_online_eval_rollup_plan,
     build_tenant_golden_registry_cli_spec,
     build_tenant_golden_regression_plan,
     build_tenant_golden_runner_cli_spec,
@@ -36,6 +39,7 @@ from dags.serp_eval_contracts import (
     write_nightly_registry_submissions_artifact,
     write_nightly_report_artifact,
     write_nightly_suite_plan_artifact,
+    write_online_eval_rollup_plan_artifact,
 )
 
 TENANT_ID = "00000000-0000-4000-a000-000000000001"
@@ -220,6 +224,96 @@ def test_nightly_d6_airflow_path_writes_suite_plan_for_gateway_runner(
     )
     assert all(len(suite["references"]) == 4 for suite in suite_plan["suites"])
     assert all(len(suite["metric_observations"]) == 3 for suite in suite_plan["suites"])
+
+
+def test_build_online_eval_rollup_plan_materializes_d7_contract(tmp_path: Path) -> None:
+    conf = _online_eval_rollup_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+
+    plan = build_online_eval_rollup_plan(conf)
+    repeated = build_online_eval_rollup_plan(json.loads(plan.to_canonical_json()))
+
+    assert plan.to_canonical_json() == repeated.to_canonical_json()
+    assert plan.payload["dag_id"] == "serp_online_eval_rollup"
+    assert plan.payload["normalized_gate_floor"] == SERP_NORMALIZED_GATE_FLOOR
+    assert plan.payload["capacity_readiness_state"] == "ready_for_po_capacity_approval"
+    assert plan.payload["artifact_paths"] == {
+        "airflow_plan": (
+            "/".join((str(tmp_path), plan.payload["operation_id"], "airflow-plan.json"))
+        ),
+        "online_eval_registry_submissions": (
+            "/".join(
+                (
+                    str(tmp_path),
+                    plan.payload["operation_id"],
+                    "online-eval-registry-submissions.json",
+                )
+            )
+        ),
+        "online_eval_rollup": (
+            "/".join((str(tmp_path), plan.payload["operation_id"], "online-eval-rollup.json"))
+        ),
+        "online_eval_rollup_plan": (
+            "/".join((str(tmp_path), plan.payload["operation_id"], "online-eval-rollup-plan.json"))
+        ),
+    }
+    assert [task["task_id"] for task in plan.payload["tasks"]] == [
+        "validate_online_eval_rollup_plan",
+        "write_online_eval_rollup_plan",
+        "build_online_eval_rollup",
+        "build_online_eval_registry_submissions",
+        "notify_governance_eval_surfaces",
+    ]
+
+    rollup_plan_artifact = write_online_eval_rollup_plan_artifact(plan.to_canonical_json())
+    rollup_plan_path = Path(plan.payload["artifact_paths"]["online_eval_rollup_plan"])
+    assert rollup_plan_path.exists()
+    rollup_plan = json.loads(rollup_plan_path.read_text(encoding="utf-8"))
+    assert rollup_plan_artifact["artifactType"] == "online_eval_rollup_plan"
+    assert rollup_plan["rollup_id"] == "serp_online_eval_rollup"
+    assert rollup_plan["reports"] == conf["reports"]
+
+
+def test_build_online_eval_rollup_gateway_cli_specs_are_file_based(tmp_path: Path) -> None:
+    conf = _online_eval_rollup_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    plan = build_online_eval_rollup_plan(conf)
+    rollup = build_online_eval_rollup_cli_spec(plan.to_canonical_json())
+    submissions = build_online_eval_registry_cli_spec(plan.to_canonical_json())
+
+    assert rollup["status"] == "ready_for_gateway_cli_runner"
+    assert rollup["task_id"] == "build_online_eval_rollup"
+    assert rollup["argv"] == [
+        "python",
+        "-m",
+        "adapstory_serp_mcp_gateway.airflow_eval_cli",
+        "online-eval-rollup",
+        "--rollup-plan",
+        plan.payload["artifact_paths"]["online_eval_rollup_plan"],
+    ]
+    assert rollup["input_paths"] == [plan.payload["artifact_paths"]["online_eval_rollup_plan"]]
+    assert rollup["stdout_path"] == plan.payload["artifact_paths"]["online_eval_rollup"]
+
+    assert submissions["status"] == "ready_for_gateway_cli_runner"
+    assert submissions["task_id"] == "build_online_eval_registry_submissions"
+    assert submissions["argv"] == [
+        "python",
+        "-m",
+        "adapstory_serp_mcp_gateway.airflow_eval_cli",
+        "online-eval-registry-submissions",
+        "--airflow-plan",
+        plan.payload["artifact_paths"]["airflow_plan"],
+        "--online-eval-rollup",
+        plan.payload["artifact_paths"]["online_eval_rollup"],
+    ]
+    assert submissions["input_paths"] == [
+        plan.payload["artifact_paths"]["airflow_plan"],
+        plan.payload["artifact_paths"]["online_eval_rollup"],
+    ]
+    assert (
+        submissions["stdout_path"]
+        == plan.payload["artifact_paths"]["online_eval_registry_submissions"]
+    )
 
 
 def test_execute_gateway_cli_spec_runs_without_shell_and_persists_stdout(
@@ -779,6 +873,17 @@ def test_build_benchmark_improvement_wave_plan_rejects_raw_secret_metadata() -> 
             ],
         ),
         (
+            "serp_online_eval_rollup.py",
+            "serp_online_eval_rollup",
+            [
+                "validate_online_eval_rollup_plan",
+                "write_online_eval_rollup_plan",
+                "build_online_eval_rollup",
+                "build_online_eval_registry_submissions",
+                "notify_governance_eval_surfaces",
+            ],
+        ),
+        (
             "serp_benchmark_improvement_wave.py",
             "serp_benchmark_improvement_wave",
             [
@@ -812,6 +917,7 @@ def test_serp_dag_files_declare_expected_airflow_contracts(
 def test_serp_dag_files_import_helpers_from_packaged_dags_namespace() -> None:
     for dag_file in (
         "serp_nightly_regression_suite.py",
+        "serp_online_eval_rollup.py",
         "serp_tenant_golden_set_regression.py",
         "serp_benchmark_improvement_wave.py",
     ):
@@ -929,6 +1035,64 @@ def _tenant_golden_conf() -> dict[str, object]:
         "registry_resource_type": "workflow",
         "tenant_id": TENANT_ID,
         "workflow_id": "workflow/private-course-authoring",
+    }
+
+
+def _online_eval_rollup_conf() -> dict[str, object]:
+    return {
+        "actor_id": "airflow-serp-eval-runner",
+        "artifact_root_path": "/var/opt/adapstory/serp-evals",
+        "generated_at": "2026-07-08T10:00:00Z",
+        "registry_resource_id": REGISTRY_RESOURCE_ID,
+        "registry_resource_type": "pack",
+        "reports": [_online_eval_report()],
+        "tenant_id": TENANT_ID,
+    }
+
+
+def _online_eval_report() -> dict[str, object]:
+    return {
+        "contract_version": "2026.07.2",
+        "evidence": {
+            "metadata": {
+                "evidence_bundle_operation_id": "evidence-bundle-online-sample-001",
+                "evidence_bundle_sha256": "a" * 64,
+                "online_eval_sample_operation_id": "online-eval-sample-001",
+                "retrieval_operation_id": "retrieval-op-001",
+                "run_mode": "online-eval-sample",
+            },
+            "tenant_id": TENANT_ID,
+        },
+        "metric_results": [
+            {
+                "metric": "MRR@10",
+                "metric_family": "retrieval",
+                "normalized_score": 0.97,
+                "status": "passed",
+            },
+            {
+                "metric": "Faithfulness",
+                "metric_family": "answer-quality",
+                "normalized_score": 0.96,
+                "status": "passed",
+            },
+            {
+                "metric": "Citation Accuracy",
+                "metric_family": "citation",
+                "normalized_score": 0.98,
+                "status": "passed",
+            },
+            {
+                "metric": "Policy Compliance Rate",
+                "metric_family": "policy",
+                "normalized_score": 1.0,
+                "status": "passed",
+            },
+        ],
+        "operation_id": "retrieval-report-001",
+        "status": "passed",
+        "suite_id": "online-request-sample",
+        "suite_version": "online@2026.07.1",
     }
 
 
