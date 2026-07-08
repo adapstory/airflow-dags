@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import math
 import os
@@ -611,6 +612,10 @@ def build_public_docs_seed_refresh_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
                     "public_docs_publish_activation_trigger_conf",
                     "public-docs-publish-activation-trigger-conf.json",
                 ),
+                (
+                    "public_docs_bc21_pipeline_state_receipt",
+                    "public-docs-bc21-pipeline-state-receipt.json",
+                ),
             ),
         ),
         **({"bc21_base_url": bc21_base_url} if bc21_base_url else {}),
@@ -639,6 +644,7 @@ def build_public_docs_seed_refresh_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
                 "build_public_docs_seed_refresh_plan",
                 "dispatch_pipeline_seed_refresh_handoff",
                 "run_public_docs_seed_refresh_pipeline",
+                "submit_public_docs_bc21_pipeline_state",
                 "write_public_docs_publish_activation_trigger_conf",
                 "notify_governance_eval_surfaces",
             )
@@ -837,6 +843,67 @@ def write_public_docs_publish_activation_trigger_conf_artifact(
     return _artifact_result(
         artifact_path,
         artifact_type="public_docs_publish_activation_trigger_conf",
+        operation_id=_required_str(plan, "operation_id"),
+        payload=payload,
+    )
+
+
+def submit_public_docs_bc21_pipeline_state_artifact(
+    plan_json: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    bc21_pipeline_state: Any = importlib.import_module(
+        "adapstory_serp_pipeline.registry.bc21_pipeline_state"
+    )
+
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != "serp_web_seed_crawl_refresh":
+        raise ValueError("plan dag_id does not match public docs BC-21 pipeline-state submit")
+    bc21_base_url = _required_bc21_base_url(plan)
+    artifact_paths = _required_artifact_paths(
+        plan,
+        (
+            "public_docs_seed_refresh_result",
+            "public_docs_bc21_pipeline_state_receipt",
+        ),
+    )
+    seed_refresh_result_path = _artifact_path(
+        "public_docs_seed_refresh_result_path",
+        artifact_paths["public_docs_seed_refresh_result"],
+    )
+    refresh_result = _read_json_file(
+        seed_refresh_result_path,
+        "public_docs_seed_refresh_result",
+    )
+    batch_evidence = _required_mapping(refresh_result, "batch_evidence")
+    if _required_str(batch_evidence, "status") != "indexed":
+        raise ValueError("public docs seed refresh must be indexed before BC-21 registration")
+    catalog_source_id = _ensure_public_docs_catalog_source(plan, bc21_base_url=bc21_base_url)
+    submission = bc21_pipeline_state.build_public_docs_batch_pipeline_state_submission(
+        refresh_result,
+        actor_id=_required_str(plan, "actor_id"),
+        catalog_source_id=UUID(catalog_source_id),
+        started_at=datetime.fromisoformat(
+            _required_datetime_string(plan, "generated_at").replace("Z", "+00:00")
+        ),
+    )
+    receipt = bc21_pipeline_state.submit_pipeline_state_submission(
+        submission,
+        bc21_base_url=bc21_base_url,
+    )
+    payload = {
+        **receipt,
+        "catalog_source_id": catalog_source_id,
+        "operation_id": _required_str(plan, "operation_id"),
+        "pack_id": _required_str(plan, "pack_id"),
+        "pack_version_id": _required_str(plan, "pack_version_id"),
+        "public_docs_seed_refresh_result_path": seed_refresh_result_path,
+    }
+    artifact_path = artifact_paths["public_docs_bc21_pipeline_state_receipt"]
+    _write_json_artifact(artifact_path, payload)
+    return _artifact_result(
+        artifact_path,
+        artifact_type="public_docs_bc21_pipeline_state_receipt",
         operation_id=_required_str(plan, "operation_id"),
         payload=payload,
     )
@@ -2304,6 +2371,120 @@ def _submit_live_registry_submission(
         "statusCode": status_code,
         "suiteCode": _required_str(submission, "suiteCode"),
     }
+
+
+def _ensure_public_docs_catalog_source(
+    plan: Mapping[str, Any],
+    *,
+    bc21_base_url: str,
+) -> str:
+    base_url = _required_bc21_base_url({"bc21_base_url": bc21_base_url}).rstrip("/")
+    tenant_id = _required_str(plan, "tenant_id")
+    actor_id = _required_str(plan, "actor_id")
+    seed_registry_sha256 = _required_str(plan, "seed_registry_sha256")
+    source_uri_hash = f"sha256:{seed_registry_sha256}"
+    existing_source_id = _find_public_docs_catalog_source_id(
+        base_url,
+        tenant_id=tenant_id,
+        source_uri_hash=source_uri_hash,
+    )
+    if existing_source_id:
+        return existing_source_id
+
+    body = {
+        "accessScope": "public",
+        "dataClass": "PUBLIC",
+        "displayName": "SERP public docs seed registry",
+        "ownerActorId": actor_id,
+        "sourceType": "markdown",
+        "sourceUriHash": source_uri_hash,
+    }
+    fingerprint = "sha256:" + sha256(_canonical_json(body).encode("utf-8")).hexdigest()
+    idempotency_key = str(
+        uuid5(
+            _PUBLIC_DOCS_NAMESPACE,
+            "|".join(("bc21-public-docs-catalog-source", tenant_id, source_uri_hash)),
+        )
+    )
+    response_payload = _bc21_json_request(
+        base_url + "/api/bc-21/serp/v1/sources",
+        method="POST",
+        body=body,
+        headers={
+            "X-Adapstory-Actor-Id": actor_id,
+            "X-Adapstory-Tenant-Id": tenant_id,
+            "X-Adapstory-Trusted-Actor-Id": actor_id,
+            "X-Adapstory-Trusted-Tenant-Id": tenant_id,
+            "X-Fingerprint": fingerprint,
+            "X-Idempotency-Key": idempotency_key,
+        },
+        error_label="public docs catalog source registration",
+        allow_conflict=True,
+    )
+    if response_payload is not None:
+        return _required_str(response_payload, "resourceId")
+    existing_source_id = _find_public_docs_catalog_source_id(
+        base_url,
+        tenant_id=tenant_id,
+        source_uri_hash=source_uri_hash,
+    )
+    if existing_source_id:
+        return existing_source_id
+    raise ValueError(
+        "public docs catalog source registration conflicted but source was not resolvable"
+    )
+
+
+def _find_public_docs_catalog_source_id(
+    base_url: str,
+    *,
+    tenant_id: str,
+    source_uri_hash: str,
+) -> str | None:
+    response_payload = _bc21_json_request(
+        base_url + "/api/bc-21/serp/v1/sources",
+        method="GET",
+        body=None,
+        headers={"X-Adapstory-Tenant-Id": tenant_id},
+        error_label="public docs catalog source lookup",
+    )
+    if response_payload is None:
+        return None
+    for item in _required_object_list(response_payload, "items"):
+        if _required_str(item, "sourceUriHash") == source_uri_hash:
+            return _required_str(item, "sourceId")
+    return None
+
+
+def _bc21_json_request(
+    url: str,
+    *,
+    method: str,
+    body: Mapping[str, Any] | None,
+    headers: Mapping[str, str],
+    error_label: str,
+    allow_conflict: bool = False,
+) -> dict[str, Any] | None:
+    body_bytes = None if body is None else _canonical_json(body).encode("utf-8")
+    request = Request(
+        url,
+        data=body_bytes,
+        headers={
+            "Accept": "application/json",
+            **({"Content-Type": "application/json"} if body is not None else {}),
+            **{str(key): str(value) for key, value in headers.items()},
+        },
+        method=method,
+    )
+    try:
+        with urlopen(request, timeout=5.0) as response:
+            return dict(_json_object(response.read().decode("utf-8"), error_label))
+    except HTTPError as exc:
+        if allow_conflict and exc.code == 409:
+            return None
+        raise ValueError(f"{error_label} failed: status={exc.code}") from exc
+    except (URLError, TimeoutError, OSError) as exc:
+        raise ValueError(f"{error_label} failed") from exc
 
 
 def _nightly_suite_result(

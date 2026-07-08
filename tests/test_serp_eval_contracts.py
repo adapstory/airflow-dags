@@ -1143,6 +1143,13 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
                 "public-docs-publish-activation-trigger-conf.json",
             )
         ),
+        "public_docs_bc21_pipeline_state_receipt": "/".join(
+            (
+                str(tmp_path),
+                plan.payload["operation_id"],
+                "public-docs-bc21-pipeline-state-receipt.json",
+            )
+        ),
         "public_docs_seed_registry": "/".join(
             (str(tmp_path), plan.payload["operation_id"], "public-docs-seed-registry.json")
         ),
@@ -1153,6 +1160,7 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
         "build_public_docs_seed_refresh_plan",
         "dispatch_pipeline_seed_refresh_handoff",
         "run_public_docs_seed_refresh_pipeline",
+        "submit_public_docs_bc21_pipeline_state",
         "write_public_docs_publish_activation_trigger_conf",
         "notify_governance_eval_surfaces",
     ]
@@ -2043,6 +2051,7 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
                 "build_public_docs_seed_refresh_plan",
                 "dispatch_pipeline_seed_refresh_handoff",
                 "run_public_docs_seed_refresh_pipeline",
+                "submit_public_docs_bc21_pipeline_state",
                 "write_public_docs_publish_activation_trigger_conf",
                 "notify_governance_eval_surfaces",
             ],
