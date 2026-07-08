@@ -51,6 +51,7 @@ _PUBLIC_DOCS_FRESHNESS_STATUSES = frozenset(
     {"failed", "indexed", "never_indexed", "partial_failure", "quarantined"}
 )
 _PUBLIC_DOCS_INDEX_MODES = frozenset({"evidence-only", "live"})
+_PUBLIC_DOCS_EMBEDDING_MODES = frozenset({"deterministic-dev", "live-gateway"})
 _PUBLIC_DOCS_DEFAULT_TENANT_ID = "00000000-0000-4000-a000-000000000001"
 _PUBLIC_DOCS_DEFAULT_PACK_ID = "00000000-0000-4000-a000-000000000201"
 _PUBLIC_DOCS_DEFAULT_PACK_VERSION_ID = "018f5e13-2d73-7a77-a052-8d1bcbf96541"
@@ -58,6 +59,14 @@ _PUBLIC_DOCS_DEFAULT_ACTOR_ID = "airflow-serp-public-docs-refresh"
 _PUBLIC_DOCS_DEFAULT_ARTIFACT_ROOT = "/var/opt/adapstory/serp-public-docs-refresh"
 _PUBLIC_DOCS_STACK_INVENTORY_PATH = "tmp/stack-inventory-2026-07-02.md"
 _ARTIFACT_ROOT_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_ROOT"
+_PUBLIC_DOCS_INDEX_MODE_ENV = "ADAPSTORY_SERP_PUBLIC_DOCS_INDEX_MODE"
+_PUBLIC_DOCS_EMBEDDING_MODE_ENV = "ADAPSTORY_SERP_PUBLIC_DOCS_EMBEDDING_MODE"
+_PUBLIC_DOCS_QDRANT_COLLECTION_ENV = "ADAPSTORY_SERP_PUBLIC_DOCS_QDRANT_COLLECTION"
+_PUBLIC_DOCS_OPENSEARCH_INDEX_ENV = "ADAPSTORY_SERP_PUBLIC_DOCS_OPENSEARCH_INDEX"
+_PUBLIC_DOCS_NEO4J_DATABASE_ENV = "ADAPSTORY_SERP_PUBLIC_DOCS_NEO4J_DATABASE"
+_PUBLIC_DOCS_DEFAULT_QDRANT_COLLECTION = "serp_vectors_dev"
+_PUBLIC_DOCS_DEFAULT_OPENSEARCH_INDEX = "serp_lexical_dev"
+_PUBLIC_DOCS_DEFAULT_NEO4J_DATABASE = "serp_graph_dev"
 _ARTIFACT_S3_ENDPOINT_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT"
 _ARTIFACT_S3_REGION_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION"
 _ARTIFACT_S3_ACCESS_KEY_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ACCESS_KEY"
@@ -448,6 +457,25 @@ def build_public_docs_seed_refresh_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
     pack_version_id = _required_uuid(payload, "pack_version_id")
     artifact_root_path = _required_artifact_root_path(payload)
     index_mode = _public_docs_index_mode(payload)
+    embedding_mode = _public_docs_embedding_mode(payload, index_mode)
+    qdrant_collection = _public_docs_store_name(
+        payload,
+        "qdrant_collection",
+        env_name=_PUBLIC_DOCS_QDRANT_COLLECTION_ENV,
+        default=_PUBLIC_DOCS_DEFAULT_QDRANT_COLLECTION,
+    )
+    opensearch_index = _public_docs_store_name(
+        payload,
+        "opensearch_index",
+        env_name=_PUBLIC_DOCS_OPENSEARCH_INDEX_ENV,
+        default=_PUBLIC_DOCS_DEFAULT_OPENSEARCH_INDEX,
+    )
+    neo4j_database = _public_docs_store_name(
+        payload,
+        "neo4j_database",
+        env_name=_PUBLIC_DOCS_NEO4J_DATABASE_ENV,
+        default=_PUBLIC_DOCS_DEFAULT_NEO4J_DATABASE,
+    )
     seeds = _public_docs_seed_registry(payload)
     seed_registry_sha256 = sha256(
         _canonical_json({"seed_registry": seeds}).encode("utf-8")
@@ -463,6 +491,7 @@ def build_public_docs_seed_refresh_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
         generated_at,
         seed_registry_sha256,
         index_mode,
+        embedding_mode,
     )
     plan_payload = {
         "actor_id": _required_str(payload, "actor_id"),
@@ -486,10 +515,14 @@ def build_public_docs_seed_refresh_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
         "contract_version": _EVAL_CONTRACT_VERSION,
         "dag_id": "serp_web_seed_crawl_refresh",
         "generated_at": generated_at,
+        "embedding_mode": embedding_mode,
         "index_mode": index_mode,
+        "neo4j_database": neo4j_database,
         "operation_id": operation_id,
+        "opensearch_index": opensearch_index,
         "pack_id": str(pack_id),
         "pack_version_id": str(pack_version_id),
+        "qdrant_collection": qdrant_collection,
         "registry_resource_id": str(registry_resource_id),
         "registry_resource_type": registry_resource_type,
         "seed_count": len(seeds),
@@ -1235,7 +1268,7 @@ def dispatch_public_docs_seed_refresh_handoff(plan_json: str) -> dict[str, Any]:
         "--clock-at",
         _required_datetime_string(plan, "generated_at"),
         "--embedding-mode",
-        "deterministic-dev",
+        _required_str(plan, "embedding_mode"),
         "--index-mode",
         _required_str(plan, "index_mode"),
         "--tenant-id",
@@ -1244,6 +1277,12 @@ def dispatch_public_docs_seed_refresh_handoff(plan_json: str) -> dict[str, Any]:
         _required_str(plan, "pack_id"),
         "--pack-version-id",
         _required_str(plan, "pack_version_id"),
+        "--qdrant-collection",
+        _required_str(plan, "qdrant_collection"),
+        "--opensearch-index",
+        _required_str(plan, "opensearch_index"),
+        "--neo4j-database",
+        _required_str(plan, "neo4j_database"),
     ]
     if refresh_status == "no_due_sources":
         argv = []
@@ -1266,6 +1305,10 @@ def dispatch_public_docs_seed_refresh_handoff(plan_json: str) -> dict[str, Any]:
         "task_id": "public_docs_seed_refresh_pipeline",
         "tenant_id": _required_str(plan, "tenant_id"),
         "index_mode": _required_str(plan, "index_mode"),
+        "embedding_mode": _required_str(plan, "embedding_mode"),
+        "qdrant_collection": _required_str(plan, "qdrant_collection"),
+        "opensearch_index": _required_str(plan, "opensearch_index"),
+        "neo4j_database": _required_str(plan, "neo4j_database"),
     }
 
 
@@ -1290,11 +1333,15 @@ def _public_docs_seed_refresh_payload(plan: Mapping[str, Any]) -> dict[str, Any]
         "contract_version": _EVAL_CONTRACT_VERSION,
         "d4_dispatch_target": "serp_scan_parse_index",
         "dag_id": "serp_web_seed_crawl_refresh",
+        "embedding_mode": _required_str(plan, "embedding_mode"),
         "generated_at": generated_at,
         "operation_id": _required_str(plan, "operation_id"),
         "pack_id": _required_str(plan, "pack_id"),
         "pack_version_id": _required_str(plan, "pack_version_id"),
         "index_mode": _required_str(plan, "index_mode"),
+        "qdrant_collection": _required_str(plan, "qdrant_collection"),
+        "opensearch_index": _required_str(plan, "opensearch_index"),
+        "neo4j_database": _required_str(plan, "neo4j_database"),
         "seed_count": len(source_fetch_requests),
         "seed_registry_sha256": _required_str(plan, "seed_registry_sha256"),
         "skipped_seed_count": len(skipped_seed_refreshes),
@@ -2749,11 +2796,40 @@ def _source_type_counts(seeds: Sequence[Mapping[str, Any]]) -> dict[str, int]:
 
 
 def _public_docs_index_mode(payload: Mapping[str, Any]) -> str:
-    value = payload.get("index_mode", "evidence-only")
+    value = payload.get("index_mode", os.environ.get(_PUBLIC_DOCS_INDEX_MODE_ENV, "evidence-only"))
     if not isinstance(value, str) or not value.strip():
         raise ValueError("index_mode is required")
     if value not in _PUBLIC_DOCS_INDEX_MODES:
         raise ValueError("index_mode is unsupported")
+    return value
+
+
+def _public_docs_embedding_mode(payload: Mapping[str, Any], index_mode: str) -> str:
+    value = payload.get("embedding_mode", os.environ.get(_PUBLIC_DOCS_EMBEDDING_MODE_ENV))
+    if value is None:
+        value = "live-gateway" if index_mode == "live" else "deterministic-dev"
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("embedding_mode is required")
+    if value not in _PUBLIC_DOCS_EMBEDDING_MODES:
+        raise ValueError("embedding_mode is unsupported")
+    if index_mode == "live" and value != "live-gateway":
+        raise ValueError("live index mode requires live-gateway embedding mode")
+    return value
+
+
+def _public_docs_store_name(
+    payload: Mapping[str, Any],
+    field_name: str,
+    *,
+    env_name: str,
+    default: str,
+) -> str:
+    value = payload.get(field_name, os.environ.get(env_name, default))
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} is required")
+    if any(character.isspace() for character in value) or "/" in value or "\\" in value:
+        raise ValueError(f"{field_name} must be a plain store name")
+    _reject_raw_secrets({field_name: value})
     return value
 
 

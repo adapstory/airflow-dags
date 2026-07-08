@@ -1001,6 +1001,11 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
     assert cli_spec["skipped_seed_count"] == 0
     assert "--index-mode" in cli_spec["argv"]
     assert cli_spec["argv"][cli_spec["argv"].index("--index-mode") + 1] == "evidence-only"
+    assert "--embedding-mode" in cli_spec["argv"]
+    assert cli_spec["argv"][cli_spec["argv"].index("--embedding-mode") + 1] == "deterministic-dev"
+    assert cli_spec["argv"][cli_spec["argv"].index("--qdrant-collection") + 1] == "serp_vectors_dev"
+    assert cli_spec["argv"][cli_spec["argv"].index("--opensearch-index") + 1] == "serp_lexical_dev"
+    assert cli_spec["argv"][cli_spec["argv"].index("--neo4j-database") + 1] == "serp_graph_dev"
     assert cli_spec["argv"][:3] == [
         "python",
         "-m",
@@ -1051,14 +1056,29 @@ def test_public_docs_seed_refresh_dispatches_live_index_mode(tmp_path: Path) -> 
     conf = _public_docs_seed_refresh_conf()
     conf["artifact_root_path"] = str(tmp_path)
     conf["index_mode"] = "live"
+    conf["qdrant_collection"] = "serp_vectors_prod"
+    conf["opensearch_index"] = "serp_lexical_prod"
+    conf["neo4j_database"] = "neo4j"
 
     plan = build_public_docs_seed_refresh_plan(conf)
     refresh_plan_artifact = write_public_docs_seed_refresh_plan_artifact(plan.to_canonical_json())
     cli_spec = dispatch_public_docs_seed_refresh_handoff(plan.to_canonical_json())
 
     assert plan.payload["index_mode"] == "live"
+    assert plan.payload["embedding_mode"] == "live-gateway"
+    assert plan.payload["qdrant_collection"] == "serp_vectors_prod"
+    assert plan.payload["opensearch_index"] == "serp_lexical_prod"
+    assert plan.payload["neo4j_database"] == "neo4j"
     assert refresh_plan_artifact["payload"]["index_mode"] == "live"
+    assert refresh_plan_artifact["payload"]["embedding_mode"] == "live-gateway"
     assert cli_spec["argv"][cli_spec["argv"].index("--index-mode") + 1] == "live"
+    assert cli_spec["argv"][cli_spec["argv"].index("--embedding-mode") + 1] == "live-gateway"
+    assert (
+        cli_spec["argv"][cli_spec["argv"].index("--qdrant-collection") + 1]
+        == "serp_vectors_prod"
+    )
+    assert cli_spec["argv"][cli_spec["argv"].index("--opensearch-index") + 1] == "serp_lexical_prod"
+    assert cli_spec["argv"][cli_spec["argv"].index("--neo4j-database") + 1] == "neo4j"
 
 
 def test_public_docs_seed_refresh_noops_when_no_seed_is_due(tmp_path: Path) -> None:
@@ -1136,6 +1156,22 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
     unsupported_index_mode["index_mode"] = "shadow-live"
     with pytest.raises(ValueError, match="index_mode is unsupported"):
         build_public_docs_seed_refresh_plan(unsupported_index_mode)
+
+    unsupported_embedding_mode = _public_docs_seed_refresh_conf()
+    unsupported_embedding_mode["embedding_mode"] = "direct-provider"
+    with pytest.raises(ValueError, match="embedding_mode is unsupported"):
+        build_public_docs_seed_refresh_plan(unsupported_embedding_mode)
+
+    live_with_dev_embedding = _public_docs_seed_refresh_conf()
+    live_with_dev_embedding["index_mode"] = "live"
+    live_with_dev_embedding["embedding_mode"] = "deterministic-dev"
+    with pytest.raises(ValueError, match="live index mode requires live-gateway"):
+        build_public_docs_seed_refresh_plan(live_with_dev_embedding)
+
+    unsafe_store_name = _public_docs_seed_refresh_conf()
+    unsafe_store_name["qdrant_collection"] = "serp vectors prod"
+    with pytest.raises(ValueError, match="qdrant_collection must be a plain store name"):
+        build_public_docs_seed_refresh_plan(unsafe_store_name)
 
     remote_git = _public_docs_seed_refresh_conf()
     remote_git["seed_registry"][3]["source_uri"] = "git+https://github.com/adapstory/docs.git"

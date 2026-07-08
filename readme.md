@@ -108,7 +108,9 @@ SERP eval DAG contracts:
   registry from the stack-inventory anchored source set. Override
   `dag_run.conf` may still provide tenant id, pack id/version, registry
   resource identity, approved actor id, generated timestamp, a governed
-  `seed_registry`, `index_mode` (`evidence-only` or `live`), and either
+  `seed_registry`, `index_mode` (`evidence-only` or `live`), `embedding_mode`
+  (`deterministic-dev` or `live-gateway`), target store names
+  (`qdrant_collection`, `opensearch_index`, `neo4j_database`), and either
   `artifact_root_path` or
   `ADAPSTORY_AIRFLOW_ARTIFACT_ROOT`. The seed registry is intentionally limited
   to currently executable connector types: `git`, `website`, `openapi`, and
@@ -127,13 +129,22 @@ SERP eval DAG contracts:
   deterministic `no_due_sources` result without spawning the CLI process.
   Otherwise it runs
   `python -m adapstory_serp_pipeline.orchestration.seed_refresh_cli` without
-  shell expansion, passes the selected `--index-mode`, and persists
-  `public-docs-seed-refresh-result.json`. The packaged CLI executes the current
-  fetch/parse/chunk/embed/index path through the SERP pipeline ports and writes
-  deterministic batch evidence. Live index mode is implemented in the packaged
-  pipeline via HTTP store adapters, but GitOps/runtime environment wiring,
-  crawler frontier expansion, changed-page discovery beyond seed freshness,
-  approval, signing, and publish activation remain planned runtime work.
+  shell expansion, passes the selected `--embedding-mode`, `--index-mode`, and
+  store target names, then persists `public-docs-seed-refresh-result.json`.
+  The packaged CLI executes the current fetch/parse/chunk/embed/index path
+  through the SERP pipeline ports and writes deterministic batch evidence.
+  `index_mode=live` requires `embedding_mode=live-gateway`; evidence-only
+  mode defaults to `deterministic-dev`. The Airflow source contract supports
+  env defaults through `ADAPSTORY_SERP_PUBLIC_DOCS_INDEX_MODE`,
+  `ADAPSTORY_SERP_PUBLIC_DOCS_EMBEDDING_MODE`,
+  `ADAPSTORY_SERP_PUBLIC_DOCS_QDRANT_COLLECTION`,
+  `ADAPSTORY_SERP_PUBLIC_DOCS_OPENSEARCH_INDEX`, and
+  `ADAPSTORY_SERP_PUBLIC_DOCS_NEO4J_DATABASE`.
+  Live index mode is implemented in the packaged pipeline via HTTP embedding
+  and store adapters, but deployed-current GitOps image/package refs, runtime
+  env wiring, OpenSearch/Neo4j/Qdrant network-policy allowances, crawler
+  frontier expansion, changed-page discovery beyond seed freshness, approval,
+  signing, and publish activation remain planned runtime work.
 - Runtime status in this document means current source-level contract unless a
   deployed runtime is explicitly named. The production Airflow image and
   `gitSync` revision are pinned in GitOps by `Adapstory-GitOps/infra/airflow`;
