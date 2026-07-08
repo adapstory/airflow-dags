@@ -968,11 +968,31 @@ def execute_pipeline_cli_spec(cli_spec: Mapping[str, Any] | str) -> dict[str, An
     payload = _json_object(completed.stdout, "pipeline_cli_stdout")
     _reject_raw_secrets(payload)
     _write_json_artifact(stdout_path, payload)
+    _raise_for_failed_pipeline_payload(spec, payload)
     return _artifact_result(
         stdout_path,
         artifact_type=_required_str(spec, "task_id"),
         operation_id=_required_str(spec, "operation_id"),
         payload=payload,
+    )
+
+
+def _raise_for_failed_pipeline_payload(
+    spec: Mapping[str, Any],
+    payload: Mapping[str, Any],
+) -> None:
+    if _required_str(spec, "task_id") != "public_docs_seed_refresh_pipeline":
+        return
+    if payload.get("artifact_type") != "public_docs_seed_refresh_batch_evidence":
+        return
+    batch_evidence = _required_mapping(payload, "batch_evidence")
+    status = _required_str(batch_evidence, "status")
+    if status == "indexed":
+        return
+    raise ValueError(
+        "public docs seed refresh did not fully index: "
+        f"status={status} indexed_count={batch_evidence.get('indexed_count')} "
+        f"failed_count={batch_evidence.get('failed_count')}"
     )
 
 

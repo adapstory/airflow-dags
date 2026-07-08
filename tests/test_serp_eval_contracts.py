@@ -388,7 +388,7 @@ def test_execute_pipeline_cli_spec_runs_without_shell_and_persists_stdout(
     input_path = tmp_path / "public-docs-seed-refresh-plan.json"
     output_path = tmp_path / "public-docs-seed-refresh-result.json"
     input_path.write_text("{}", encoding="utf-8")
-    payload = {"artifact_type": "public_docs_seed_refresh_batch_evidence", "status": "indexed"}
+    payload = _pipeline_seed_refresh_payload("indexed")
     calls: list[object] = []
 
     def fake_run(
@@ -441,6 +441,46 @@ def test_execute_pipeline_cli_spec_runs_without_shell_and_persists_stdout(
     assert result["artifactPath"] == str(output_path)
 
 
+def test_execute_pipeline_cli_spec_fails_d20_task_after_persisting_failed_batch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    input_path = tmp_path / "public-docs-seed-refresh-plan.json"
+    output_path = tmp_path / "public-docs-seed-refresh-result.json"
+    input_path.write_text("{}", encoding="utf-8")
+    payload = _pipeline_seed_refresh_payload("failed", indexed_count=0, failed_count=1)
+
+    class Result:
+        returncode = 0
+        stdout = json.dumps(payload)
+        stderr = ""
+
+    monkeypatch.setattr(
+        "dags.serp_eval_contracts.subprocess.run", lambda *_args, **_kwargs: Result()
+    )
+
+    with pytest.raises(ValueError, match="public docs seed refresh did not fully index"):
+        execute_pipeline_cli_spec(
+            {
+                "argv": [
+                    "python",
+                    "-m",
+                    "adapstory_serp_pipeline.orchestration.seed_refresh_cli",
+                ],
+                "contract_version": "serp-airflow-pipeline-cli-bridge/v1",
+                "dag_id": "serp_web_seed_crawl_refresh",
+                "input_paths": [str(input_path)],
+                "operation_id": "op-1",
+                "status": "ready_for_pipeline_cli_runner",
+                "stdout_path": str(output_path),
+                "task_id": "public_docs_seed_refresh_pipeline",
+                "tenant_id": TENANT_ID,
+            }
+        )
+
+    assert json.loads(output_path.read_text(encoding="utf-8")) == payload
+
+
 def test_execute_pipeline_cli_spec_materializes_s3_inputs_and_uploads_stdout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -450,7 +490,7 @@ def test_execute_pipeline_cli_spec_materializes_s3_inputs_and_uploads_stdout(
             "serp-evals/op/public-docs-seed-refresh-plan.json",
         ): b"{}",
     }
-    payload = {"artifact_type": "public_docs_seed_refresh_batch_evidence", "status": "indexed"}
+    payload = _pipeline_seed_refresh_payload("indexed")
     put_calls: list[tuple[str, str, str, str]] = []
     run_calls: list[list[str]] = []
 
@@ -2161,6 +2201,22 @@ def _refresh_artifact_sha256(artifact: dict[str, object]) -> None:
         artifact["payload"], ensure_ascii=True, separators=(",", ":"), sort_keys=True
     )
     artifact["artifactSha256"] = sha256(payload_json.encode("utf-8")).hexdigest()
+
+
+def _pipeline_seed_refresh_payload(
+    status: str,
+    *,
+    indexed_count: int = 1,
+    failed_count: int = 0,
+) -> dict[str, Any]:
+    return {
+        "artifact_type": "public_docs_seed_refresh_batch_evidence",
+        "batch_evidence": {
+            "failed_count": failed_count,
+            "indexed_count": indexed_count,
+            "status": status,
+        },
+    }
 
 
 def _nightly_conf() -> dict[str, object]:
