@@ -124,6 +124,16 @@ SERP eval DAG contracts:
   state as activation-pending. It does not perform network crawling directly;
   frontier expansion, changed-page fetch execution, D4 dispatch, publish
   activation, and deployed GitOps wiring remain planned runtime work.
+- The current executable D20 processing surface after this handoff is the
+  `adapstory_serp_pipeline.orchestration.seed_refresh` library runner in the
+  SERP pipeline package. Airflow emits validated handoff artifacts for that
+  runner; it does not expose or execute a standalone ingest CLI today.
+- Runtime status in this document means current source-level contract unless a
+  deployed runtime is explicitly named. The production Airflow image and
+  `gitSync` revision are pinned in GitOps by `Adapstory-GitOps/infra/airflow`;
+  if those refs lag the submodule HEADs, D6/D7/D20 must not be described as
+  deployed-current until the runtime image, pinned DAG ref, and package refs are
+  refreshed and verified.
 - D13 intentionally emits local handoff artifacts and gateway CLI argv specs
   only. Its runner/export/submission tasks return deterministic
   `python -m adapstory_serp_mcp_gateway.airflow_eval_cli ...` arguments plus a
