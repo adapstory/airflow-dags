@@ -2275,11 +2275,11 @@ def test_public_docs_publish_activation_writes_search_serve_smoke_artifact(
     receipt_path.write_text(
         json.dumps(
             {
+                "active_pack_version_id": PACK_VERSION_ID,
                 "artifact_type": "public_docs_publish_activation_receipt",
-                "packId": PACK_ID,
-                "packVersionId": PACK_VERSION_ID,
+                "pack_id": PACK_ID,
                 "status": "activated",
-                "tenantId": TENANT_ID,
+                "tenant_id": TENANT_ID,
             }
         ),
         encoding="utf-8",

@@ -1025,8 +1025,8 @@ def write_public_docs_search_serve_smoke_artifact(
         "public_docs_publish_activation_receipt",
     )
     expected_pack_version_id = _required_str(plan, "pack_version_id")
-    if _required_str(activation_receipt, "packVersionId") != expected_pack_version_id:
-        raise ValueError("publish activation receipt packVersionId must match plan")
+    if _required_str(activation_receipt, "active_pack_version_id") != expected_pack_version_id:
+        raise ValueError("publish activation receipt active_pack_version_id must match plan")
     request_payload = _public_docs_search_serve_smoke_request(plan)
     endpoint = _public_docs_search_serve_base_url(plan) + "/api/serp/search/v1/query"
     response_payload = _post_json(endpoint, request_payload)
