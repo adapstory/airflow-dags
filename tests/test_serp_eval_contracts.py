@@ -2316,6 +2316,7 @@ def test_public_docs_publish_activation_writes_search_serve_smoke_artifact(
 
     assert captured["url"].endswith("/api/serp/search/v1/query")
     assert "selected_pack_version_ids" not in captured["body"]
+    assert captured["body"]["auth_subject_type"] == "service"
     assert captured["body"]["tenant_scope"] == "public"
     assert captured["body"]["metadata"]["expected_pack_version_id"] == PACK_VERSION_ID
     assert artifact["artifactType"] == "public_docs_search_serve_smoke"

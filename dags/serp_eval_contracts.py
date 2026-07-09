@@ -1953,7 +1953,7 @@ def _public_docs_search_serve_smoke_request(plan: Mapping[str, Any]) -> dict[str
         "auth_method": "airflow-dag-task",
         "auth_session_id": _required_str(plan, "operation_id"),
         "auth_subject_id": _PUBLIC_DOCS_SEARCH_SERVE_SMOKE_ACTOR_ID,
-        "auth_subject_type": "system",
+        "auth_subject_type": "service",
         "authorization_decision_id": "authz:" + request_id,
         "authorization_effect": "allow",
         "break_glass_lease_id": None,
