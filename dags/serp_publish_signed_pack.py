@@ -13,6 +13,7 @@ from dags.serp_eval_contracts import (
     execute_pipeline_cli_spec,
     governance_notification_pending,
     write_airflow_plan_artifact,
+    write_public_docs_search_serve_smoke_artifact,
 )
 
 
@@ -72,6 +73,13 @@ submit_activation = PythonOperator(
     dag=dag,
 )
 
+verify_search_serve = PythonOperator(
+    task_id="verify_public_docs_search_serve",
+    python_callable=write_public_docs_search_serve_smoke_artifact,
+    op_args=["{{ ti.xcom_pull(task_ids='validate_publish_signed_pack_plan') }}"],
+    dag=dag,
+)
+
 notify_governance = PythonOperator(
     task_id="notify_governance_eval_surfaces",
     python_callable=governance_notification_pending,
@@ -85,5 +93,6 @@ notify_governance = PythonOperator(
     >> run_handoff
     >> dispatch_submit
     >> submit_activation
+    >> verify_search_serve
     >> notify_governance
 )

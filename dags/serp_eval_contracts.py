@@ -8,17 +8,19 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Mapping, Sequence
+import xml.etree.ElementTree as ElementTree
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, cast
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
+from urllib.robotparser import RobotFileParser
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from dags.serp_public_docs_seed_catalog import (
@@ -64,9 +66,16 @@ _PUBLIC_DOCS_DEFAULT_TENANT_ID = "00000000-0000-4000-a000-000000000001"
 _PUBLIC_DOCS_DEFAULT_PACK_ID = "00000000-0000-4000-a000-000000000201"
 _PUBLIC_DOCS_DEFAULT_PACK_VERSION_ID = "018f5e13-2d73-7a77-a052-8d1bcbf96541"
 _PUBLIC_DOCS_DEFAULT_ACTOR_ID = "airflow-serp-public-docs-refresh"
+_PUBLIC_DOCS_SEARCH_SERVE_SMOKE_ACTOR_ID = "00000000-0000-4000-a000-000000000202"
 _PUBLIC_DOCS_DEFAULT_ARTIFACT_ROOT = "/var/opt/adapstory/serp-public-docs-refresh"
 _PUBLIC_DOCS_STACK_INVENTORY_PATH = STACK_INVENTORY_SOURCE_PATH
+_PUBLIC_DOCS_SITEMAP_FETCH_TIMEOUT_SECONDS = 8
+_PUBLIC_DOCS_MAX_SITEMAP_INDEX_CHILDREN = 3
 _ARTIFACT_ROOT_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_ROOT"
+_PUBLIC_DOCS_SEARCH_SERVE_BASE_URL_ENV = "ADAPSTORY_SERP_SEARCH_SERVE_BASE_URL"
+_PUBLIC_DOCS_SEARCH_SERVE_DEFAULT_BASE_URL = (
+    "http://prod-serp-mcp-gateway-svc.env-prod.svc.cluster.local:8000"
+)
 _PUBLIC_DOCS_INDEX_MODE_ENV = "ADAPSTORY_SERP_PUBLIC_DOCS_INDEX_MODE"
 _PUBLIC_DOCS_EMBEDDING_MODE_ENV = "ADAPSTORY_SERP_PUBLIC_DOCS_EMBEDDING_MODE"
 _PUBLIC_DOCS_QDRANT_COLLECTION_ENV = "ADAPSTORY_SERP_PUBLIC_DOCS_QDRANT_COLLECTION"
@@ -101,6 +110,11 @@ _SECRET_VALUE_PATTERNS = (
     re.compile(r"(?i)^bearer\s+[a-z0-9._-]+$"),
     re.compile(r"(?i)^sk-[a-z0-9_-]{16,}$"),
 )
+
+PublicDocsSitemapFrontierDiscoverer = Callable[
+    [str, Mapping[str, Any], int],
+    Sequence[str],
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -485,6 +499,7 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
         raise ValueError("public_docs_seed_refresh_result identity must match pack_version_id")
     activation_reason_code = _required_str(payload, "activation_reason_code")
     artifact_root_path = _required_artifact_root_path(payload)
+    search_serve_base_url = _public_docs_search_serve_base_url(payload)
     operation_id = _operation_id(
         "serp-airflow-publish-signed-pack",
         tenant_id,
@@ -518,6 +533,10 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
                     "public_docs_publish_activation_receipt",
                     "public-docs-publish-activation-receipt.json",
                 ),
+                (
+                    "public_docs_search_serve_smoke",
+                    "public-docs-search-serve-smoke.json",
+                ),
             ),
         ),
         "benchmark_gate_export_sha256": benchmark_gate_export_sha256,
@@ -532,6 +551,7 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
         "public_docs_seed_refresh_result_path": seed_refresh_result_path,
         "registry_resource_id": str(registry_resource_id),
         "registry_resource_type": registry_resource_type,
+        "search_serve_base_url": search_serve_base_url,
         "status": "ready_for_publish_activation_handoff",
         "tasks": _tasks(
             (
@@ -540,6 +560,7 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
                 "run_publish_activation_handoff",
                 "dispatch_publish_activation_submit",
                 "submit_publish_activation_to_bc21",
+                "verify_public_docs_search_serve",
                 "notify_governance_eval_surfaces",
             )
         ),
@@ -548,7 +569,11 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
     return SerpDagPlan(plan_payload)
 
 
-def build_public_docs_seed_refresh_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
+def build_public_docs_seed_refresh_plan(
+    conf: Mapping[str, Any],
+    *,
+    sitemap_frontier_discoverer: PublicDocsSitemapFrontierDiscoverer | None = None,
+) -> SerpDagPlan:
     payload = _payload(conf)
     _reject_raw_secrets(payload)
     tenant_id = _required_uuid(payload, "tenant_id")
@@ -579,7 +604,10 @@ def build_public_docs_seed_refresh_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
         default=_PUBLIC_DOCS_DEFAULT_NEO4J_DATABASE,
     )
     bc21_base_url = _optional_bc21_base_url(payload)
-    seeds = _public_docs_seed_registry(payload)
+    seeds = _public_docs_seed_registry(
+        payload,
+        sitemap_frontier_discoverer=sitemap_frontier_discoverer,
+    )
     seed_registry_sha256 = sha256(
         _canonical_json({"seed_registry": seeds}).encode("utf-8")
     ).hexdigest()
@@ -902,6 +930,67 @@ def submit_public_docs_bc21_pipeline_state_artifact(
     return _artifact_result(
         artifact_path,
         artifact_type="public_docs_bc21_pipeline_state_receipt",
+        operation_id=_required_str(plan, "operation_id"),
+        payload=payload,
+    )
+
+
+def write_public_docs_search_serve_smoke_artifact(
+    plan_json: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != "serp_publish_signed_pack":
+        raise ValueError("plan dag_id does not match public docs search serve smoke")
+    artifact_paths = _required_artifact_paths(
+        plan,
+        (
+            "public_docs_publish_activation_receipt",
+            "public_docs_search_serve_smoke",
+        ),
+    )
+    receipt_path = _artifact_path(
+        "public_docs_publish_activation_receipt",
+        artifact_paths["public_docs_publish_activation_receipt"],
+    )
+    activation_receipt = _read_json_file(
+        receipt_path,
+        "public_docs_publish_activation_receipt",
+    )
+    expected_pack_version_id = _required_str(plan, "pack_version_id")
+    if _required_str(activation_receipt, "packVersionId") != expected_pack_version_id:
+        raise ValueError("publish activation receipt packVersionId must match plan")
+    request_payload = _public_docs_search_serve_smoke_request(plan)
+    endpoint = _public_docs_search_serve_base_url(plan) + "/api/serp/search/v1/query"
+    response_payload = _post_json(endpoint, request_payload)
+    selected_pack_version_ids = response_payload.get("selected_pack_version_ids")
+    if not isinstance(selected_pack_version_ids, list) or not selected_pack_version_ids:
+        raise ValueError("search serve smoke response must include selected_pack_version_ids")
+    if selected_pack_version_ids[0] != expected_pack_version_id:
+        raise ValueError("search serve smoke selected pack version must match activated pack")
+    if _required_positive_int(response_payload, "result_count") < 1:
+        raise ValueError("search serve smoke must return at least one result")
+    payload = {
+        "activation_receipt_path": receipt_path,
+        "artifact_type": "public_docs_search_serve_smoke",
+        "contract_version": _EVAL_CONTRACT_VERSION,
+        "dag_id": "serp_publish_signed_pack",
+        "endpoint": endpoint,
+        "expected_pack_version_id": expected_pack_version_id,
+        "generated_at": _required_datetime_string(plan, "generated_at"),
+        "operation_id": _required_str(plan, "operation_id"),
+        "request": request_payload,
+        "response": response_payload,
+        "result_count": _required_positive_int(response_payload, "result_count"),
+        "selected_pack_version_ids": selected_pack_version_ids,
+        "status": "served_active_pack",
+        "tenant_id": _required_str(plan, "tenant_id"),
+    }
+    artifact_path = artifact_paths["public_docs_search_serve_smoke"]
+    _write_json_artifact(artifact_path, payload)
+    return _artifact_result(
+        artifact_path,
+        artifact_type="public_docs_search_serve_smoke",
         operation_id=_required_str(plan, "operation_id"),
         payload=payload,
     )
@@ -1718,6 +1807,62 @@ def _public_docs_seed_refresh_result_identity(seed_refresh_result_path: str) -> 
         "pack_id": _required_str(batch_evidence, "pack_id"),
         "pack_version_id": _required_str(batch_evidence, "pack_version_id"),
         "tenant_id": _required_str(batch_evidence, "tenant_id"),
+    }
+
+
+def _public_docs_search_serve_smoke_request(plan: Mapping[str, Any]) -> dict[str, Any]:
+    request_id = str(
+        uuid5(
+            _PUBLIC_DOCS_NAMESPACE,
+            "public-docs-search-serve-smoke:" + _required_str(plan, "operation_id"),
+        )
+    )
+    policy_bundle_sha256 = (
+        "sha256:"
+        + sha256(
+            _canonical_json(
+                {
+                    "operation_id": _required_str(plan, "operation_id"),
+                    "pack_version_id": _required_str(plan, "pack_version_id"),
+                    "purpose": "public-docs-search-serve-smoke",
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+    )
+    return {
+        "actor_id": _PUBLIC_DOCS_SEARCH_SERVE_SMOKE_ACTOR_ID,
+        "auth_context_version": "airflow-public-docs-smoke@2026.07.1",
+        "auth_issuer": "airflow://serp-public-docs",
+        "auth_method": "airflow-dag-task",
+        "auth_session_id": _required_str(plan, "operation_id"),
+        "auth_subject_id": _PUBLIC_DOCS_SEARCH_SERVE_SMOKE_ACTOR_ID,
+        "auth_subject_type": "system",
+        "authorization_decision_id": "authz:" + request_id,
+        "authorization_effect": "allow",
+        "break_glass_lease_id": None,
+        "contract_version": "2026.07.1",
+        "effective_data_class": "PUBLIC",
+        "entitlement_snapshot_id": "public-docs-search-serve-smoke@2026.07.1",
+        "feature_flags": {"hybrid": True},
+        "max_results": 3,
+        "metadata": {
+            "expected_pack_version_id": _required_str(plan, "pack_version_id"),
+            "operation_id": _required_str(plan, "operation_id"),
+            "surface": "airflow-public-docs-search-serve-smoke",
+        },
+        "mode": "search_then_retrieve",
+        "pack_scope_hash": "sha256:"
+        + sha256(_required_str(plan, "pack_version_id").encode("utf-8")).hexdigest(),
+        "policy_bundle_sha256": policy_bundle_sha256,
+        "policy_rollout_state": "active",
+        "policy_rule_ids_applied": ["serp-public-docs-active-pack-smoke"],
+        "policy_version": "serp-public-docs-smoke-policy@2026.07.1",
+        "query": "public docs installation quick start",
+        "request_id": request_id,
+        "tenant_id": _required_str(plan, "tenant_id"),
+        "tenant_lifecycle_state": "ACTIVE",
+        "tenant_mode": "public",
+        "tenant_scope": "public",
     }
 
 
@@ -3067,9 +3212,19 @@ def _mandatory_metric_families() -> tuple[str, str, str, str]:
     return ("retrieval", "answer-quality", "citation", "policy")
 
 
-def _public_docs_seed_registry(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+def _public_docs_seed_registry(
+    payload: Mapping[str, Any],
+    *,
+    sitemap_frontier_discoverer: PublicDocsSitemapFrontierDiscoverer | None = None,
+) -> list[dict[str, Any]]:
     raw_seeds = _required_object_list(payload, "seed_registry")
-    seeds = [_public_docs_seed(seed) for seed in raw_seeds]
+    seeds = [
+        _public_docs_seed(
+            seed,
+            sitemap_frontier_discoverer=sitemap_frontier_discoverer,
+        )
+        for seed in raw_seeds
+    ]
     _require_unique_public_docs_seed_values(seeds)
     return sorted(seeds, key=lambda seed: _required_str(seed, "seed_id"))
 
@@ -3168,14 +3323,23 @@ def _default_public_docs_seed(
     }
 
 
-def _public_docs_seed(seed: Mapping[str, Any]) -> dict[str, Any]:
+def _public_docs_seed(
+    seed: Mapping[str, Any],
+    *,
+    sitemap_frontier_discoverer: PublicDocsSitemapFrontierDiscoverer | None = None,
+) -> dict[str, Any]:
     _reject_raw_secrets(seed)
     seed_id = _required_seed_id(seed)
     source_id = str(_required_uuid(seed, "source_id"))
     source_type = _required_public_docs_source_type(seed)
     source_uri = _required_public_docs_source_uri(seed, source_type)
     official_docs_uri = _required_public_docs_official_docs_uri(seed)
-    crawl_policy = _public_docs_crawl_policy(seed, source_uri, source_type)
+    crawl_policy = _public_docs_crawl_policy(
+        seed,
+        source_uri,
+        source_type,
+        sitemap_frontier_discoverer=sitemap_frontier_discoverer,
+    )
     refresh_policy = _public_docs_refresh_policy(seed)
     license_contract = _public_docs_license(seed)
     inventory_evidence = _public_docs_inventory_evidence(seed)
@@ -3267,6 +3431,8 @@ def _public_docs_crawl_policy(
     seed: Mapping[str, Any],
     source_uri: str,
     source_type: str,
+    *,
+    sitemap_frontier_discoverer: PublicDocsSitemapFrontierDiscoverer | None = None,
 ) -> dict[str, Any]:
     policy = _required_mapping(seed, "crawl_policy")
     if policy.get("respect_robots_txt") is not True:
@@ -3300,6 +3466,7 @@ def _public_docs_crawl_policy(
         deny_patterns=list(deny_patterns),
         sitemap_discovery=sitemap_discovery,
         max_pages=max_pages,
+        sitemap_frontier_discoverer=sitemap_frontier_discoverer,
     )
     return {
         "allowed_domains": allowed_domains,
@@ -3322,6 +3489,7 @@ def _public_docs_frontier_urls(
     deny_patterns: Sequence[str],
     sitemap_discovery: bool,
     max_pages: int,
+    sitemap_frontier_discoverer: PublicDocsSitemapFrontierDiscoverer | None = None,
 ) -> list[str]:
     raw_urls = policy.get("frontier_urls", [])
     if raw_urls is None:
@@ -3332,13 +3500,26 @@ def _public_docs_frontier_urls(
         if raw_urls:
             raise ValueError("frontier_urls are supported only for website seeds")
         return []
-    if len(raw_urls) >= max_pages:
+    remaining_slots = max_pages - len(raw_urls) - 1
+    if remaining_slots < 0:
+        raise ValueError("frontier_urls must leave room for the seed source_uri")
+    discovered_urls: Sequence[str] = ()
+    if sitemap_discovery and sitemap_frontier_discoverer is not None and remaining_slots > 0:
+        discovered_urls = sitemap_frontier_discoverer(
+            source_uri,
+            policy,
+            remaining_slots,
+        )
+        if not all(isinstance(value, str) for value in discovered_urls):
+            raise ValueError("sitemap frontier discoverer must return strings")
+    candidate_urls = [*raw_urls, *discovered_urls]
+    if len(candidate_urls) >= max_pages:
         raise ValueError("frontier_urls must leave room for the seed source_uri")
     allowed_domain_set = set(allowed_domains)
     source_host = urlparse(source_uri).hostname
     normalized: list[str] = []
     seen = {_canonical_public_docs_url(source_uri)}
-    for value in raw_urls:
+    for value in candidate_urls:
         url = value.strip()
         if not url:
             raise ValueError("frontier_urls entries must be non-empty")
@@ -3386,6 +3567,140 @@ def _canonical_public_docs_url(value: str) -> str:
         path = path.rstrip("/")
     query = f"?{parsed.query}" if parsed.query else ""
     return f"{scheme}://{hostname}{port}{path}{query}"
+
+
+def discover_public_docs_sitemap_frontier(
+    source_uri: str,
+    crawl_policy: Mapping[str, Any],
+    max_urls: int,
+) -> list[str]:
+    if max_urls <= 0:
+        return []
+    parsed_source = urlparse(source_uri)
+    if parsed_source.scheme not in {"http", "https"} or not parsed_source.hostname:
+        return []
+    allowed_domains = set(_required_str_list(crawl_policy, "allowed_domains"))
+    deny_patterns = tuple(str(value) for value in crawl_policy.get("deny_patterns", ()))
+    user_agent = _required_str(crawl_policy, "user_agent")
+    robots_url = urljoin(source_uri, "/robots.txt")
+    try:
+        robots_payload = _fetch_public_docs_discovery_text(robots_url, user_agent)
+    except (HTTPError, URLError, OSError, TimeoutError, ValueError):
+        return []
+    robot_parser = RobotFileParser(robots_url)
+    robot_parser.parse(robots_payload.splitlines())
+    sitemap_urls = tuple(robot_parser.site_maps() or ()) or (urljoin(source_uri, "/sitemap.xml"),)
+    discovered: list[str] = []
+    sitemap_queue = list(sitemap_urls)
+    seen_sitemaps: set[str] = set()
+    sitemap_index_children = 0
+    while sitemap_queue and len(discovered) < max_urls:
+        sitemap_url = sitemap_queue.pop(0).strip()
+        sitemap_canonical = _canonical_public_docs_url(sitemap_url)
+        if not sitemap_url or sitemap_canonical in seen_sitemaps:
+            continue
+        seen_sitemaps.add(sitemap_canonical)
+        if _contains_raw_secret(sitemap_url) or not robot_parser.can_fetch(user_agent, sitemap_url):
+            continue
+        try:
+            sitemap_payload = _fetch_public_docs_discovery_text(sitemap_url, user_agent)
+            sitemap_kind, locations = _public_docs_sitemap_locations(sitemap_payload)
+        except (HTTPError, URLError, OSError, TimeoutError, ValueError, ElementTree.ParseError):
+            continue
+        if sitemap_kind == "sitemapindex":
+            for location in locations:
+                if sitemap_index_children >= _PUBLIC_DOCS_MAX_SITEMAP_INDEX_CHILDREN:
+                    break
+                sitemap_index_children += 1
+                sitemap_queue.append(location)
+            continue
+        for location in locations:
+            if len(discovered) >= max_urls:
+                break
+            if not _public_docs_discovered_url_is_allowed(
+                location,
+                allowed_domains=allowed_domains,
+                deny_patterns=deny_patterns,
+                source_host=parsed_source.hostname,
+            ):
+                continue
+            if _contains_raw_secret(location) or not robot_parser.can_fetch(user_agent, location):
+                continue
+            discovered.append(location)
+    return discovered
+
+
+def _public_docs_discovered_url_is_allowed(
+    url: str,
+    *,
+    allowed_domains: set[str],
+    deny_patterns: Sequence[str],
+    source_host: str,
+) -> bool:
+    parsed = urlparse(url)
+    return (
+        parsed.scheme == "https"
+        and parsed.hostname == source_host
+        and parsed.hostname in allowed_domains
+        and not _contains_raw_secret(url)
+        and not _public_docs_url_matches_deny_patterns(url, deny_patterns)
+    )
+
+
+def _fetch_public_docs_discovery_text(url: str, user_agent: str) -> str:
+    request = Request(
+        url,
+        headers={
+            "Accept": "application/xml,text/xml,text/plain,*/*",
+            "User-Agent": user_agent,
+        },
+    )
+    with urlopen(request, timeout=_PUBLIC_DOCS_SITEMAP_FETCH_TIMEOUT_SECONDS) as response:
+        payload = cast(bytes, response.read(1_000_001))
+    if len(payload) > 1_000_000:
+        raise ValueError("public docs discovery payload is too large")
+    return payload.decode("utf-8", errors="replace")
+
+
+def _post_json(url: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    request = Request(
+        url,
+        data=body,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "AdapstorySERPDocsRefresh/2026.07",
+        },
+        method="POST",
+    )
+    with urlopen(request, timeout=_PUBLIC_DOCS_SITEMAP_FETCH_TIMEOUT_SECONDS) as response:
+        response_payload = response.read(2_000_001)
+    if len(response_payload) > 2_000_000:
+        raise ValueError("JSON response payload is too large")
+    decoded = json.loads(response_payload.decode("utf-8"))
+    if not isinstance(decoded, dict):
+        raise ValueError("JSON response payload must be an object")
+    return decoded
+
+
+def _public_docs_sitemap_locations(payload: str) -> tuple[str, list[str]]:
+    root = ElementTree.fromstring(payload)
+    root_name = _xml_local_name(root.tag)
+    if root_name not in {"urlset", "sitemapindex"}:
+        raise ValueError("public docs sitemap root is unsupported")
+    locations: list[str] = []
+    for element in root.iter():
+        if _xml_local_name(element.tag) != "loc":
+            continue
+        value = (element.text or "").strip()
+        if value:
+            locations.append(value)
+    return root_name, locations
+
+
+def _xml_local_name(tag: str) -> str:
+    return tag.rsplit("}", maxsplit=1)[-1]
 
 
 def _public_docs_refresh_policy(seed: Mapping[str, Any]) -> dict[str, Any]:
@@ -3585,6 +3900,20 @@ def _optional_bc21_base_url(payload: Mapping[str, Any]) -> str | None:
     if value is None:
         return None
     return _required_bc21_base_url({"bc21_base_url": value})
+
+
+def _public_docs_search_serve_base_url(payload: Mapping[str, Any]) -> str:
+    value = payload.get(
+        "search_serve_base_url",
+        os.environ.get(
+            _PUBLIC_DOCS_SEARCH_SERVE_BASE_URL_ENV,
+            _PUBLIC_DOCS_SEARCH_SERVE_DEFAULT_BASE_URL,
+        ),
+    )
+    return _required_internal_or_https_base_url(
+        {"search_serve_base_url": value},
+        "search_serve_base_url",
+    ).rstrip("/")
 
 
 def _is_plan_payload(value: Mapping[str, Any] | str) -> bool:
@@ -3874,11 +4203,15 @@ def _required_resource_type(payload: Mapping[str, Any], field_name: str) -> str:
 
 
 def _required_bc21_base_url(payload: Mapping[str, Any]) -> str:
-    value = _required_str(payload, "bc21_base_url")
+    return _required_internal_or_https_base_url(payload, "bc21_base_url")
+
+
+def _required_internal_or_https_base_url(payload: Mapping[str, Any], field_name: str) -> str:
+    value = _required_str(payload, field_name)
     if "://" not in value or "\x00" in value or "\n" in value or "\r" in value:
-        raise ValueError("bc21_base_url must be an absolute single-line URL")
+        raise ValueError(f"{field_name} must be an absolute single-line URL")
     if _contains_raw_secret(value):
-        raise ValueError("bc21_base_url must not contain raw secret material")
+        raise ValueError(f"{field_name} must not contain raw secret material")
     parsed = urlparse(value)
     if parsed.scheme == "https" and parsed.hostname:
         return value
@@ -3886,7 +4219,7 @@ def _required_bc21_base_url(payload: Mapping[str, Any]) -> str:
         return value
     if parsed.scheme == "http" and _is_kubernetes_service_host(parsed.hostname):
         return value
-    raise ValueError("bc21_base_url must use https, localhost http, or Kubernetes service http")
+    raise ValueError(f"{field_name} must use https, localhost http, or Kubernetes service http")
 
 
 def _is_kubernetes_service_host(hostname: str | None) -> bool:

@@ -11,6 +11,7 @@ from dags.serp_eval_contracts import (
 )
 from dags.serp_eval_contracts import (
     default_public_docs_seed_refresh_conf,
+    discover_public_docs_sitemap_frontier,
     dispatch_public_docs_seed_refresh_handoff,
     execute_pipeline_cli_spec,
     governance_notification_pending,
@@ -26,7 +27,12 @@ def validate_public_docs_seed_registry(**context: Any) -> str:
     dag_run = context.get("dag_run")
     conf = getattr(dag_run, "conf", None) or {}
     conf = _public_docs_seed_refresh_conf_with_defaults(conf)
-    return write_airflow_plan_artifact(build_public_docs_seed_refresh_plan_contract(conf))
+    return write_airflow_plan_artifact(
+        build_public_docs_seed_refresh_plan_contract(
+            conf,
+            sitemap_frontier_discoverer=discover_public_docs_sitemap_frontier,
+        )
+    )
 
 
 def _public_docs_seed_refresh_conf_with_defaults(conf: dict[str, Any]) -> dict[str, Any]:

@@ -6,6 +6,7 @@ import io
 import json
 import sys
 import types
+from collections.abc import Mapping
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, cast
@@ -17,6 +18,7 @@ import pytest
 from dags.serp_eval_contracts import (
     MANDATORY_SERP_BENCHMARK_SUITES,
     SERP_NORMALIZED_GATE_FLOOR,
+    _public_docs_sitemap_locations,
     build_benchmark_improvement_decision_cli_spec,
     build_benchmark_improvement_scoreboard_cli_spec,
     build_benchmark_improvement_wave_plan,
@@ -54,6 +56,7 @@ from dags.serp_eval_contracts import (
     write_nightly_suite_plan_artifact,
     write_online_eval_rollup_plan_artifact,
     write_public_docs_publish_activation_trigger_conf_artifact,
+    write_public_docs_search_serve_smoke_artifact,
     write_public_docs_seed_refresh_plan_artifact,
     write_public_docs_seed_registry_artifact,
 )
@@ -1579,6 +1582,85 @@ def test_public_docs_seed_refresh_deduplicates_canonical_frontier_urls(
     ]
 
 
+def test_public_docs_seed_refresh_expands_sitemap_discovered_frontier_urls(
+    tmp_path: Path,
+) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    conf["seed_registry"][0]["crawl_policy"]["max_pages"] = 4
+
+    def discover(source_uri: str, policy: Mapping[str, Any], max_urls: int) -> list[str]:
+        if source_uri != "https://docs.k3s.io/":
+            return []
+        assert policy["sitemap_discovery"] is True
+        assert max_urls == 1
+        return ["https://docs.k3s.io/advanced"]
+
+    plan = build_public_docs_seed_refresh_plan(conf, sitemap_frontier_discoverer=discover)
+    refresh_plan_artifact = write_public_docs_seed_refresh_plan_artifact(plan.to_canonical_json())
+
+    website_requests = [
+        request
+        for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
+        if request["seed_id"].startswith("k3s-docs")
+    ]
+    assert [request["source_uri"] for request in website_requests] == [
+        "https://docs.k3s.io/",
+        "https://docs.k3s.io/quick-start",
+        "https://docs.k3s.io/installation/requirements",
+        "https://docs.k3s.io/advanced",
+    ]
+    assert website_requests[-1]["source_metadata"]["frontier"]["frontier_role"] == (
+        "sitemap-frontier"
+    )
+    assert website_requests[-1]["source_metadata"]["frontier"]["frontier_url_count"] == 4
+
+
+def test_public_docs_seed_refresh_does_not_call_sitemap_discoverer_without_remaining_budget(
+    tmp_path: Path,
+) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    conf["seed_registry"][0]["crawl_policy"]["max_pages"] = 3
+    called = False
+
+    def discover(source_uri: str, policy: Mapping[str, Any], max_urls: int) -> list[str]:
+        nonlocal called
+        if source_uri != "https://docs.k3s.io/":
+            return []
+        called = True
+        return ["https://docs.k3s.io/advanced"]
+
+    plan = build_public_docs_seed_refresh_plan(conf, sitemap_frontier_discoverer=discover)
+    refresh_plan_artifact = write_public_docs_seed_refresh_plan_artifact(plan.to_canonical_json())
+
+    assert called is False
+    assert [
+        request["source_uri"]
+        for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
+        if request["seed_id"].startswith("k3s-docs")
+    ] == [
+        "https://docs.k3s.io/",
+        "https://docs.k3s.io/quick-start",
+        "https://docs.k3s.io/installation/requirements",
+    ]
+
+
+def test_public_docs_sitemap_locations_parse_urlset_and_sitemapindex() -> None:
+    assert _public_docs_sitemap_locations(
+        """<?xml version="1.0" encoding="UTF-8"?>
+        <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+          <url><loc>https://docs.k3s.io/quick-start</loc></url>
+        </urlset>"""
+    ) == ("urlset", ["https://docs.k3s.io/quick-start"])
+    assert _public_docs_sitemap_locations(
+        """<?xml version="1.0" encoding="UTF-8"?>
+        <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+          <sitemap><loc>https://docs.k3s.io/sitemap-docs.xml</loc></sitemap>
+        </sitemapindex>"""
+    ) == ("sitemapindex", ["https://docs.k3s.io/sitemap-docs.xml"])
+
+
 def test_public_docs_seed_refresh_selects_due_seeds_and_records_skips(
     tmp_path: Path,
 ) -> None:
@@ -1713,6 +1795,13 @@ def test_public_docs_publish_activation_plan_dispatches_d5_handoff(tmp_path: Pat
                 "public-docs-publish-activation-receipt.json",
             )
         ),
+        "public_docs_search_serve_smoke": "/".join(
+            (
+                str(tmp_path),
+                plan.payload["operation_id"],
+                "public-docs-search-serve-smoke.json",
+            )
+        ),
     }
     assert [task["task_id"] for task in plan.payload["tasks"]] == [
         "validate_publish_signed_pack_plan",
@@ -1720,6 +1809,7 @@ def test_public_docs_publish_activation_plan_dispatches_d5_handoff(tmp_path: Pat
         "run_publish_activation_handoff",
         "dispatch_publish_activation_submit",
         "submit_publish_activation_to_bc21",
+        "verify_public_docs_search_serve",
         "notify_governance_eval_surfaces",
     ]
     assert cli_spec["status"] == "ready_for_pipeline_cli_runner"
@@ -1768,6 +1858,72 @@ def test_public_docs_publish_activation_plan_dispatches_d5_handoff(tmp_path: Pat
     assert submit_spec["argv"][submit_spec["argv"].index("--bc21-base-url") + 1] == (
         "http://serp-context-platform.env-dev.svc.cluster.local"
     )
+
+
+def test_public_docs_publish_activation_writes_search_serve_smoke_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed_refresh_result = tmp_path / "public-docs-seed-refresh-result.json"
+    _write_public_docs_seed_refresh_result(seed_refresh_result)
+    conf = _public_docs_publish_activation_conf(str(seed_refresh_result))
+    conf["artifact_root_path"] = str(tmp_path)
+    conf["search_serve_base_url"] = (
+        "http://prod-serp-mcp-gateway-svc.env-prod.svc.cluster.local:8000"
+    )
+    plan = build_public_docs_publish_activation_plan(conf)
+    receipt_path = Path(plan.payload["artifact_paths"]["public_docs_publish_activation_receipt"])
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "artifact_type": "public_docs_publish_activation_receipt",
+                "packId": PACK_ID,
+                "packVersionId": PACK_VERSION_ID,
+                "status": "activated",
+                "tenantId": TENANT_ID,
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeResponse:
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self, size: int = -1) -> bytes:
+            return json.dumps(
+                {
+                    "api_version": "serp.search.v1",
+                    "mode": "search_then_retrieve",
+                    "result_count": 1,
+                    "result_cards": [{"chunk_id": "chunk-k3s"}],
+                    "selected_pack_version_ids": [PACK_VERSION_ID],
+                }
+            ).encode("utf-8")
+
+    def fake_urlopen(request: Any, timeout: int) -> FakeResponse:
+        captured["url"] = request.full_url
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr("dags.serp_eval_contracts.urlopen", fake_urlopen)
+
+    artifact = write_public_docs_search_serve_smoke_artifact(plan.to_canonical_json())
+
+    assert captured["url"].endswith("/api/serp/search/v1/query")
+    assert "selected_pack_version_ids" not in captured["body"]
+    assert captured["body"]["tenant_scope"] == "public"
+    assert captured["body"]["metadata"]["expected_pack_version_id"] == PACK_VERSION_ID
+    assert artifact["artifactType"] == "public_docs_search_serve_smoke"
+    assert artifact["payload"]["status"] == "served_active_pack"
+    assert artifact["payload"]["selected_pack_version_ids"] == [PACK_VERSION_ID]
+    assert Path(artifact["artifactPath"]).exists()
 
 
 def test_public_docs_publish_activation_plan_accepts_s3_d20_result(
@@ -2301,6 +2457,7 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
                 "run_publish_activation_handoff",
                 "dispatch_publish_activation_submit",
                 "submit_publish_activation_to_bc21",
+                "verify_public_docs_search_serve",
                 "notify_governance_eval_surfaces",
             ],
         ),
@@ -2382,6 +2539,7 @@ def test_serp_public_docs_dag_overlays_partial_run_conf_on_default_seed_registry
     _install_airflow_import_stubs(monkeypatch)
     module = importlib.import_module("dags.serp_web_seed_crawl_refresh")
     module = importlib.reload(module)
+    monkeypatch.setattr(module, "discover_public_docs_sitemap_frontier", lambda *_args: [])
 
     class DagRun:
         def __init__(self) -> None:
