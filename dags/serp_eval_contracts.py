@@ -4156,7 +4156,7 @@ def _post_json(
             if attempt == attempts or exc.code not in retry_statuses:
                 raise
             sleep(0.5 * attempt)
-        except URLError:
+        except (URLError, TimeoutError, OSError):
             if attempt == attempts:
                 raise
             sleep(0.5 * attempt)

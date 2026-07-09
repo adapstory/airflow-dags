@@ -2336,6 +2336,67 @@ def test_public_docs_publish_activation_writes_search_serve_smoke_artifact(
     assert Path(artifact["artifactPath"]).exists()
 
 
+def test_public_docs_search_serve_smoke_retries_transient_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed_refresh_result = tmp_path / "public-docs-seed-refresh-result.json"
+    _write_public_docs_seed_refresh_result(seed_refresh_result)
+    conf = _public_docs_publish_activation_conf(str(seed_refresh_result))
+    conf["artifact_root_path"] = str(tmp_path)
+    conf["search_serve_base_url"] = (
+        "http://prod-serp-mcp-gateway-svc.env-prod.svc.cluster.local:8000"
+    )
+    plan = build_public_docs_publish_activation_plan(conf)
+    receipt_path = Path(plan.payload["artifact_paths"]["public_docs_publish_activation_receipt"])
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "active_pack_version_id": PACK_VERSION_ID,
+                "artifact_type": "public_docs_publish_activation_receipt",
+                "pack_id": PACK_ID,
+                "status": "activated",
+                "tenant_id": TENANT_ID,
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeResponse:
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self, size: int = -1) -> bytes:
+            return json.dumps(
+                {
+                    "api_version": "serp.search.v1",
+                    "mode": "search_then_retrieve",
+                    "result_count": 1,
+                    "result_cards": [{"chunk_id": "chunk-k3s"}],
+                    "selected_pack_version_ids": [PACK_VERSION_ID],
+                }
+            ).encode("utf-8")
+
+    def fake_urlopen(request: Any, timeout: int) -> FakeResponse:
+        captured["attempts"] = captured.get("attempts", 0) + 1
+        if captured["attempts"] == 1:
+            raise TimeoutError("timed out")
+        return FakeResponse()
+
+    monkeypatch.setattr("dags.serp_eval_contracts.urlopen", fake_urlopen)
+
+    artifact = write_public_docs_search_serve_smoke_artifact(plan.to_canonical_json())
+
+    assert captured["attempts"] == 2
+    assert artifact["artifactType"] == "public_docs_search_serve_smoke"
+    assert artifact["payload"]["status"] == "served_active_pack"
+
+
 def test_public_docs_publish_activation_plan_accepts_s3_d20_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
