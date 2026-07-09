@@ -3084,6 +3084,9 @@ def _default_public_docs_seed_registry() -> list[dict[str, Any]]:
             component=str(source["component"]),
             frontier_urls=tuple(str(value) for value in source.get("frontier_urls", ())),
             priority=str(source.get("priority", "P0")),
+            releases_url=str(source["releases_url"]),
+            repo_url=str(source["repo_url"]),
+            suggested_ingest_modes=tuple(str(value) for value in source["suggested_ingest_modes"]),
             version=str(source.get("version", "catalog@2026-07-08")),
         )
         for source in p0_public_docs_sources()
@@ -3097,12 +3100,26 @@ def _default_public_docs_seed(
     *,
     catalog_docs_url: str,
     component: str,
+    releases_url: str,
+    repo_url: str,
+    suggested_ingest_modes: Sequence[str],
+    version: str,
     frontier_urls: Sequence[str] = (),
     priority: str = "P0",
-    version: str,
 ) -> dict[str, Any]:
     parsed = urlparse(source_uri)
     allowed_domain = parsed.hostname or "opt.adapstory"
+    evidence_payload = {
+        "catalog_docs_url": catalog_docs_url,
+        "component": component,
+        "docs_url": source_uri,
+        "releases_url": releases_url,
+        "repo_url": repo_url,
+        "source_type": source_type,
+        "stack_inventory_path": _PUBLIC_DOCS_STACK_INVENTORY_PATH,
+        "suggested_ingest_modes": list(suggested_ingest_modes),
+        "version": version,
+    }
     return {
         "approved": True,
         "connector_name": source_type,
@@ -3119,7 +3136,9 @@ def _default_public_docs_seed(
         "data_class": "PUBLIC",
         "inventory_evidence": {
             "component": component,
-            "evidence_sha256": sha256(f"{component}:{version}".encode()).hexdigest(),
+            "evidence_sha256": sha256(
+                json.dumps(evidence_payload, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
             "stack_inventory_path": _PUBLIC_DOCS_STACK_INVENTORY_PATH,
             "version": version,
         },
@@ -3133,6 +3152,9 @@ def _default_public_docs_seed(
             "origin": _PUBLIC_DOCS_STACK_INVENTORY_PATH,
             "priority": priority,
             "purpose": "public-docs-seed-to-serve",
+            "releases_url": releases_url,
+            "repo_url": repo_url,
+            "suggested_ingest_modes": list(suggested_ingest_modes),
         },
         "official_docs_uri": source_uri,
         "refresh_policy": {

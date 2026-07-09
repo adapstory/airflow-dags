@@ -1947,6 +1947,7 @@ def test_default_public_docs_seed_refresh_conf_materializes_autonomous_d20_plan(
     )
 
     plan = build_public_docs_seed_refresh_plan(conf)
+    refresh_plan_artifact = write_public_docs_seed_refresh_plan_artifact(plan.to_canonical_json())
 
     assert conf["seed_registry"]
     assert plan.payload["dag_id"] == "serp_web_seed_crawl_refresh"
@@ -1976,6 +1977,49 @@ def test_default_public_docs_seed_refresh_conf_materializes_autonomous_d20_plan(
         str(source["seed_id"]): str(source.get("catalog_docs_url", source["docs_url"]))
         for source in P0_PUBLIC_DOCS_SOURCES
     }
+    assert {
+        seed["seed_id"]: seed["metadata"]["repo_url"] for seed in plan.payload["seed_registry"]
+    } == {str(source["seed_id"]): str(source["repo_url"]) for source in P0_PUBLIC_DOCS_SOURCES}
+    assert {
+        seed["seed_id"]: seed["metadata"]["releases_url"] for seed in plan.payload["seed_registry"]
+    } == {str(source["seed_id"]): str(source["releases_url"]) for source in P0_PUBLIC_DOCS_SOURCES}
+    assert {
+        seed["seed_id"]: tuple(seed["metadata"]["suggested_ingest_modes"])
+        for seed in plan.payload["seed_registry"]
+    } == {
+        str(source["seed_id"]): tuple(source["suggested_ingest_modes"])
+        for source in P0_PUBLIC_DOCS_SOURCES
+    }
+    sources_by_seed_id = {str(source["seed_id"]): source for source in P0_PUBLIC_DOCS_SOURCES}
+    assert {
+        request["seed_id"]: request["source_metadata"]["repo_url"]
+        for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
+    } == {
+        request["seed_id"]: str(
+            sources_by_seed_id[request["seed_id"].split("--", maxsplit=1)[0]]["repo_url"]
+        )
+        for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
+    }
+    assert {
+        request["seed_id"]: request["source_metadata"]["releases_url"]
+        for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
+    } == {
+        request["seed_id"]: str(
+            sources_by_seed_id[request["seed_id"].split("--", maxsplit=1)[0]]["releases_url"]
+        )
+        for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
+    }
+    assert {
+        request["seed_id"]: tuple(request["source_metadata"]["suggested_ingest_modes"])
+        for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
+    } == {
+        request["seed_id"]: tuple(
+            sources_by_seed_id[request["seed_id"].split("--", maxsplit=1)[0]][
+                "suggested_ingest_modes"
+            ]
+        )
+        for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
+    }
 
 
 def test_default_public_docs_seed_refresh_conf_uses_run_scoped_pack_version(
@@ -2000,6 +2044,30 @@ def test_default_public_docs_seed_refresh_conf_uses_run_scoped_pack_version(
     assert second["pack_version_id"] != first["pack_version_id"]
     UUID(str(first["pack_version_id"]))
     UUID(str(second["pack_version_id"]))
+
+
+def test_default_public_docs_seed_refresh_conf_changes_identity_on_catalog_metadata_drift(
+    tmp_path: Path,
+) -> None:
+    baseline = default_public_docs_seed_refresh_conf(
+        generated_at="2026-07-08T21:00:00Z",
+        artifact_root_path=str(tmp_path),
+    )
+    drifted = default_public_docs_seed_refresh_conf(
+        generated_at="2026-07-08T21:00:00Z",
+        artifact_root_path=str(tmp_path),
+    )
+    drifted["seed_registry"][0]["metadata"]["repo_url"] = "https://git.proxmox.com/drift"
+    drifted["seed_registry"][0]["inventory_evidence"]["evidence_sha256"] = "b" * 64
+
+    baseline_plan = build_public_docs_seed_refresh_plan(baseline)
+    drifted_plan = build_public_docs_seed_refresh_plan(drifted)
+
+    assert (
+        baseline_plan.payload["seed_registry_sha256"]
+        != drifted_plan.payload["seed_registry_sha256"]
+    )
+    assert baseline_plan.payload["operation_id"] != drifted_plan.payload["operation_id"]
 
 
 def test_default_public_docs_seed_refresh_conf_does_not_read_tmp_catalog(
@@ -2083,6 +2151,9 @@ def test_p0_public_docs_sources_match_nightly_markdown_catalog() -> None:
         }
 
         assert row["docs_url"] == catalog_docs_url
+        assert row["repo_url"] == str(source["repo_url"])
+        assert row["releases_url"] == str(source["releases_url"])
+        assert suggested_modes == set(source["suggested_ingest_modes"])
         assert source_type in suggested_modes
         assert str(source.get("priority", "P0")) == row["priority"]
 
