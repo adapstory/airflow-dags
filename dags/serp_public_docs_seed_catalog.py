@@ -36,8 +36,8 @@ P0_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
     {
         "component": "Kubernetes OpenAPI",
         "docs_url": (
-            "https://raw.githubusercontent.com/kubernetes/kubernetes/master/"
-            "api/openapi-spec/swagger.json"
+            "https://raw.githubusercontent.com/kubernetes/kubernetes/v1.34.3/"
+            "api/openapi-spec/v3/api__v1_openapi.json"
         ),
         "priority": "P0",
         "seed_id": "kubernetes-openapi-docs",
