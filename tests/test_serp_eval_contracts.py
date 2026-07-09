@@ -3024,6 +3024,40 @@ def test_serp_public_docs_dag_runs_default_seed_registry_pipeline_path() -> None
     assert "run_public_docs_seed_refresh_pipeline" in source
 
 
+def test_serp_public_docs_pipeline_task_retries_on_transient_external_fetch_failure() -> None:
+    source = (REPO_ROOT / "dags" / "serp_web_seed_crawl_refresh.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not _matches_call(node, "PythonOperator"):
+            continue
+        task_id = next(
+            (
+                keyword.value.value
+                for keyword in node.keywords
+                if keyword.arg == "task_id"
+                and isinstance(keyword.value, ast.Constant)
+                and isinstance(keyword.value.value, str)
+            ),
+            None,
+        )
+        if task_id == "run_public_docs_seed_refresh_pipeline":
+            retries = next(
+                (
+                    keyword.value.value
+                    for keyword in node.keywords
+                    if keyword.arg == "retries"
+                    and isinstance(keyword.value, ast.Constant)
+                    and isinstance(keyword.value.value, int)
+                ),
+                None,
+            )
+            assert retries == 1
+            return
+
+    raise AssertionError("public docs pipeline task was not found")
+
+
 def test_serp_public_docs_dag_overlays_partial_run_conf_on_default_seed_registry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

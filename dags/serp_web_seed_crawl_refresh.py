@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from airflow.providers.standard.operators.python import PythonOperator
@@ -94,6 +94,8 @@ run_pipeline = PythonOperator(
     task_id="run_public_docs_seed_refresh_pipeline",
     python_callable=execute_pipeline_cli_spec,
     op_args=["{{ ti.xcom_pull(task_ids='dispatch_pipeline_seed_refresh_handoff') }}"],
+    retries=1,
+    retry_delay=timedelta(seconds=5),
     dag=dag,
 )
 
