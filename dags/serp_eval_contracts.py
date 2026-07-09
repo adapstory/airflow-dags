@@ -3268,6 +3268,8 @@ def _public_docs_crawl_policy(
         hostname = urlparse(source_uri).hostname
         if hostname not in set(allowed_domains):
             raise ValueError("source_uri host must be in allowed_domains")
+        if _public_docs_url_matches_deny_patterns(source_uri, deny_patterns):
+            raise ValueError("source_uri must not match deny_patterns")
     frontier_urls = _public_docs_frontier_urls(
         policy,
         source_uri=source_uri,
@@ -3327,7 +3329,7 @@ def _public_docs_frontier_urls(
             raise ValueError("frontier_urls host must be in allowed_domains")
         if source_host and parsed.hostname != source_host:
             raise ValueError("frontier_urls host must match source_uri host")
-        if any(pattern and pattern in parsed.path for pattern in deny_patterns):
+        if _public_docs_url_matches_deny_patterns(url, deny_patterns):
             raise ValueError("frontier_urls must not match deny_patterns")
         canonical_url = _canonical_public_docs_url(url)
         if canonical_url in seen:
@@ -3335,6 +3337,19 @@ def _public_docs_frontier_urls(
         seen.add(canonical_url)
         normalized.append(url)
     return normalized
+
+
+def _public_docs_url_matches_deny_patterns(
+    url: str,
+    deny_patterns: Sequence[str],
+) -> bool:
+    parsed = urlparse(url)
+    path_and_query = parsed.path
+    if parsed.query:
+        path_and_query = f"{path_and_query}?{parsed.query}"
+    return any(
+        pattern and (pattern in path_and_query or pattern in url) for pattern in deny_patterns
+    )
 
 
 def _canonical_public_docs_url(value: str) -> str:

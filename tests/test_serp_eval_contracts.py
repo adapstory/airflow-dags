@@ -2161,6 +2161,12 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
     with pytest.raises(ValueError, match="frontier_urls host must be in allowed_domains"):
         build_public_docs_seed_refresh_plan(cross_domain_frontier)
 
+    denied_seed_uri = _public_docs_seed_refresh_conf()
+    denied_seed_uri["seed_registry"][0]["source_uri"] = "https://docs.k3s.io/login"
+    denied_seed_uri["seed_registry"][0]["official_docs_uri"] = "https://docs.k3s.io/login"
+    with pytest.raises(ValueError, match="source_uri must not match deny_patterns"):
+        build_public_docs_seed_refresh_plan(denied_seed_uri)
+
     secret_in_metadata = _public_docs_seed_refresh_conf()
     secret_in_metadata["seed_registry"][2]["metadata"] = {"api_key": "sk-abcdefghijklmnop"}
     with pytest.raises(ValueError, match="dag run config must not contain raw secret material"):
