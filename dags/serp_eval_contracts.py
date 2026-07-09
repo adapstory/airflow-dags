@@ -3069,6 +3069,7 @@ def _default_public_docs_seed_registry() -> list[dict[str, Any]]:
             str(source["seed_id"]),
             str(source.get("source_type", "website")),
             str(source["docs_url"]),
+            catalog_docs_url=str(source.get("catalog_docs_url", source["docs_url"])),
             component=str(source["component"]),
             frontier_urls=tuple(str(value) for value in source.get("frontier_urls", ())),
             priority=str(source.get("priority", "P0")),
@@ -3083,6 +3084,7 @@ def _default_public_docs_seed(
     source_type: str,
     source_uri: str,
     *,
+    catalog_docs_url: str,
     component: str,
     frontier_urls: Sequence[str] = (),
     priority: str = "P0",
@@ -3115,6 +3117,7 @@ def _default_public_docs_seed(
             "obligation_state": "reviewed-public-docs",
         },
         "metadata": {
+            "catalog_docs_url": catalog_docs_url,
             "nightly_source_catalog_path": PUBLIC_DOCS_NIGHTLY_SOURCE_CATALOG_PATH,
             "origin": _PUBLIC_DOCS_STACK_INVENTORY_PATH,
             "priority": priority,

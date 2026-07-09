@@ -76,6 +76,7 @@ P0_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
     },
     {
         "component": "Qdrant",
+        "catalog_docs_url": "https://qdrant.tech/documentation/",
         "docs_url": (
             "https://raw.githubusercontent.com/qdrant/landing_page/master/"
             "qdrant-landing/content/documentation/_index.md"
@@ -85,12 +86,14 @@ P0_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
     },
     {
         "component": "Neo4j",
+        "catalog_docs_url": "https://neo4j.com/docs/",
         "docs_url": "https://raw.githubusercontent.com/neo4j/docs-operations/dev/README.adoc",
         "priority": "P0",
         "seed_id": "neo4j-docs",
     },
     {
         "component": "PostgreSQL",
+        "catalog_docs_url": "https://www.postgresql.org/docs/",
         "docs_url": "https://www.postgresql.org/docs/16/",
         "frontier_urls": (
             "https://www.postgresql.org/docs/16/tutorial.html",
@@ -103,6 +106,7 @@ P0_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
     },
     {
         "component": "Redis",
+        "catalog_docs_url": "https://redis.io/docs/latest/",
         "docs_url": "https://raw.githubusercontent.com/redis/redis/unstable/README.md",
         "priority": "P0",
         "seed_id": "redis-docs",
@@ -133,6 +137,7 @@ P0_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
     },
     {
         "component": "Jenkins",
+        "catalog_docs_url": "https://www.jenkins.io/doc/",
         "docs_url": (
             "https://raw.githubusercontent.com/jenkins-infra/docs.jenkins.io/main/"
             "docs/user-docs/modules/ROOT/pages/index.adoc"
@@ -142,12 +147,14 @@ P0_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
     },
     {
         "component": "Harbor",
+        "catalog_docs_url": "https://goharbor.io/docs/",
         "docs_url": "https://raw.githubusercontent.com/goharbor/website/main/docs/_index.md",
         "priority": "P0",
         "seed_id": "harbor-docs",
     },
     {
         "component": "cert-manager",
+        "catalog_docs_url": "https://cert-manager.io/docs/",
         "docs_url": (
             "https://raw.githubusercontent.com/cert-manager/website/master/"
             "content/docs/installation/README.md"
@@ -163,6 +170,7 @@ P0_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
     },
     {
         "component": "Cilium",
+        "catalog_docs_url": "https://docs.cilium.io/en/stable/",
         "docs_url": (
             "https://raw.githubusercontent.com/cilium/cilium/master/"
             "Documentation/gettingstarted/k8s-install-default.rst"
@@ -172,6 +180,7 @@ P0_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
     },
     {
         "component": "Kyverno",
+        "catalog_docs_url": "https://kyverno.io/docs/",
         "docs_url": (
             "https://raw.githubusercontent.com/kyverno/website/main/"
             "src/content/docs/docs/installation/installation.mdx"
@@ -181,6 +190,7 @@ P0_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
     },
     {
         "component": "OpenEBS",
+        "catalog_docs_url": "https://openebs.io/docs/",
         "docs_url": (
             "https://raw.githubusercontent.com/openebs/website/main/"
             "docs/main/quickstart-guide/installation.md"

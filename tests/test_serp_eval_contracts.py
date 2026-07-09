@@ -1925,6 +1925,13 @@ def test_default_public_docs_seed_refresh_conf_materializes_autonomous_d20_plan(
     assert {seed["seed_id"]: seed["source_uri"] for seed in plan.payload["seed_registry"]} == {
         str(source["seed_id"]): str(source["docs_url"]) for source in P0_PUBLIC_DOCS_SOURCES
     }
+    assert {
+        seed["seed_id"]: seed["metadata"]["catalog_docs_url"]
+        for seed in plan.payload["seed_registry"]
+    } == {
+        str(source["seed_id"]): str(source.get("catalog_docs_url", source["docs_url"]))
+        for source in P0_PUBLIC_DOCS_SOURCES
+    }
 
 
 def test_default_public_docs_seed_refresh_conf_uses_run_scoped_pack_version(
@@ -2006,6 +2013,56 @@ def test_p0_public_docs_seed_catalog_shape_is_runtime_safe() -> None:
         seen_seed_ids.add(seed_id)
 
     assert seen_seed_ids == {str(source["seed_id"]) for source in P0_PUBLIC_DOCS_SOURCES}
+
+
+def test_p0_public_docs_sources_match_nightly_markdown_catalog() -> None:
+    catalog_path = REPO_ROOT.parent / PUBLIC_DOCS_NIGHTLY_SOURCE_CATALOG_PATH
+    stack_inventory_path = REPO_ROOT.parent / STACK_INVENTORY_SOURCE_PATH
+
+    assert catalog_path.exists()
+    assert stack_inventory_path.exists()
+
+    catalog_text = catalog_path.read_text(encoding="utf-8")
+    assert STACK_INVENTORY_SOURCE_PATH in catalog_text
+
+    catalog_rows = _p0_nightly_catalog_rows(catalog_text)
+    executable_sources = {str(source["component"]): source for source in P0_PUBLIC_DOCS_SOURCES}
+
+    assert set(executable_sources) == set(catalog_rows)
+    for component, source in executable_sources.items():
+        row = catalog_rows[component]
+        docs_url = str(source["docs_url"])
+        catalog_docs_url = str(source.get("catalog_docs_url", docs_url))
+        source_type = str(source.get("source_type", "website"))
+        suggested_modes = {
+            mode.strip() for mode in row["suggested_ingest_modes"].split(",") if mode.strip()
+        }
+
+        assert row["docs_url"] == catalog_docs_url
+        assert source_type in suggested_modes
+        assert str(source.get("priority", "P0")) == row["priority"]
+
+
+def _p0_nightly_catalog_rows(catalog_text: str) -> dict[str, dict[str, str]]:
+    rows: dict[str, dict[str, str]] = {}
+    for line in catalog_text.splitlines():
+        if not line.startswith("| P0 |"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) != 7:
+            raise AssertionError(f"unexpected P0 catalog row shape: {line}")
+        priority, technology, docs_url, repo_url, releases_url, suggested_ingest_modes, notes = (
+            cells
+        )
+        rows[technology] = {
+            "docs_url": docs_url,
+            "notes": notes,
+            "priority": priority,
+            "releases_url": releases_url,
+            "repo_url": repo_url,
+            "suggested_ingest_modes": suggested_ingest_modes,
+        }
+    return rows
 
 
 def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> None:
