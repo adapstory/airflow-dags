@@ -1466,6 +1466,9 @@ def test_d20_writes_public_docs_publish_activation_trigger_conf_artifact(
     )
     seed_refresh_result_path.parent.mkdir(parents=True, exist_ok=True)
     _write_public_docs_seed_refresh_result(seed_refresh_result_path)
+    _write_public_docs_bc21_pipeline_state_receipt(
+        Path(plan.payload["artifact_paths"]["public_docs_bc21_pipeline_state_receipt"])
+    )
 
     trigger_artifact = write_public_docs_publish_activation_trigger_conf_artifact(
         plan.to_canonical_json()
@@ -1482,26 +1485,48 @@ def test_d20_writes_public_docs_publish_activation_trigger_conf_artifact(
     assert payload["target_dag_id"] == "serp_publish_signed_pack"
     assert payload["d5_publish_target"] == "serp_publish_signed_pack"
     assert payload["source_seed_refresh_result_path"] == str(seed_refresh_result_path)
-    assert payload["governance_required_fields"] == [
+    assert payload["governance_required_fields"] == ["bc21_base_url"]
+    target_conf = payload["target_dag_run_conf"]
+    assert set(target_conf) == {
         "activation_idempotency_key",
-        "approval_run_id",
+        "activation_reason_code",
+        "actor_id",
+        "approval_idempotency_key",
+        "artifact_root_path",
         "benchmark_gate_export_sha256",
-        "bc21_base_url",
         "evidence_bundle_id",
         "evidence_seal_hash",
-    ]
-    assert payload["target_dag_run_conf"] == {
-        "activation_reason_code": "public-docs-d20-indexed",
-        "actor_id": "airflow-serp-public-docs-refresh",
-        "artifact_root_path": str(tmp_path),
-        "generated_at": "2026-07-08T21:00:00Z",
-        "pack_id": PACK_ID,
-        "pack_version_id": PACK_VERSION_ID,
-        "public_docs_seed_refresh_result_path": str(seed_refresh_result_path),
-        "registry_resource_id": REGISTRY_RESOURCE_ID,
-        "registry_resource_type": "pack",
-        "tenant_id": TENANT_ID,
+        "generated_at",
+        "pack_id",
+        "pack_version_id",
+        "policy_data_class",
+        "policy_freshness_state",
+        "policy_license_obligation_state",
+        "policy_source_type",
+        "policy_trust_state",
+        "policy_version",
+        "public_docs_seed_refresh_result_path",
+        "registry_resource_id",
+        "registry_resource_type",
+        "tenant_id",
     }
+    assert target_conf["activation_reason_code"] == "public-docs-d20-indexed"
+    assert target_conf["actor_id"] == "airflow-serp-public-docs-refresh"
+    assert target_conf["artifact_root_path"] == str(tmp_path)
+    assert target_conf["generated_at"] == "2026-07-08T21:00:00Z"
+    assert target_conf["pack_id"] == PACK_ID
+    assert target_conf["pack_version_id"] == PACK_VERSION_ID
+    assert target_conf["public_docs_seed_refresh_result_path"] == str(seed_refresh_result_path)
+    assert target_conf["registry_resource_id"] == REGISTRY_RESOURCE_ID
+    assert target_conf["registry_resource_type"] == "pack"
+    assert target_conf["tenant_id"] == TENANT_ID
+    assert target_conf["policy_source_type"] == "website"
+    assert target_conf["policy_data_class"] == "PUBLIC"
+    assert target_conf["policy_license_obligation_state"] == "public_share_allowed"
+    assert target_conf["policy_trust_state"] == "trusted"
+    assert target_conf["policy_freshness_state"] == "pending"
+    assert target_conf["evidence_bundle_id"] == "018f5e13-2d73-7a77-a052-8d1bcbf96602"
+    assert target_conf["evidence_seal_hash"] == "sha256:" + "b" * 64
     repeated_artifact = write_public_docs_publish_activation_trigger_conf_artifact(
         json.loads(plan.to_canonical_json())
     )
@@ -1524,6 +1549,9 @@ def test_d20_trigger_conf_includes_bc21_base_url_from_env(
     )
     seed_refresh_result_path.parent.mkdir(parents=True, exist_ok=True)
     _write_public_docs_seed_refresh_result(seed_refresh_result_path)
+    _write_public_docs_bc21_pipeline_state_receipt(
+        Path(plan.payload["artifact_paths"]["public_docs_bc21_pipeline_state_receipt"])
+    )
 
     trigger_artifact = write_public_docs_publish_activation_trigger_conf_artifact(
         plan.to_canonical_json()
@@ -1532,13 +1560,8 @@ def test_d20_trigger_conf_includes_bc21_base_url_from_env(
     assert plan.payload["bc21_base_url"] == (
         "http://prod-serp-context-platform-svc.env-prod.svc.cluster.local:8080"
     )
-    assert trigger_artifact["payload"]["governance_required_fields"] == [
-        "activation_idempotency_key",
-        "approval_run_id",
-        "benchmark_gate_export_sha256",
-        "evidence_bundle_id",
-        "evidence_seal_hash",
-    ]
+    assert trigger_artifact["payload"]["status"] == "ready_for_d5_publish_activation"
+    assert trigger_artifact["payload"]["governance_required_fields"] == []
     assert trigger_artifact["payload"]["target_dag_run_conf"]["bc21_base_url"] == (
         "http://prod-serp-context-platform-svc.env-prod.svc.cluster.local:8080"
     )
@@ -1554,20 +1577,31 @@ def test_d20_writes_public_docs_publish_activation_trigger_conf_from_s3_result(
     trigger_conf_path = plan.payload["artifact_paths"][
         "public_docs_publish_activation_trigger_conf"
     ]
+    receipt_path = plan.payload["artifact_paths"]["public_docs_bc21_pipeline_state_receipt"]
     result_bucket, result_key = seed_refresh_result_path.removeprefix("s3://").split("/", 1)
+    receipt_bucket, receipt_key = receipt_path.removeprefix("s3://").split("/", 1)
     trigger_bucket, trigger_key = trigger_conf_path.removeprefix("s3://").split("/", 1)
+    batch_evidence = _public_docs_seed_refresh_batch_evidence(status="indexed")
     storage = {
         (result_bucket, result_key): json.dumps(
             {
                 "artifact_type": "public_docs_seed_refresh_batch_evidence",
-                "batch_evidence": {
-                    "pack_id": PACK_ID,
-                    "pack_version_id": PACK_VERSION_ID,
-                    "tenant_id": TENANT_ID,
-                },
+                "batch_evidence": batch_evidence,
+                "batch_evidence_sha256": sha256(
+                    json.dumps(
+                        batch_evidence,
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ).encode("utf-8")
+                ).hexdigest(),
             },
             sort_keys=True,
-        ).encode("utf-8")
+        ).encode("utf-8"),
+        (receipt_bucket, receipt_key): json.dumps(
+            _public_docs_bc21_pipeline_state_receipt(),
+            sort_keys=True,
+        ).encode("utf-8"),
     }
     put_calls: list[tuple[str, str, str, str]] = []
 
@@ -1750,11 +1784,14 @@ def test_d5_still_requires_governance_inputs_from_d20_trigger_conf(
     )
     seed_refresh_result_path.parent.mkdir(parents=True, exist_ok=True)
     _write_public_docs_seed_refresh_result(seed_refresh_result_path)
+    _write_public_docs_bc21_pipeline_state_receipt(
+        Path(plan.payload["artifact_paths"]["public_docs_bc21_pipeline_state_receipt"])
+    )
     trigger_artifact = write_public_docs_publish_activation_trigger_conf_artifact(
         plan.to_canonical_json()
     )
 
-    with pytest.raises(ValueError, match="approval_run_id is required"):
+    with pytest.raises(ValueError, match="bc21_base_url is required"):
         build_public_docs_publish_activation_plan(
             trigger_artifact["payload"]["target_dag_run_conf"]
         )
@@ -3163,7 +3200,7 @@ def _public_docs_publish_activation_conf(seed_refresh_result_path: str) -> dict[
         "activation_idempotency_key": "018f5e13-2d73-7a77-a052-" + "8d1bcbf96603",
         "activation_reason_code": "public-docs-d20-indexed",
         "actor_id": "airflow-serp-public-docs-refresh",
-        "approval_run_id": "018f5e13-2d73-7a77-a052-8d1bcbf96601",
+        "approval_idempotency_key": "018f5e13-2d73-7a77-a052-" + "8d1bcbf96601",
         "artifact_root_path": "/var/opt/adapstory/serp-public-docs-publish",
         "benchmark_gate_export_sha256": "sha256:" + "c" * 64,
         "bc21_base_url": "http://serp-context-platform.env-dev.svc.cluster.local",
@@ -3172,6 +3209,12 @@ def _public_docs_publish_activation_conf(seed_refresh_result_path: str) -> dict[
         "generated_at": "2026-07-08T22:00:00Z",
         "pack_id": PACK_ID,
         "pack_version_id": PACK_VERSION_ID,
+        "policy_data_class": "PUBLIC",
+        "policy_freshness_state": "fresh",
+        "policy_license_obligation_state": "public_share_allowed",
+        "policy_source_type": "website",
+        "policy_trust_state": "trusted",
+        "policy_version": "source-approval@2026.07.1",
         "public_docs_seed_refresh_result_path": seed_refresh_result_path,
         "registry_resource_id": REGISTRY_RESOURCE_ID,
         "registry_resource_type": "pack",
@@ -3186,21 +3229,52 @@ def _write_public_docs_seed_refresh_result(
     pack_id: str = PACK_ID,
     pack_version_id: str = PACK_VERSION_ID,
 ) -> None:
-    batch_evidence = {
-        "pack_id": pack_id,
-        "pack_version_id": pack_version_id,
-        "tenant_id": tenant_id,
-    }
+    batch_evidence = _public_docs_seed_refresh_batch_evidence(status="indexed")
+    batch_evidence["tenant_id"] = tenant_id
+    batch_evidence["pack_id"] = pack_id
+    batch_evidence["pack_version_id"] = pack_version_id
     path.write_text(
         json.dumps(
             {
                 "artifact_type": "public_docs_seed_refresh_batch_evidence",
                 "batch_evidence": batch_evidence,
+                "batch_evidence_sha256": sha256(
+                    json.dumps(
+                        batch_evidence,
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ).encode("utf-8")
+                ).hexdigest(),
             },
             sort_keys=True,
         ),
         encoding="utf-8",
     )
+
+
+def _write_public_docs_bc21_pipeline_state_receipt(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(_public_docs_bc21_pipeline_state_receipt(), sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def _public_docs_bc21_pipeline_state_receipt() -> dict[str, object]:
+    return {
+        "artifact_type": "bc21_pipeline_state_receipt",
+        "contract_version": "2026.07.1",
+        "response": {
+            "evidenceBundleId": "018f5e13-2d73-7a77-a052-8d1bcbf96602",
+            "evidenceSealHash": "sha256:" + "b" * 64,
+            "packVersionId": PACK_VERSION_ID,
+            "resourceId": PACK_ID,
+            "runId": "018f5e13-2d73-7a77-a052-8d1bcbf96542",
+            "tenantId": TENANT_ID,
+        },
+        "status": "accepted",
+    }
 
 
 def _public_docs_seed_refresh_batch_evidence(*, status: str) -> dict[str, object]:

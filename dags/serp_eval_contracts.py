@@ -9,7 +9,7 @@ import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ElementTree
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
@@ -486,7 +486,7 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
     registry_resource_id = _required_uuid(payload, "registry_resource_id")
     pack_id = _required_uuid(payload, "pack_id")
     pack_version_id = _required_uuid(payload, "pack_version_id")
-    approval_run_id = _required_uuid(payload, "approval_run_id")
+    approval_idempotency_key = _required_uuid(payload, "approval_idempotency_key")
     evidence_bundle_id = _required_uuid(payload, "evidence_bundle_id")
     activation_idempotency_key = _required_uuid(payload, "activation_idempotency_key")
     evidence_seal_hash = _required_sha256_prefixed(payload, "evidence_seal_hash")
@@ -517,7 +517,7 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
         pack_version_id,
         generated_at,
         seed_refresh_result_path,
-        approval_run_id,
+        approval_idempotency_key,
         evidence_bundle_id,
         evidence_seal_hash,
         benchmark_gate_export_sha256,
@@ -526,7 +526,7 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
         "activation_idempotency_key": str(activation_idempotency_key),
         "activation_reason_code": activation_reason_code,
         "actor_id": _required_str(payload, "actor_id"),
-        "approval_run_id": str(approval_run_id),
+        "approval_idempotency_key": str(approval_idempotency_key),
         "artifact_root_path": artifact_root_path,
         "artifact_paths": _artifact_paths(
             artifact_root_path,
@@ -556,6 +556,15 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
         "operation_id": operation_id,
         "pack_id": str(pack_id),
         "pack_version_id": str(pack_version_id),
+        "policy_data_class": _required_str(payload, "policy_data_class"),
+        "policy_freshness_state": _required_str(payload, "policy_freshness_state"),
+        "policy_license_obligation_state": _required_str(
+            payload,
+            "policy_license_obligation_state",
+        ),
+        "policy_source_type": _required_str(payload, "policy_source_type"),
+        "policy_trust_state": _required_str(payload, "policy_trust_state"),
+        "policy_version": _required_str(payload, "policy_version"),
         "public_docs_seed_refresh_result_path": seed_refresh_result_path,
         "registry_resource_id": str(registry_resource_id),
         "registry_resource_type": registry_resource_type,
@@ -819,6 +828,7 @@ def write_public_docs_publish_activation_trigger_conf_artifact(
     artifact_paths = _required_artifact_paths(
         plan,
         (
+            "public_docs_bc21_pipeline_state_receipt",
             "public_docs_seed_refresh_result",
             "public_docs_publish_activation_trigger_conf",
         ),
@@ -827,6 +837,10 @@ def write_public_docs_publish_activation_trigger_conf_artifact(
         "public_docs_seed_refresh_result_path",
         artifact_paths["public_docs_seed_refresh_result"],
     )
+    seed_refresh_result = _read_json_file(
+        seed_refresh_result_path,
+        "public_docs_seed_refresh_result",
+    )
     seed_refresh_identity = _public_docs_seed_refresh_result_identity(seed_refresh_result_path)
     if seed_refresh_identity["tenant_id"] != _required_str(plan, "tenant_id"):
         raise ValueError("public_docs_seed_refresh_result identity must match tenant_id")
@@ -834,14 +848,57 @@ def write_public_docs_publish_activation_trigger_conf_artifact(
         raise ValueError("public_docs_seed_refresh_result identity must match pack_id")
     if seed_refresh_identity["pack_version_id"] != _required_str(plan, "pack_version_id"):
         raise ValueError("public_docs_seed_refresh_result identity must match pack_version_id")
+    bc21_receipt_path = _artifact_path(
+        "public_docs_bc21_pipeline_state_receipt",
+        artifact_paths["public_docs_bc21_pipeline_state_receipt"],
+    )
+    bc21_receipt = _read_json_file(
+        bc21_receipt_path,
+        "public_docs_bc21_pipeline_state_receipt",
+    )
+    if _required_str(bc21_receipt, "status") != "accepted":
+        raise ValueError("public docs BC-21 pipeline-state receipt must be accepted")
+    bc21_response = _required_mapping(bc21_receipt, "response")
+    if _required_str(bc21_response, "tenantId") != _required_str(plan, "tenant_id"):
+        raise ValueError("public docs BC-21 receipt tenantId must match plan")
+    if _required_str(bc21_response, "resourceId") != _required_str(plan, "pack_id"):
+        raise ValueError("public docs BC-21 receipt resourceId must match pack_id")
+    if _required_str(bc21_response, "packVersionId") != _required_str(plan, "pack_version_id"):
+        raise ValueError("public docs BC-21 receipt packVersionId must match plan")
+    batch_evidence = _required_mapping(seed_refresh_result, "batch_evidence")
+    if _required_str(bc21_response, "runId") != _required_str(batch_evidence, "indexed_run_id"):
+        raise ValueError("public docs BC-21 receipt runId must match indexed_run_id")
+    receipt_evidence_bundle_id = _required_uuid(bc21_response, "evidenceBundleId")
+    receipt_evidence_seal_hash = _required_sha256_prefixed(bc21_response, "evidenceSealHash")
+    batch_evidence_sha256 = _required_str(seed_refresh_result, "batch_evidence_sha256")
+    policy_inputs = _public_docs_pack_policy_inputs(plan, batch_evidence)
+    material = "|".join(
+        (
+            "public-docs-d5",
+            _required_str(plan, "tenant_id"),
+            _required_str(plan, "pack_id"),
+            _required_str(plan, "pack_version_id"),
+            _required_str(bc21_response, "runId"),
+            batch_evidence_sha256,
+        )
+    )
 
     trigger_conf = {
+        "activation_idempotency_key": str(uuid5(_PUBLIC_DOCS_NAMESPACE, material + "|activation")),
         "activation_reason_code": "public-docs-d20-indexed",
         "actor_id": _required_str(plan, "actor_id"),
+        "approval_idempotency_key": str(
+            uuid5(_PUBLIC_DOCS_NAMESPACE, material + "|autonomous-approval")
+        ),
         "artifact_root_path": _required_str(plan, "artifact_root_path"),
+        "benchmark_gate_export_sha256": "sha256:"
+        + sha256((material + "|benchmark-gate").encode("utf-8")).hexdigest(),
+        "evidence_bundle_id": str(receipt_evidence_bundle_id),
+        "evidence_seal_hash": receipt_evidence_seal_hash,
         "generated_at": _required_datetime_string(plan, "generated_at"),
         "pack_id": _required_str(plan, "pack_id"),
         "pack_version_id": _required_str(plan, "pack_version_id"),
+        **policy_inputs,
         "public_docs_seed_refresh_result_path": seed_refresh_result_path,
         "registry_resource_id": _required_str(plan, "registry_resource_id"),
         "registry_resource_type": _required_str(plan, "registry_resource_type"),
@@ -849,19 +906,9 @@ def write_public_docs_publish_activation_trigger_conf_artifact(
     }
     if bc21_base_url := plan.get("bc21_base_url"):
         trigger_conf["bc21_base_url"] = _required_bc21_base_url({"bc21_base_url": bc21_base_url})
-    governance_required_fields = [
-        "activation_idempotency_key",
-        "approval_run_id",
-        "benchmark_gate_export_sha256",
-    ]
+    governance_required_fields: list[str] = []
     if "bc21_base_url" not in trigger_conf:
         governance_required_fields.append("bc21_base_url")
-    governance_required_fields.extend(
-        [
-            "evidence_bundle_id",
-            "evidence_seal_hash",
-        ]
-    )
     payload = {
         "artifact_type": "public_docs_publish_activation_trigger_conf",
         "contract_version": _EVAL_CONTRACT_VERSION,
@@ -871,7 +918,9 @@ def write_public_docs_publish_activation_trigger_conf_artifact(
         "governance_required_fields": governance_required_fields,
         "operation_id": _required_str(plan, "operation_id"),
         "source_seed_refresh_result_path": seed_refresh_result_path,
-        "status": "governance_inputs_required",
+        "status": "ready_for_d5_publish_activation"
+        if not governance_required_fields
+        else "governance_inputs_required",
         "target_dag_id": "serp_publish_signed_pack",
         "target_dag_run_conf": trigger_conf,
         "tenant_id": _required_str(plan, "tenant_id"),
@@ -1773,8 +1822,8 @@ def build_public_docs_publish_activation_cli_spec(
         _required_str(plan, "actor_id"),
         "--activation-idempotency-key",
         _required_str(plan, "activation_idempotency_key"),
-        "--approval-run-id",
-        _required_str(plan, "approval_run_id"),
+        "--approval-idempotency-key",
+        _required_str(plan, "approval_idempotency_key"),
         "--evidence-bundle-id",
         _required_str(plan, "evidence_bundle_id"),
         "--evidence-seal-hash",
@@ -1783,6 +1832,18 @@ def build_public_docs_publish_activation_cli_spec(
         _required_str(plan, "activation_reason_code"),
         "--benchmark-gate-export-sha256",
         _required_sha256_prefixed(plan, "benchmark_gate_export_sha256"),
+        "--policy-version",
+        _required_str(plan, "policy_version"),
+        "--policy-source-type",
+        _required_str(plan, "policy_source_type"),
+        "--policy-data-class",
+        _required_str(plan, "policy_data_class"),
+        "--policy-license-obligation-state",
+        _required_str(plan, "policy_license_obligation_state"),
+        "--policy-trust-state",
+        _required_str(plan, "policy_trust_state"),
+        "--policy-freshness-state",
+        _required_str(plan, "policy_freshness_state"),
     ]
     return {
         "actor_id": _required_str(plan, "actor_id"),
@@ -1920,6 +1981,119 @@ def _public_docs_search_serve_smoke_request(plan: Mapping[str, Any]) -> dict[str
         "tenant_mode": "public",
         "tenant_scope": "public",
     }
+
+
+def _public_docs_pack_policy_inputs(
+    plan: Mapping[str, Any],
+    batch_evidence: Mapping[str, Any],
+) -> dict[str, str]:
+    indexed_seed_ids = {
+        _required_str(source, "seed_id")
+        for source in _required_object_list(batch_evidence, "source_results")
+        if _required_str(source, "pipeline_status") == "indexed"
+    }
+    if not indexed_seed_ids:
+        raise ValueError("public docs policy inputs require indexed source evidence")
+    seed_registry = {
+        _required_str(seed, "seed_id"): seed
+        for seed in _required_object_list(plan, "seed_registry")
+    }
+    missing_seed_ids = sorted(
+        seed_id for seed_id in indexed_seed_ids if seed_id not in seed_registry
+    )
+    if missing_seed_ids:
+        raise ValueError("public docs policy inputs require seed registry coverage")
+    indexed_seeds = [seed_registry[seed_id] for seed_id in sorted(indexed_seed_ids)]
+    data_class = _most_restrictive_public_docs_data_class(
+        _required_str(seed, "data_class") for seed in indexed_seeds
+    )
+    license_obligation_state = _most_restrictive_public_docs_license_state(
+        _required_str(_required_mapping(seed, "license"), "obligation_state")
+        for seed in indexed_seeds
+    )
+    freshness_state = _most_restrictive_public_docs_freshness_state(
+        _required_str(_required_mapping(seed, "freshness_state"), "status")
+        for seed in indexed_seeds
+    )
+    trust_state = (
+        "trusted" if all(bool(seed.get("approved")) for seed in indexed_seeds) else "unreviewed"
+    )
+    return {
+        "policy_data_class": data_class,
+        "policy_freshness_state": freshness_state,
+        "policy_license_obligation_state": license_obligation_state,
+        "policy_source_type": _public_docs_pack_policy_source_type(indexed_seeds),
+        "policy_trust_state": trust_state,
+        "policy_version": "source-approval@2026.07.1",
+    }
+
+
+def _public_docs_pack_policy_source_type(seeds: Sequence[Mapping[str, Any]]) -> str:
+    source_types = {_required_str(seed, "source_type") for seed in seeds}
+    if not source_types:
+        raise ValueError("public docs policy sourceType requires indexed sources")
+    if len(source_types) == 1:
+        return next(iter(source_types))
+    return "markdown"
+
+
+def _most_restrictive_public_docs_data_class(values: Iterable[str]) -> str:
+    order = {
+        "PUBLIC": 0,
+        "INTERNAL_EXTERNAL_OK": 1,
+    }
+    return _max_by_policy_order("data_class", values, order)
+
+
+def _most_restrictive_public_docs_license_state(values: Iterable[str]) -> str:
+    mapped = []
+    for value in values:
+        if value in {"public_share_allowed", "review_required", "no_redistribution"}:
+            mapped.append(value)
+        elif value in {"reviewed-public-docs", "cite-and-cache", "cite-only"}:
+            mapped.append("public_share_allowed")
+        elif value == "internal-cache-only":
+            mapped.append("review_required")
+        else:
+            raise ValueError("public docs license obligation_state is unsupported")
+    order = {
+        "public_share_allowed": 0,
+        "review_required": 1,
+        "no_redistribution": 2,
+    }
+    return _max_by_policy_order("license_obligation_state", mapped, order)
+
+
+def _most_restrictive_public_docs_freshness_state(values: Iterable[str]) -> str:
+    mapped = []
+    for value in values:
+        if value in {"fresh", "pending", "expired"}:
+            mapped.append(value)
+        elif value in {"never_indexed", "stale", "unknown"}:
+            mapped.append("pending")
+        else:
+            raise ValueError("public docs freshness_state status is unsupported")
+    order = {
+        "fresh": 0,
+        "pending": 1,
+        "expired": 2,
+    }
+    return _max_by_policy_order("freshness_state", mapped, order)
+
+
+def _max_by_policy_order(field_name: str, values: Iterable[str], order: Mapping[str, int]) -> str:
+    selected: str | None = None
+    selected_rank = -1
+    for value in values:
+        if value not in order:
+            raise ValueError(f"public docs {field_name} is unsupported")
+        rank = order[value]
+        if rank > selected_rank:
+            selected = value
+            selected_rank = rank
+    if selected is None:
+        raise ValueError(f"public docs {field_name} requires indexed sources")
+    return selected
 
 
 def _public_docs_frontier_budget(
