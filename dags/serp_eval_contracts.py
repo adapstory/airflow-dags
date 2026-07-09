@@ -863,7 +863,7 @@ def write_public_docs_publish_activation_trigger_conf_artifact(
         raise ValueError("public docs BC-21 receipt tenantId must match plan")
     if _required_str(bc21_response, "resourceId") != _required_str(plan, "pack_id"):
         raise ValueError("public docs BC-21 receipt resourceId must match pack_id")
-    if _required_str(bc21_response, "packVersionId") != _required_str(plan, "pack_version_id"):
+    if _required_str(bc21_receipt, "pack_version_id") != _required_str(plan, "pack_version_id"):
         raise ValueError("public docs BC-21 receipt packVersionId must match plan")
     batch_evidence = _required_mapping(seed_refresh_result, "batch_evidence")
     if _required_str(bc21_response, "runId") != _required_str(batch_evidence, "indexed_run_id"):

@@ -3265,6 +3265,8 @@ def _public_docs_bc21_pipeline_state_receipt() -> dict[str, object]:
     return {
         "artifact_type": "bc21_pipeline_state_receipt",
         "contract_version": "2026.07.1",
+        "pack_id": PACK_ID,
+        "pack_version_id": PACK_VERSION_ID,
         "response": {
             "evidenceBundleId": "018f5e13-2d73-7a77-a052-8d1bcbf96602",
             "evidenceSealHash": "sha256:" + "b" * 64,
