@@ -1162,7 +1162,11 @@ def _raise_for_failed_pipeline_payload(
             "public docs seed refresh requires live index_effect before BC-21 registration: "
             f"index_effect={payload.get('index_effect')}"
         )
-    if status in {"indexed", "indexed_with_optional_failures"}:
+    if status in {
+        "indexed",
+        "indexed_with_optional_failures",
+        "indexed_with_quarantined_failures",
+    }:
         _validate_publishable_public_docs_batch_counters(batch_evidence, status=status)
         return
     raise ValueError(
@@ -1191,6 +1195,11 @@ def _validate_publishable_public_docs_batch_counters(
         required_failed_count != 0 or failed_count != optional_failed_count
     ):
         raise ValueError("public docs optional failure counters are inconsistent")
+    quarantined_count = _required_non_negative_int(batch_evidence, "quarantined_count")
+    if status == "indexed_with_quarantined_failures" and (
+        quarantined_count == 0 or failed_count != quarantined_count
+    ):
+        raise ValueError("public docs quarantined failure counters are inconsistent")
 
 
 def _required_non_negative_int(payload: Mapping[str, Any], field_name: str) -> int:

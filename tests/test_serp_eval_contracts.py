@@ -613,6 +613,51 @@ def test_execute_pipeline_cli_spec_accepts_optional_frontier_failures(
     assert json.loads(output_path.read_text(encoding="utf-8")) == payload
 
 
+def test_execute_pipeline_cli_spec_accepts_quarantined_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    input_path = tmp_path / "public-docs-seed-refresh-plan.json"
+    output_path = tmp_path / "public-docs-seed-refresh-result.json"
+    input_path.write_text("{}", encoding="utf-8")
+    payload = _pipeline_seed_refresh_payload(
+        "indexed_with_quarantined_failures",
+        indexed_count=34,
+        failed_count=9,
+        quarantined_count=9,
+        required_failed_count=8,
+    )
+
+    class Result:
+        returncode = 0
+        stdout = json.dumps(payload)
+        stderr = ""
+
+    monkeypatch.setattr(
+        "dags.serp_eval_contracts.subprocess.run", lambda *_args, **_kwargs: Result()
+    )
+
+    execute_pipeline_cli_spec(
+        {
+            "argv": [
+                "python",
+                "-m",
+                "adapstory_serp_pipeline.orchestration.seed_refresh_cli",
+            ],
+            "contract_version": "serp-airflow-pipeline-cli-bridge/v1",
+            "dag_id": "serp_web_seed_crawl_refresh",
+            "input_paths": [str(input_path)],
+            "operation_id": "op-1",
+            "status": "ready_for_pipeline_cli_runner",
+            "stdout_path": str(output_path),
+            "task_id": "public_docs_seed_refresh_pipeline",
+            "tenant_id": TENANT_ID,
+        }
+    )
+
+    assert json.loads(output_path.read_text(encoding="utf-8")) == payload
+
+
 def test_execute_pipeline_cli_spec_materializes_s3_inputs_and_uploads_stdout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2844,6 +2889,7 @@ def _pipeline_seed_refresh_payload(
     failed_count: int = 0,
     index_mode: str = "live",
     optional_failed_count: int = 0,
+    quarantined_count: int = 0,
     required_failed_count: int = 0,
 ) -> dict[str, Any]:
     return {
@@ -2852,6 +2898,7 @@ def _pipeline_seed_refresh_payload(
             "failed_count": failed_count,
             "indexed_count": indexed_count,
             "optional_failed_count": optional_failed_count,
+            "quarantined_count": quarantined_count,
             "required_failed_count": required_failed_count,
             "status": status,
         },
