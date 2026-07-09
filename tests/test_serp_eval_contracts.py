@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, cast
+from urllib.error import HTTPError
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -2305,9 +2306,18 @@ def test_public_docs_publish_activation_writes_search_serve_smoke_artifact(
             ).encode("utf-8")
 
     def fake_urlopen(request: Any, timeout: int) -> FakeResponse:
+        captured["attempts"] = captured.get("attempts", 0) + 1
         captured["url"] = request.full_url
         captured["body"] = json.loads(request.data.decode("utf-8"))
         captured["timeout"] = timeout
+        if captured["attempts"] == 1:
+            raise HTTPError(
+                request.full_url,
+                503,
+                "Service Unavailable",
+                cast(Any, {}),
+                io.BytesIO(b'{"detail":"transient"}'),
+            )
         return FakeResponse()
 
     monkeypatch.setattr("dags.serp_eval_contracts.urlopen", fake_urlopen)
@@ -2315,6 +2325,7 @@ def test_public_docs_publish_activation_writes_search_serve_smoke_artifact(
     artifact = write_public_docs_search_serve_smoke_artifact(plan.to_canonical_json())
 
     assert captured["url"].endswith("/api/serp/search/v1/query")
+    assert captured["attempts"] == 2
     assert "selected_pack_version_ids" not in captured["body"]
     assert captured["body"]["auth_subject_type"] == "service"
     assert captured["body"]["tenant_scope"] == "public"

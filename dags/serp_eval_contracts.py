@@ -16,6 +16,7 @@ from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
+from time import sleep
 from typing import Any, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse
@@ -1029,7 +1030,12 @@ def write_public_docs_search_serve_smoke_artifact(
         raise ValueError("publish activation receipt active_pack_version_id must match plan")
     request_payload = _public_docs_search_serve_smoke_request(plan)
     endpoint = _public_docs_search_serve_base_url(plan) + "/api/serp/search/v1/query"
-    response_payload = _post_json(endpoint, request_payload)
+    response_payload = _post_json(
+        endpoint,
+        request_payload,
+        attempts=3,
+        retry_statuses=(503,),
+    )
     selected_pack_version_ids = response_payload.get("selected_pack_version_ids")
     if not isinstance(selected_pack_version_ids, list) or not selected_pack_version_ids:
         raise ValueError("search serve smoke response must include selected_pack_version_ids")
@@ -4121,7 +4127,15 @@ def _fetch_public_docs_discovery_text(url: str, user_agent: str) -> str:
     return payload.decode("utf-8", errors="replace")
 
 
-def _post_json(url: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+def _post_json(
+    url: str,
+    payload: Mapping[str, Any],
+    *,
+    attempts: int = 1,
+    retry_statuses: Sequence[int] = (),
+) -> dict[str, Any]:
+    if attempts < 1:
+        raise ValueError("POST attempts must be positive")
     body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     request = Request(
         url,
@@ -4133,8 +4147,19 @@ def _post_json(url: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         },
         method="POST",
     )
-    with urlopen(request, timeout=_PUBLIC_DOCS_SITEMAP_FETCH_TIMEOUT_SECONDS) as response:
-        response_payload = response.read(2_000_001)
+    for attempt in range(1, attempts + 1):
+        try:
+            with urlopen(request, timeout=_PUBLIC_DOCS_SITEMAP_FETCH_TIMEOUT_SECONDS) as response:
+                response_payload = response.read(2_000_001)
+            break
+        except HTTPError as exc:
+            if attempt == attempts or exc.code not in retry_statuses:
+                raise
+            sleep(0.5 * attempt)
+        except URLError:
+            if attempt == attempts:
+                raise
+            sleep(0.5 * attempt)
     if len(response_payload) > 2_000_000:
         raise ValueError("JSON response payload is too large")
     decoded = json.loads(response_payload.decode("utf-8"))
