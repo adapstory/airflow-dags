@@ -484,6 +484,47 @@ def test_execute_pipeline_cli_spec_runs_without_shell_and_persists_stdout(
     assert result["artifactPath"] == str(output_path)
 
 
+def test_execute_pipeline_cli_spec_rejects_evidence_only_public_docs_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    input_path = tmp_path / "public-docs-seed-refresh-plan.json"
+    output_path = tmp_path / "public-docs-seed-refresh-result.json"
+    input_path.write_text("{}", encoding="utf-8")
+    payload = _pipeline_seed_refresh_payload("indexed", index_mode="evidence-only")
+
+    class Result:
+        returncode = 0
+        stdout = json.dumps(payload)
+        stderr = ""
+
+    monkeypatch.setattr(
+        "dags.serp_eval_contracts.subprocess.run", lambda *_args, **_kwargs: Result()
+    )
+
+    with pytest.raises(ValueError, match="requires live index_mode"):
+        execute_pipeline_cli_spec(
+            {
+                "argv": [
+                    "python",
+                    "-m",
+                    "adapstory_serp_pipeline.orchestration.seed_refresh_cli",
+                ],
+                "contract_version": "serp-airflow-pipeline-cli-bridge/v1",
+                "dag_id": "serp_web_seed_crawl_refresh",
+                "input_paths": [str(input_path)],
+                "index_mode": "evidence-only",
+                "operation_id": "op-1",
+                "status": "ready_for_pipeline_cli_runner",
+                "stdout_path": str(output_path),
+                "task_id": "public_docs_seed_refresh_pipeline",
+                "tenant_id": TENANT_ID,
+            }
+        )
+
+    assert json.loads(output_path.read_text(encoding="utf-8")) == payload
+
+
 def test_execute_pipeline_cli_spec_fails_d20_task_after_persisting_failed_batch(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1125,7 +1166,8 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
 
     assert plan.to_canonical_json() == repeated.to_canonical_json()
     assert plan.payload["dag_id"] == "serp_web_seed_crawl_refresh"
-    assert plan.payload["index_mode"] == "evidence-only"
+    assert plan.payload["index_mode"] == "live"
+    assert plan.payload["embedding_mode"] == "live-gateway"
     assert plan.payload["seed_count"] == 4
     assert plan.payload["status"] == "ready_for_public_docs_seed_refresh"
     assert plan.payload["source_type_counts"] == {
@@ -1182,7 +1224,8 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
         == plan.payload["seed_registry_sha256"]
     )
     assert refresh_plan_artifact["payload"]["status"] == "ready_for_pipeline_dispatch"
-    assert refresh_plan_artifact["payload"]["index_mode"] == "evidence-only"
+    assert refresh_plan_artifact["payload"]["index_mode"] == "live"
+    assert refresh_plan_artifact["payload"]["embedding_mode"] == "live-gateway"
     assert refresh_plan_artifact["payload"]["skipped_seed_count"] == 0
     assert refresh_plan_artifact["payload"]["seed_count"] == 9
     assert all(
@@ -1239,9 +1282,9 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
     assert cli_spec["seed_count"] == 9
     assert cli_spec["skipped_seed_count"] == 0
     assert "--index-mode" in cli_spec["argv"]
-    assert cli_spec["argv"][cli_spec["argv"].index("--index-mode") + 1] == "evidence-only"
+    assert cli_spec["argv"][cli_spec["argv"].index("--index-mode") + 1] == "live"
     assert "--embedding-mode" in cli_spec["argv"]
-    assert cli_spec["argv"][cli_spec["argv"].index("--embedding-mode") + 1] == "deterministic-dev"
+    assert cli_spec["argv"][cli_spec["argv"].index("--embedding-mode") + 1] == "live-gateway"
     assert cli_spec["argv"][cli_spec["argv"].index("--qdrant-collection") + 1] == "serp_vectors_dev"
     assert cli_spec["argv"][cli_spec["argv"].index("--opensearch-index") + 1] == "serp_lexical_dev"
     assert cli_spec["argv"][cli_spec["argv"].index("--neo4j-database") + 1] == "serp_graph_dev"
@@ -1257,6 +1300,7 @@ def test_d20_writes_public_docs_publish_activation_trigger_conf_artifact(
 ) -> None:
     conf = _public_docs_seed_refresh_conf()
     conf["artifact_root_path"] = str(tmp_path)
+    conf["index_mode"] = "evidence-only"
     plan = build_public_docs_seed_refresh_plan(conf)
     seed_refresh_result_path = Path(
         plan.payload["artifact_paths"]["public_docs_seed_refresh_result"]
@@ -2385,6 +2429,7 @@ def _pipeline_seed_refresh_payload(
     *,
     indexed_count: int = 1,
     failed_count: int = 0,
+    index_mode: str = "live",
 ) -> dict[str, Any]:
     return {
         "artifact_type": "public_docs_seed_refresh_batch_evidence",
@@ -2393,6 +2438,8 @@ def _pipeline_seed_refresh_payload(
             "indexed_count": indexed_count,
             "status": status,
         },
+        "index_effect": "live" if index_mode == "live" else "dry-run",
+        "index_mode": index_mode,
     }
 
 

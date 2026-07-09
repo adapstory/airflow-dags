@@ -1050,6 +1050,17 @@ def _raise_for_failed_pipeline_payload(
         return
     batch_evidence = _required_mapping(payload, "batch_evidence")
     status = _required_str(batch_evidence, "status")
+    index_mode = payload.get("index_mode", spec.get("index_mode"))
+    if index_mode != "live":
+        raise ValueError(
+            "public docs seed refresh requires live index_mode before BC-21 registration: "
+            f"index_mode={index_mode}"
+        )
+    if payload.get("index_effect") != "live":
+        raise ValueError(
+            "public docs seed refresh requires live index_effect before BC-21 registration: "
+            f"index_effect={payload.get('index_effect')}"
+        )
     if status == "indexed":
         return
     raise ValueError(
@@ -3495,7 +3506,7 @@ def _source_type_counts(seeds: Sequence[Mapping[str, Any]]) -> dict[str, int]:
 
 
 def _public_docs_index_mode(payload: Mapping[str, Any]) -> str:
-    value = payload.get("index_mode", os.environ.get(_PUBLIC_DOCS_INDEX_MODE_ENV, "evidence-only"))
+    value = payload.get("index_mode", os.environ.get(_PUBLIC_DOCS_INDEX_MODE_ENV, "live"))
     if not isinstance(value, str) or not value.strip():
         raise ValueError("index_mode is required")
     if value not in _PUBLIC_DOCS_INDEX_MODES:
