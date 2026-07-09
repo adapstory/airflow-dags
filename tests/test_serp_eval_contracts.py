@@ -10,6 +10,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlparse
+from uuid import UUID
 
 import pytest
 
@@ -1924,6 +1925,30 @@ def test_default_public_docs_seed_refresh_conf_materializes_autonomous_d20_plan(
     assert {seed["seed_id"]: seed["source_uri"] for seed in plan.payload["seed_registry"]} == {
         str(source["seed_id"]): str(source["docs_url"]) for source in P0_PUBLIC_DOCS_SOURCES
     }
+
+
+def test_default_public_docs_seed_refresh_conf_uses_run_scoped_pack_version(
+    tmp_path: Path,
+) -> None:
+    first = default_public_docs_seed_refresh_conf(
+        generated_at="2026-07-08T21:00:00Z",
+        artifact_root_path=str(tmp_path),
+    )
+    first_retry = default_public_docs_seed_refresh_conf(
+        generated_at="2026-07-08T21:00:00Z",
+        artifact_root_path=str(tmp_path),
+    )
+    second = default_public_docs_seed_refresh_conf(
+        generated_at="2026-07-09T00:00:00Z",
+        artifact_root_path=str(tmp_path),
+    )
+
+    assert first["pack_version_id"] == first_retry["pack_version_id"]
+    assert first["pack_version_id"] == first["registry_resource_id"]
+    assert first["pack_version_id"] != PACK_VERSION_ID
+    assert second["pack_version_id"] != first["pack_version_id"]
+    UUID(str(first["pack_version_id"]))
+    UUID(str(second["pack_version_id"]))
 
 
 def test_default_public_docs_seed_refresh_conf_does_not_read_tmp_catalog(

@@ -670,21 +670,42 @@ def default_public_docs_seed_refresh_conf(
         _ARTIFACT_ROOT_ENV,
         _PUBLIC_DOCS_DEFAULT_ARTIFACT_ROOT,
     )
+    seed_registry = _default_public_docs_seed_registry()
+    pack_version_id = _default_public_docs_pack_version_id(
+        generated_at=generated_at,
+        seed_registry=seed_registry,
+    )
     conf = {
         "actor_id": _PUBLIC_DOCS_DEFAULT_ACTOR_ID,
         "artifact_root_path": root_path,
         "generated_at": generated_at,
         "pack_id": _PUBLIC_DOCS_DEFAULT_PACK_ID,
-        "pack_version_id": _PUBLIC_DOCS_DEFAULT_PACK_VERSION_ID,
-        "registry_resource_id": _PUBLIC_DOCS_DEFAULT_PACK_VERSION_ID,
+        "pack_version_id": pack_version_id,
+        "registry_resource_id": pack_version_id,
         "registry_resource_type": "pack",
-        "seed_registry": _default_public_docs_seed_registry(),
+        "seed_registry": seed_registry,
         "tenant_id": _PUBLIC_DOCS_DEFAULT_TENANT_ID,
     }
     bc21_base_url = _optional_bc21_base_url(conf)
     if bc21_base_url:
         conf["bc21_base_url"] = bc21_base_url
     return conf
+
+
+def _default_public_docs_pack_version_id(
+    *,
+    generated_at: str,
+    seed_registry: Sequence[Mapping[str, Any]],
+) -> str:
+    seed_registry_sha256 = sha256(
+        _canonical_json({"seed_registry": seed_registry}).encode("utf-8")
+    ).hexdigest()
+    return str(
+        uuid5(
+            _PUBLIC_DOCS_NAMESPACE,
+            f"public-docs-pack-version:{generated_at}:{seed_registry_sha256}",
+        )
+    )
 
 
 def write_airflow_plan_artifact(plan: SerpDagPlan) -> str:
