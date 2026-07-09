@@ -95,10 +95,14 @@ P0_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
     ),
     _source(
         component="Kustomize",
-        docs_url="https://kustomize.io/",
+        docs_url=(
+            "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/"
+            "site/content/en/docs/Getting%20started/installation.md"
+        ),
         repo_url="https://github.com/kubernetes-sigs/kustomize",
         releases_url="https://github.com/kubernetes-sigs/kustomize/releases",
         seed_id="kustomize-docs",
+        catalog_docs_url="https://kustomize.io/",
     ),
     _source(
         component="Argo CD",
@@ -171,10 +175,11 @@ P0_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
     ),
     _source(
         component="MinIO",
-        docs_url="https://docs.min.io/",
+        docs_url="https://raw.githubusercontent.com/minio/minio/master/docs/orchestration/kubernetes/README.md",
         repo_url="https://github.com/minio/minio",
         releases_url="https://github.com/minio/minio/releases",
         seed_id="minio-docs",
+        catalog_docs_url="https://docs.min.io/",
     ),
     _source(
         component="Vault",
@@ -262,10 +267,11 @@ P0_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
     ),
     _source(
         component="Traefik Proxy",
-        docs_url="https://doc.traefik.io/traefik/",
+        docs_url="https://raw.githubusercontent.com/traefik/traefik/master/README.md",
         repo_url="https://github.com/traefik/traefik",
         releases_url="https://github.com/traefik/traefik/releases",
         seed_id="traefik-proxy-docs",
+        catalog_docs_url="https://doc.traefik.io/traefik/",
     ),
     _source(
         component="NVIDIA GPU Operator",

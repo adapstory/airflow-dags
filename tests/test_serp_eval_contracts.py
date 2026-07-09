@@ -2472,6 +2472,26 @@ def test_p0_public_docs_sources_match_nightly_markdown_catalog() -> None:
         assert str(source.get("priority", "P0")) == row["priority"]
 
 
+def test_p0_public_docs_flaky_website_roots_use_raw_executable_docs() -> None:
+    sources_by_seed_id = {str(source["seed_id"]): source for source in P0_PUBLIC_DOCS_SOURCES}
+
+    assert sources_by_seed_id["kustomize-docs"]["docs_url"].startswith(
+        "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/"
+    )
+    assert sources_by_seed_id["kustomize-docs"]["catalog_docs_url"] == "https://kustomize.io/"
+    assert sources_by_seed_id["minio-docs"]["docs_url"].startswith(
+        "https://raw.githubusercontent.com/minio/minio/"
+    )
+    assert sources_by_seed_id["minio-docs"]["catalog_docs_url"] == "https://docs.min.io/"
+    assert sources_by_seed_id["traefik-proxy-docs"]["docs_url"].startswith(
+        "https://raw.githubusercontent.com/traefik/traefik/"
+    )
+    assert (
+        sources_by_seed_id["traefik-proxy-docs"]["catalog_docs_url"]
+        == "https://doc.traefik.io/traefik/"
+    )
+
+
 def _p0_nightly_catalog_rows(catalog_text: str) -> dict[str, dict[str, str]]:
     rows: dict[str, dict[str, str]] = {}
     for line in catalog_text.splitlines():
