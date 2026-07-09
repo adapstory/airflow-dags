@@ -1343,6 +1343,71 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
     ]
 
 
+def test_public_docs_seed_refresh_frontier_budget_keeps_roots_and_skips_optional(
+    tmp_path: Path,
+) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    conf["frontier_budget"] = {
+        "max_optional_frontier_per_seed": 2,
+        "max_optional_frontier_sources": 3,
+        "rotation_key": "day-1",
+    }
+    conf["seed_registry"][0]["crawl_policy"]["frontier_urls"] = [
+        "https://docs.k3s.io/quick-start",
+        "https://docs.k3s.io/installation/requirements",
+        "https://docs.k3s.io/advanced",
+        "https://docs.k3s.io/cli",
+    ]
+    conf["seed_registry"][2]["crawl_policy"]["frontier_urls"] = [
+        "https://www.postgresql.org/docs/16/tutorial.html",
+        "https://www.postgresql.org/docs/16/sql.html",
+        "https://www.postgresql.org/docs/16/index.html",
+        "https://www.postgresql.org/docs/16/libpq.html",
+    ]
+
+    plan = build_public_docs_seed_refresh_plan(conf)
+    refresh_plan_artifact = write_public_docs_seed_refresh_plan_artifact(plan.to_canonical_json())
+
+    payload = refresh_plan_artifact["payload"]
+    requests = payload["source_fetch_requests"]
+    root_requests = [
+        request
+        for request in requests
+        if request["source_metadata"]["frontier"]["frontier_role"] == "seed-root"
+    ]
+    optional_requests = [
+        request
+        for request in requests
+        if request["source_metadata"]["frontier"]["frontier_role"] == "sitemap-frontier"
+    ]
+    assert payload["frontier_budget"] == {
+        "max_optional_frontier_per_seed": 2,
+        "max_optional_frontier_sources": 3,
+        "rotation_key": "day-1",
+        "strategy": "seed-root-required-rotating-optional-frontier-budget",
+    }
+    assert len(root_requests) == 4
+    assert payload["optional_frontier_selected_count"] == 3
+    assert len(optional_requests) == 3
+    assert payload["seed_count"] == 7
+    assert payload["skipped_frontier_count"] == 5
+    assert {skipped["skip_reason"] for skipped in payload["skipped_frontier_fetches"]} == {
+        "global_frontier_budget_exhausted",
+        "per_seed_frontier_budget_exhausted",
+    }
+    assert all(
+        skipped["frontier_role"] == "sitemap-frontier"
+        for skipped in payload["skipped_frontier_fetches"]
+    )
+    assert {request["seed_id"] for request in root_requests} == {
+        "adapstory-gitops-docs",
+        "k3s-docs",
+        "kubernetes-openapi-docs",
+        "postgresql-reference-docs",
+    }
+
+
 def test_d20_writes_public_docs_publish_activation_trigger_conf_artifact(
     tmp_path: Path,
 ) -> None:
@@ -1659,6 +1724,54 @@ def test_public_docs_seed_refresh_expands_sitemap_discovered_frontier_urls(
         "sitemap-frontier"
     )
     assert website_requests[-1]["source_metadata"]["frontier"]["frontier_url_count"] == 4
+
+
+def test_public_docs_sitemap_discovery_respects_optional_frontier_budget(
+    tmp_path: Path,
+) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    conf["frontier_budget"] = {
+        "max_optional_frontier_per_seed": 2,
+        "max_optional_frontier_sources": 40,
+        "rotation_key": "day-1",
+    }
+    conf["seed_registry"][0]["crawl_policy"]["frontier_urls"] = []
+    observed_max_urls: list[int] = []
+
+    def discover(source_uri: str, policy: Mapping[str, Any], max_urls: int) -> list[str]:
+        if source_uri != "https://docs.k3s.io/":
+            return []
+        assert policy["sitemap_discovery"] is True
+        observed_max_urls.append(max_urls)
+        return [
+            "https://docs.k3s.io/quick-start",
+            "https://docs.k3s.io/installation/requirements",
+            "https://docs.k3s.io/advanced",
+        ]
+
+    plan = build_public_docs_seed_refresh_plan(conf, sitemap_frontier_discoverer=discover)
+    refresh_plan_artifact = write_public_docs_seed_refresh_plan_artifact(plan.to_canonical_json())
+
+    website_requests = [
+        request
+        for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
+        if request["seed_id"].startswith("k3s-docs")
+    ]
+    assert observed_max_urls == [2]
+    assert [request["source_uri"] for request in website_requests] == [
+        "https://docs.k3s.io/",
+        "https://docs.k3s.io/quick-start",
+        "https://docs.k3s.io/installation/requirements",
+    ]
+    assert (
+        sum(
+            1
+            for request in website_requests
+            if request["source_metadata"]["frontier"]["frontier_role"] == "sitemap-frontier"
+        )
+        == 2
+    )
 
 
 def test_public_docs_seed_refresh_does_not_call_sitemap_discoverer_without_remaining_budget(

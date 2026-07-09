@@ -71,6 +71,14 @@ _PUBLIC_DOCS_DEFAULT_ARTIFACT_ROOT = "/var/opt/adapstory/serp-public-docs-refres
 _PUBLIC_DOCS_STACK_INVENTORY_PATH = STACK_INVENTORY_SOURCE_PATH
 _PUBLIC_DOCS_SITEMAP_FETCH_TIMEOUT_SECONDS = 8
 _PUBLIC_DOCS_MAX_SITEMAP_INDEX_CHILDREN = 3
+_PUBLIC_DOCS_MAX_OPTIONAL_FRONTIER_SOURCES_ENV = (
+    "ADAPSTORY_SERP_PUBLIC_DOCS_MAX_OPTIONAL_FRONTIER_SOURCES"
+)
+_PUBLIC_DOCS_MAX_OPTIONAL_FRONTIER_PER_SEED_ENV = (
+    "ADAPSTORY_SERP_PUBLIC_DOCS_MAX_OPTIONAL_FRONTIER_PER_SEED"
+)
+_PUBLIC_DOCS_DEFAULT_MAX_OPTIONAL_FRONTIER_SOURCES = 96
+_PUBLIC_DOCS_DEFAULT_MAX_OPTIONAL_FRONTIER_PER_SEED = 4
 _ARTIFACT_ROOT_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_ROOT"
 _PUBLIC_DOCS_SEARCH_SERVE_BASE_URL_ENV = "ADAPSTORY_SERP_SEARCH_SERVE_BASE_URL"
 _PUBLIC_DOCS_SEARCH_SERVE_DEFAULT_BASE_URL = (
@@ -604,8 +612,10 @@ def build_public_docs_seed_refresh_plan(
         default=_PUBLIC_DOCS_DEFAULT_NEO4J_DATABASE,
     )
     bc21_base_url = _optional_bc21_base_url(payload)
+    frontier_budget = _public_docs_frontier_budget(payload, generated_at=generated_at)
     seeds = _public_docs_seed_registry(
         payload,
+        frontier_budget=frontier_budget,
         sitemap_frontier_discoverer=sitemap_frontier_discoverer,
     )
     seed_registry_sha256 = sha256(
@@ -624,6 +634,7 @@ def build_public_docs_seed_refresh_plan(
         index_mode,
         embedding_mode,
         bc21_base_url or "",
+        _canonical_json({"frontier_budget": frontier_budget}),
     )
     plan_payload = {
         "actor_id": _required_str(payload, "actor_id"),
@@ -657,6 +668,7 @@ def build_public_docs_seed_refresh_plan(
         "dag_id": "serp_web_seed_crawl_refresh",
         "generated_at": generated_at,
         "embedding_mode": embedding_mode,
+        "frontier_budget": frontier_budget,
         "index_mode": index_mode,
         "neo4j_database": neo4j_database,
         "operation_id": operation_id,
@@ -1895,6 +1907,65 @@ def _public_docs_search_serve_smoke_request(plan: Mapping[str, Any]) -> dict[str
     }
 
 
+def _public_docs_frontier_budget(
+    payload: Mapping[str, Any],
+    *,
+    generated_at: str,
+) -> dict[str, Any]:
+    raw_budget = payload.get("frontier_budget", {})
+    if raw_budget is None:
+        raw_budget = {}
+    if not isinstance(raw_budget, Mapping):
+        raise ValueError("frontier_budget must be an object")
+    max_optional_frontier_sources = _frontier_budget_non_negative_int(
+        raw_budget,
+        "max_optional_frontier_sources",
+        env_name=_PUBLIC_DOCS_MAX_OPTIONAL_FRONTIER_SOURCES_ENV,
+        default=_PUBLIC_DOCS_DEFAULT_MAX_OPTIONAL_FRONTIER_SOURCES,
+        upper_bound=2000,
+    )
+    max_optional_frontier_per_seed = _frontier_budget_non_negative_int(
+        raw_budget,
+        "max_optional_frontier_per_seed",
+        env_name=_PUBLIC_DOCS_MAX_OPTIONAL_FRONTIER_PER_SEED_ENV,
+        default=_PUBLIC_DOCS_DEFAULT_MAX_OPTIONAL_FRONTIER_PER_SEED,
+        upper_bound=500,
+    )
+    rotation_key_value = raw_budget.get("rotation_key", generated_at[:10])
+    if not isinstance(rotation_key_value, str) or not rotation_key_value.strip():
+        raise ValueError("frontier_budget.rotation_key must be a non-empty string")
+    return {
+        "max_optional_frontier_per_seed": max_optional_frontier_per_seed,
+        "max_optional_frontier_sources": max_optional_frontier_sources,
+        "rotation_key": rotation_key_value.strip(),
+        "strategy": "seed-root-required-rotating-optional-frontier-budget",
+    }
+
+
+def _frontier_budget_non_negative_int(
+    raw_budget: Mapping[str, Any],
+    field_name: str,
+    *,
+    env_name: str,
+    default: int,
+    upper_bound: int,
+) -> int:
+    value = raw_budget.get(field_name)
+    if value is None:
+        value = os.environ.get(env_name, default)
+    if isinstance(value, bool) or not isinstance(value, int | str):
+        raise ValueError(f"frontier_budget.{field_name} must be a non-negative integer")
+    if isinstance(value, str):
+        if not value.strip().isdigit():
+            raise ValueError(f"frontier_budget.{field_name} must be a non-negative integer")
+        value = int(value.strip())
+    if value < 0:
+        raise ValueError(f"frontier_budget.{field_name} must be a non-negative integer")
+    if value > upper_bound:
+        raise ValueError(f"frontier_budget.{field_name} must be bounded to {upper_bound} or fewer")
+    return value
+
+
 def _public_docs_seed_refresh_payload(plan: Mapping[str, Any]) -> dict[str, Any]:
     artifact_paths = _required_artifact_paths(
         plan,
@@ -1909,9 +1980,15 @@ def _public_docs_seed_refresh_payload(plan: Mapping[str, Any]) -> dict[str, Any]
         _required_object_list(plan, "seed_registry"),
         generated_at,
     )
-    source_fetch_requests = [
-        request for seed in due_seeds for request in _public_docs_source_fetch_requests(plan, seed)
-    ]
+    source_fetch_requests, skipped_frontier_fetches = _public_docs_budgeted_source_fetch_requests(
+        plan,
+        due_seeds,
+    )
+    optional_frontier_selected_count = sum(
+        1
+        for request in source_fetch_requests
+        if request["source_metadata"]["frontier"]["frontier_role"] == "sitemap-frontier"
+    )
     status = "ready_for_pipeline_dispatch" if source_fetch_requests else "no_due_sources"
     return {
         "artifact_paths": artifact_paths,
@@ -1919,6 +1996,7 @@ def _public_docs_seed_refresh_payload(plan: Mapping[str, Any]) -> dict[str, Any]
         "d4_dispatch_target": "serp_scan_parse_index",
         "dag_id": "serp_web_seed_crawl_refresh",
         "embedding_mode": _required_str(plan, "embedding_mode"),
+        "frontier_budget": dict(_required_mapping(plan, "frontier_budget")),
         "generated_at": generated_at,
         "operation_id": _required_str(plan, "operation_id"),
         "pack_id": _required_str(plan, "pack_id"),
@@ -1927,13 +2005,139 @@ def _public_docs_seed_refresh_payload(plan: Mapping[str, Any]) -> dict[str, Any]
         "qdrant_collection": _required_str(plan, "qdrant_collection"),
         "opensearch_index": _required_str(plan, "opensearch_index"),
         "neo4j_database": _required_str(plan, "neo4j_database"),
+        "optional_frontier_selected_count": optional_frontier_selected_count,
         "seed_count": len(source_fetch_requests),
         "seed_registry_sha256": _required_str(plan, "seed_registry_sha256"),
+        "skipped_frontier_count": len(skipped_frontier_fetches),
+        "skipped_frontier_fetches": skipped_frontier_fetches,
         "skipped_seed_count": len(skipped_seed_refreshes),
         "skipped_seed_refreshes": skipped_seed_refreshes,
         "source_fetch_requests": source_fetch_requests,
         "status": status,
         "tenant_id": _required_str(plan, "tenant_id"),
+    }
+
+
+def _public_docs_budgeted_source_fetch_requests(
+    plan: Mapping[str, Any],
+    seeds: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    budget = _required_mapping(plan, "frontier_budget")
+    max_optional_frontier_sources = _required_frontier_budget_limit(
+        budget,
+        "max_optional_frontier_sources",
+    )
+    max_optional_frontier_per_seed = _required_frontier_budget_limit(
+        budget,
+        "max_optional_frontier_per_seed",
+    )
+    rotation_key = _required_str(budget, "rotation_key")
+    grouped_frontier: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]] = []
+    per_seed_selected_optional: list[dict[str, Any]] = []
+    skipped_frontier_fetches: list[dict[str, Any]] = []
+    for seed in seeds:
+        expanded = _expanded_public_docs_seed_frontier(seed)
+        mandatory = [
+            expanded_seed
+            for expanded_seed in expanded
+            if _frontier_role(expanded_seed) == "seed-root"
+        ]
+        optional = [
+            expanded_seed
+            for expanded_seed in expanded
+            if _frontier_role(expanded_seed) == "sitemap-frontier"
+        ]
+        selected_optional_ids = _rotating_frontier_selection(
+            optional,
+            max_optional_frontier_per_seed,
+            rotation_key=f"{rotation_key}|{_required_str(seed, 'seed_id')}",
+        )
+        for optional_seed in optional:
+            if _frontier_identity(optional_seed) in selected_optional_ids:
+                per_seed_selected_optional.append(optional_seed)
+            else:
+                skipped_frontier_fetches.append(
+                    _frontier_skip_record(
+                        optional_seed,
+                        skip_reason="per_seed_frontier_budget_exhausted",
+                    )
+                )
+        grouped_frontier.append((mandatory, optional))
+
+    global_selected_optional_ids = _rotating_frontier_selection(
+        per_seed_selected_optional,
+        max_optional_frontier_sources,
+        rotation_key=f"{rotation_key}|global",
+    )
+    per_seed_selected_optional_ids = {
+        _frontier_identity(seed) for seed in per_seed_selected_optional
+    }
+    source_fetch_requests: list[dict[str, Any]] = []
+    for mandatory, optional in grouped_frontier:
+        source_fetch_requests.extend(
+            _public_docs_source_fetch_request(plan, mandatory_seed) for mandatory_seed in mandatory
+        )
+        for optional_seed in optional:
+            optional_identity = _frontier_identity(optional_seed)
+            if optional_identity in global_selected_optional_ids:
+                source_fetch_requests.append(_public_docs_source_fetch_request(plan, optional_seed))
+            elif optional_identity in per_seed_selected_optional_ids:
+                skipped_frontier_fetches.append(
+                    _frontier_skip_record(
+                        optional_seed,
+                        skip_reason="global_frontier_budget_exhausted",
+                    )
+                )
+    return source_fetch_requests, skipped_frontier_fetches
+
+
+def _required_frontier_budget_limit(budget: Mapping[str, Any], field_name: str) -> int:
+    value = budget.get(field_name)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"frontier_budget.{field_name} must be a non-negative integer")
+    return value
+
+
+def _frontier_role(seed: Mapping[str, Any]) -> str:
+    return _required_str(_required_mapping(seed, "frontier"), "frontier_role")
+
+
+def _frontier_identity(seed: Mapping[str, Any]) -> tuple[str, str]:
+    return (_required_str(seed, "seed_id"), _required_str(seed, "source_uri"))
+
+
+def _rotating_frontier_selection(
+    frontier: Sequence[Mapping[str, Any]],
+    limit: int,
+    *,
+    rotation_key: str,
+) -> set[tuple[str, str]]:
+    if limit <= 0:
+        return set()
+    items = list(frontier)
+    if limit >= len(items):
+        return {_frontier_identity(seed) for seed in items}
+    offset = int(sha256(rotation_key.encode("utf-8")).hexdigest()[:16], 16) % len(items)
+    selected = [*items[offset:], *items[:offset]][:limit]
+    return {_frontier_identity(seed) for seed in selected}
+
+
+def _frontier_skip_record(
+    seed: Mapping[str, Any],
+    *,
+    skip_reason: str,
+) -> dict[str, Any]:
+    frontier = _required_mapping(seed, "frontier")
+    source_uri = _required_str(seed, "source_uri")
+    return {
+        "frontier_index": _required_positive_int(frontier, "frontier_index"),
+        "frontier_role": _required_str(frontier, "frontier_role"),
+        "parent_seed_id": _required_str(frontier, "parent_seed_id"),
+        "seed_id": _required_str(seed, "seed_id"),
+        "skip_reason": skip_reason,
+        "source_id": _required_str(seed, "source_id"),
+        "source_uri": source_uri,
+        "source_uri_hash": f"sha256:{sha256(source_uri.encode('utf-8')).hexdigest()}",
     }
 
 
@@ -3244,12 +3448,14 @@ def _mandatory_metric_families() -> tuple[str, str, str, str]:
 def _public_docs_seed_registry(
     payload: Mapping[str, Any],
     *,
+    frontier_budget: Mapping[str, Any],
     sitemap_frontier_discoverer: PublicDocsSitemapFrontierDiscoverer | None = None,
 ) -> list[dict[str, Any]]:
     raw_seeds = _required_object_list(payload, "seed_registry")
     seeds = [
         _public_docs_seed(
             seed,
+            frontier_budget=frontier_budget,
             sitemap_frontier_discoverer=sitemap_frontier_discoverer,
         )
         for seed in raw_seeds
@@ -3355,6 +3561,7 @@ def _default_public_docs_seed(
 def _public_docs_seed(
     seed: Mapping[str, Any],
     *,
+    frontier_budget: Mapping[str, Any],
     sitemap_frontier_discoverer: PublicDocsSitemapFrontierDiscoverer | None = None,
 ) -> dict[str, Any]:
     _reject_raw_secrets(seed)
@@ -3367,6 +3574,7 @@ def _public_docs_seed(
         seed,
         source_uri,
         source_type,
+        frontier_budget=frontier_budget,
         sitemap_frontier_discoverer=sitemap_frontier_discoverer,
     )
     refresh_policy = _public_docs_refresh_policy(seed)
@@ -3461,6 +3669,7 @@ def _public_docs_crawl_policy(
     source_uri: str,
     source_type: str,
     *,
+    frontier_budget: Mapping[str, Any],
     sitemap_frontier_discoverer: PublicDocsSitemapFrontierDiscoverer | None = None,
 ) -> dict[str, Any]:
     policy = _required_mapping(seed, "crawl_policy")
@@ -3493,6 +3702,10 @@ def _public_docs_crawl_policy(
         source_type=source_type,
         allowed_domains=allowed_domains,
         deny_patterns=list(deny_patterns),
+        max_optional_frontier_per_seed=_required_frontier_budget_limit(
+            frontier_budget,
+            "max_optional_frontier_per_seed",
+        ),
         sitemap_discovery=sitemap_discovery,
         max_pages=max_pages,
         sitemap_frontier_discoverer=sitemap_frontier_discoverer,
@@ -3516,6 +3729,7 @@ def _public_docs_frontier_urls(
     source_type: str,
     allowed_domains: Sequence[str],
     deny_patterns: Sequence[str],
+    max_optional_frontier_per_seed: int,
     sitemap_discovery: bool,
     max_pages: int,
     sitemap_frontier_discoverer: PublicDocsSitemapFrontierDiscoverer | None = None,
@@ -3532,15 +3746,17 @@ def _public_docs_frontier_urls(
     remaining_slots = max_pages - len(raw_urls) - 1
     if remaining_slots < 0:
         raise ValueError("frontier_urls must leave room for the seed source_uri")
+    discovery_slots = max(0, min(remaining_slots, max_optional_frontier_per_seed - len(raw_urls)))
     discovered_urls: Sequence[str] = ()
-    if sitemap_discovery and sitemap_frontier_discoverer is not None and remaining_slots > 0:
+    if sitemap_discovery and sitemap_frontier_discoverer is not None and discovery_slots > 0:
         discovered_urls = sitemap_frontier_discoverer(
             source_uri,
             policy,
-            remaining_slots,
+            discovery_slots,
         )
         if not all(isinstance(value, str) for value in discovered_urls):
             raise ValueError("sitemap frontier discoverer must return strings")
+        discovered_urls = tuple(discovered_urls)[:discovery_slots]
     candidate_urls = [*raw_urls, *discovered_urls]
     if len(candidate_urls) >= max_pages:
         raise ValueError("frontier_urls must leave room for the seed source_uri")
