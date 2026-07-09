@@ -546,7 +546,7 @@ def test_execute_pipeline_cli_spec_fails_d20_task_after_persisting_failed_batch(
         "dags.serp_eval_contracts.subprocess.run", lambda *_args, **_kwargs: Result()
     )
 
-    with pytest.raises(ValueError, match="public docs seed refresh did not fully index"):
+    with pytest.raises(ValueError, match="public docs seed refresh is not publishable"):
         execute_pipeline_cli_spec(
             {
                 "argv": [
@@ -564,6 +564,51 @@ def test_execute_pipeline_cli_spec_fails_d20_task_after_persisting_failed_batch(
                 "tenant_id": TENANT_ID,
             }
         )
+
+    assert json.loads(output_path.read_text(encoding="utf-8")) == payload
+
+
+def test_execute_pipeline_cli_spec_accepts_optional_frontier_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    input_path = tmp_path / "public-docs-seed-refresh-plan.json"
+    output_path = tmp_path / "public-docs-seed-refresh-result.json"
+    input_path.write_text("{}", encoding="utf-8")
+    payload = _pipeline_seed_refresh_payload(
+        "indexed_with_optional_failures",
+        indexed_count=229,
+        failed_count=16,
+        optional_failed_count=16,
+        required_failed_count=0,
+    )
+
+    class Result:
+        returncode = 0
+        stdout = json.dumps(payload)
+        stderr = ""
+
+    monkeypatch.setattr(
+        "dags.serp_eval_contracts.subprocess.run", lambda *_args, **_kwargs: Result()
+    )
+
+    execute_pipeline_cli_spec(
+        {
+            "argv": [
+                "python",
+                "-m",
+                "adapstory_serp_pipeline.orchestration.seed_refresh_cli",
+            ],
+            "contract_version": "serp-airflow-pipeline-cli-bridge/v1",
+            "dag_id": "serp_web_seed_crawl_refresh",
+            "input_paths": [str(input_path)],
+            "operation_id": "op-1",
+            "status": "ready_for_pipeline_cli_runner",
+            "stdout_path": str(output_path),
+            "task_id": "public_docs_seed_refresh_pipeline",
+            "tenant_id": TENANT_ID,
+        }
+    )
 
     assert json.loads(output_path.read_text(encoding="utf-8")) == payload
 
@@ -2665,12 +2710,16 @@ def _pipeline_seed_refresh_payload(
     indexed_count: int = 1,
     failed_count: int = 0,
     index_mode: str = "live",
+    optional_failed_count: int = 0,
+    required_failed_count: int = 0,
 ) -> dict[str, Any]:
     return {
         "artifact_type": "public_docs_seed_refresh_batch_evidence",
         "batch_evidence": {
             "failed_count": failed_count,
             "indexed_count": indexed_count,
+            "optional_failed_count": optional_failed_count,
+            "required_failed_count": required_failed_count,
             "status": status,
         },
         "index_effect": "live" if index_mode == "live" else "dry-run",

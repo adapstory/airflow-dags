@@ -1150,13 +1150,42 @@ def _raise_for_failed_pipeline_payload(
             "public docs seed refresh requires live index_effect before BC-21 registration: "
             f"index_effect={payload.get('index_effect')}"
         )
-    if status == "indexed":
+    if status in {"indexed", "indexed_with_optional_failures"}:
+        _validate_publishable_public_docs_batch_counters(batch_evidence, status=status)
         return
     raise ValueError(
-        "public docs seed refresh did not fully index: "
+        "public docs seed refresh is not publishable: "
         f"status={status} indexed_count={batch_evidence.get('indexed_count')} "
         f"failed_count={batch_evidence.get('failed_count')}"
     )
+
+
+def _validate_publishable_public_docs_batch_counters(
+    batch_evidence: Mapping[str, Any],
+    *,
+    status: str,
+) -> None:
+    failed_count = _required_non_negative_int(batch_evidence, "failed_count")
+    indexed_count = _required_non_negative_int(batch_evidence, "indexed_count")
+    optional_failed_count = _required_non_negative_int(batch_evidence, "optional_failed_count")
+    required_failed_count = _required_non_negative_int(batch_evidence, "required_failed_count")
+    if indexed_count == 0:
+        raise ValueError("public docs seed refresh has no indexed sources")
+    if status == "indexed" and (
+        failed_count != 0 or optional_failed_count != 0 or required_failed_count != 0
+    ):
+        raise ValueError("public docs indexed seed refresh includes failed sources")
+    if status == "indexed_with_optional_failures" and (
+        required_failed_count != 0 or failed_count != optional_failed_count
+    ):
+        raise ValueError("public docs optional failure counters are inconsistent")
+
+
+def _required_non_negative_int(payload: Mapping[str, Any], field_name: str) -> int:
+    value = payload.get(field_name)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{field_name} must be a non-negative integer")
+    return value
 
 
 def _execute_pipeline_noop_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
