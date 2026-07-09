@@ -1223,13 +1223,15 @@ def _raise_for_failed_pipeline_payload(
             "public docs seed refresh requires live index_effect before BC-21 registration: "
             f"index_effect={payload.get('index_effect')}"
         )
-    if status in {
-        "indexed",
-        "indexed_with_optional_failures",
-        "indexed_with_quarantined_failures",
-    }:
+    if status in {"indexed", "indexed_with_optional_failures"}:
         _validate_publishable_public_docs_batch_counters(batch_evidence, status=status)
         return
+    if status == "indexed_with_quarantined_failures":
+        raise ValueError(
+            "public docs seed refresh has required source failures or quarantined sources: "
+            f"required_failed_count={batch_evidence.get('required_failed_count')} "
+            f"quarantined_count={batch_evidence.get('quarantined_count')}"
+        )
     raise ValueError(
         "public docs seed refresh is not publishable: "
         f"status={status} indexed_count={batch_evidence.get('indexed_count')} "

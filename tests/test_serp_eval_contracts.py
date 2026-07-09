@@ -615,7 +615,7 @@ def test_execute_pipeline_cli_spec_accepts_optional_frontier_failures(
     assert json.loads(output_path.read_text(encoding="utf-8")) == payload
 
 
-def test_execute_pipeline_cli_spec_accepts_quarantined_failures(
+def test_execute_pipeline_cli_spec_rejects_required_quarantined_failures(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -639,23 +639,24 @@ def test_execute_pipeline_cli_spec_accepts_quarantined_failures(
         "dags.serp_eval_contracts.subprocess.run", lambda *_args, **_kwargs: Result()
     )
 
-    execute_pipeline_cli_spec(
-        {
-            "argv": [
-                "python",
-                "-m",
-                "adapstory_serp_pipeline.orchestration.seed_refresh_cli",
-            ],
-            "contract_version": "serp-airflow-pipeline-cli-bridge/v1",
-            "dag_id": "serp_web_seed_crawl_refresh",
-            "input_paths": [str(input_path)],
-            "operation_id": "op-1",
-            "status": "ready_for_pipeline_cli_runner",
-            "stdout_path": str(output_path),
-            "task_id": "public_docs_seed_refresh_pipeline",
-            "tenant_id": TENANT_ID,
-        }
-    )
+    with pytest.raises(ValueError, match="required source failures"):
+        execute_pipeline_cli_spec(
+            {
+                "argv": [
+                    "python",
+                    "-m",
+                    "adapstory_serp_pipeline.orchestration.seed_refresh_cli",
+                ],
+                "contract_version": "serp-airflow-pipeline-cli-bridge/v1",
+                "dag_id": "serp_web_seed_crawl_refresh",
+                "input_paths": [str(input_path)],
+                "operation_id": "op-1",
+                "status": "ready_for_pipeline_cli_runner",
+                "stdout_path": str(output_path),
+                "task_id": "public_docs_seed_refresh_pipeline",
+                "tenant_id": TENANT_ID,
+            }
+        )
 
     assert json.loads(output_path.read_text(encoding="utf-8")) == payload
 
