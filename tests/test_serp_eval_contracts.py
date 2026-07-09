@@ -44,6 +44,7 @@ from dags.serp_eval_contracts import (
     evaluate_tenant_golden_gate,
     execute_gateway_cli_spec,
     execute_pipeline_cli_spec,
+    submit_public_docs_bc21_pipeline_state_artifact,
     write_airflow_plan_artifact,
     write_benchmark_improvement_decision_artifact,
     write_benchmark_improvement_scoreboard_artifact,
@@ -1600,6 +1601,97 @@ def test_d20_writes_public_docs_publish_activation_trigger_conf_from_s3_result(
     assert put_calls[0][3] == "application/json"
 
 
+def test_d20_bc21_pipeline_state_submit_accepts_quarantined_publishable_batch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    conf["bc21_base_url"] = "http://prod-serp-context-platform-svc.env-prod.svc.cluster.local:8080"
+    plan = build_public_docs_seed_refresh_plan(conf)
+    seed_refresh_result_path = Path(
+        plan.payload["artifact_paths"]["public_docs_seed_refresh_result"]
+    )
+    seed_refresh_result_path.parent.mkdir(parents=True, exist_ok=True)
+    batch_evidence = _public_docs_seed_refresh_batch_evidence(
+        status="indexed_with_quarantined_failures"
+    )
+    seed_refresh_result_path.write_text(
+        json.dumps(
+            {
+                "artifact_type": "public_docs_seed_refresh_batch_evidence",
+                "batch_evidence": batch_evidence,
+                "batch_evidence_sha256": sha256(
+                    json.dumps(
+                        batch_evidence,
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ).encode("utf-8")
+                ).hexdigest(),
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    submission_calls: list[dict[str, Any]] = []
+
+    class FakeBC21PipelineState:
+        @staticmethod
+        def build_public_docs_batch_pipeline_state_submission(
+            refresh_result: Mapping[str, Any],
+            *,
+            actor_id: str,
+            catalog_source_id: UUID,
+            started_at: object,
+        ) -> dict[str, Any]:
+            submission_calls.append(
+                {
+                    "actor_id": actor_id,
+                    "catalog_source_id": str(catalog_source_id),
+                    "status": refresh_result["batch_evidence"]["status"],
+                    "started_at": started_at,
+                }
+            )
+            return {"submission": "ok"}
+
+        @staticmethod
+        def submit_pipeline_state_submission(
+            submission: Mapping[str, Any],
+            *,
+            bc21_base_url: str,
+        ) -> dict[str, Any]:
+            return {
+                "bc21_base_url": bc21_base_url,
+                "pipeline_state_submission": submission,
+                "status": "accepted",
+            }
+
+    def fake_import_module(name: str) -> object:
+        if name == "adapstory_serp_pipeline.registry.bc21_pipeline_state":
+            return FakeBC21PipelineState
+        return importlib.import_module(name)
+
+    monkeypatch.setattr("dags.serp_eval_contracts.importlib.import_module", fake_import_module)
+    monkeypatch.setattr(
+        "dags.serp_eval_contracts._ensure_public_docs_catalog_source",
+        lambda _plan, *, bc21_base_url: "018f5e13-2d73-7a77-a052-8d1bcbf96599",
+    )
+
+    receipt_artifact = submit_public_docs_bc21_pipeline_state_artifact(plan.to_canonical_json())
+
+    assert submission_calls == [
+        {
+            "actor_id": "airflow-serp-public-docs-refresh",
+            "catalog_source_id": "018f5e13-2d73-7a77-a052-8d1bcbf96599",
+            "status": "indexed_with_quarantined_failures",
+            "started_at": submission_calls[0]["started_at"],
+        }
+    ]
+    assert receipt_artifact["payload"]["status"] == "accepted"
+    assert Path(receipt_artifact["artifactPath"]).exists()
+
+
 def test_d20_default_conf_rejects_unsafe_env_bc21_base_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3109,6 +3201,52 @@ def _write_public_docs_seed_refresh_result(
         ),
         encoding="utf-8",
     )
+
+
+def _public_docs_seed_refresh_batch_evidence(*, status: str) -> dict[str, object]:
+    quarantined_failure = status == "indexed_with_quarantined_failures"
+    source_results: list[dict[str, object]] = [
+        {
+            "chunk_ids": ["chunk-k3s-docs"],
+            "embedding_ids": ["embedding-k3s-docs"],
+            "metadata": {"chunk_count": 1, "embedding_count": 1},
+            "pipeline_evidence_sha256": "1" * 64,
+            "pipeline_operation_id": "public-docs-seed-refresh-test",
+            "pipeline_run_id": "018f5e13-2d73-7a77-a052-8d1bcbf96540",
+            "pipeline_status": "indexed",
+            "post_index_state": "activation_pending",
+            "seed_id": "k3s-docs",
+        }
+    ]
+    if quarantined_failure:
+        source_results.append(
+            {
+                "chunk_ids": [],
+                "embedding_ids": [],
+                "failure_code": "TimeoutError",
+                "failure_message": "timed out",
+                "metadata": {},
+                "pipeline_status": "quarantined",
+                "seed_id": "redis-docs",
+            }
+        )
+    return {
+        "batch_version": "2026.07.1",
+        "completed_at": "2026-07-08T21:00:00Z",
+        "failed_count": 1 if quarantined_failure else 0,
+        "indexed_count": 1,
+        "indexed_run_id": "018f5e13-2d73-7a77-a052-8d1bcbf96542",
+        "operation_id": "public-docs-seed-refresh-test",
+        "optional_failed_count": 0,
+        "pack_id": PACK_ID,
+        "pack_version_id": PACK_VERSION_ID,
+        "quarantined_count": 1 if quarantined_failure else 0,
+        "required_failed_count": 1 if quarantined_failure else 0,
+        "seed_registry_sha256": "a" * 64,
+        "source_results": source_results,
+        "status": status,
+        "tenant_id": TENANT_ID,
+    }
 
 
 def _public_docs_seed(

@@ -914,8 +914,14 @@ def submit_public_docs_bc21_pipeline_state_artifact(
         "public_docs_seed_refresh_result",
     )
     batch_evidence = _required_mapping(refresh_result, "batch_evidence")
-    if _required_str(batch_evidence, "status") != "indexed":
-        raise ValueError("public docs seed refresh must be indexed before BC-21 registration")
+    status = _required_str(batch_evidence, "status")
+    if status not in {
+        "indexed",
+        "indexed_with_optional_failures",
+        "indexed_with_quarantined_failures",
+    }:
+        raise ValueError("public docs seed refresh must be publishable before BC-21 registration")
+    _validate_publishable_public_docs_batch_counters(batch_evidence, status=status)
     catalog_source_id = _ensure_public_docs_catalog_source(plan, bc21_base_url=bc21_base_url)
     submission = bc21_pipeline_state.build_public_docs_batch_pipeline_state_submission(
         refresh_result,
