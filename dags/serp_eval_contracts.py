@@ -1987,23 +1987,28 @@ def _public_docs_pack_policy_inputs(
     plan: Mapping[str, Any],
     batch_evidence: Mapping[str, Any],
 ) -> dict[str, str]:
-    indexed_seed_ids = {
-        _required_str(source, "seed_id")
+    indexed_sources = [
+        source
         for source in _required_object_list(batch_evidence, "source_results")
         if _required_str(source, "pipeline_status") == "indexed"
-    }
-    if not indexed_seed_ids:
+    ]
+    if not indexed_sources:
         raise ValueError("public docs policy inputs require indexed source evidence")
     seed_registry = {
         _required_str(seed, "seed_id"): seed
         for seed in _required_object_list(plan, "seed_registry")
     }
-    missing_seed_ids = sorted(
-        seed_id for seed_id in indexed_seed_ids if seed_id not in seed_registry
-    )
+    indexed_seed_by_id: dict[str, Mapping[str, Any]] = {}
+    missing_seed_ids: list[str] = []
+    for source in indexed_sources:
+        seed = _public_docs_registry_seed_for_indexed_source(source, seed_registry)
+        if seed is None:
+            missing_seed_ids.append(_required_str(source, "seed_id"))
+            continue
+        indexed_seed_by_id[_required_str(seed, "seed_id")] = seed
     if missing_seed_ids:
         raise ValueError("public docs policy inputs require seed registry coverage")
-    indexed_seeds = [seed_registry[seed_id] for seed_id in sorted(indexed_seed_ids)]
+    indexed_seeds = [indexed_seed_by_id[seed_id] for seed_id in sorted(indexed_seed_by_id)]
     data_class = _most_restrictive_public_docs_data_class(
         _required_str(seed, "data_class") for seed in indexed_seeds
     )
@@ -2026,6 +2031,26 @@ def _public_docs_pack_policy_inputs(
         "policy_trust_state": trust_state,
         "policy_version": "source-approval@2026.07.1",
     }
+
+
+def _public_docs_registry_seed_for_indexed_source(
+    source: Mapping[str, Any],
+    seed_registry: Mapping[str, Mapping[str, Any]],
+) -> Mapping[str, Any] | None:
+    seed_id = _required_str(source, "seed_id")
+    seed = seed_registry.get(seed_id)
+    if seed is not None:
+        return seed
+    metadata = source.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return None
+    frontier = metadata.get("frontier")
+    if not isinstance(frontier, Mapping):
+        return None
+    parent_seed_id = frontier.get("parent_seed_id")
+    if not isinstance(parent_seed_id, str) or not parent_seed_id:
+        return None
+    return seed_registry.get(parent_seed_id)
 
 
 def _public_docs_pack_policy_source_type(seeds: Sequence[Mapping[str, Any]]) -> str:

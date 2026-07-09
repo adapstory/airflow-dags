@@ -1567,6 +1567,72 @@ def test_d20_trigger_conf_includes_bc21_base_url_from_env(
     )
 
 
+def test_d20_trigger_conf_derives_policy_from_frontier_parent_seed(
+    tmp_path: Path,
+) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    plan = build_public_docs_seed_refresh_plan(conf)
+    seed_refresh_result_path = Path(
+        plan.payload["artifact_paths"]["public_docs_seed_refresh_result"]
+    )
+    seed_refresh_result_path.parent.mkdir(parents=True, exist_ok=True)
+    batch_evidence = _public_docs_seed_refresh_batch_evidence(status="indexed")
+    cast(list[dict[str, object]], batch_evidence["source_results"]).append(
+        {
+            "chunk_ids": ["chunk-k3s-frontier"],
+            "embedding_ids": ["embedding-k3s-frontier"],
+            "metadata": {
+                "chunk_count": 1,
+                "embedding_count": 1,
+                "frontier": {
+                    "frontier_role": "sitemap-frontier",
+                    "parent_seed_id": "k3s-docs",
+                    "source_uri_hash": "sha256:" + "1" * 64,
+                },
+            },
+            "pipeline_evidence_sha256": "2" * 64,
+            "pipeline_operation_id": "public-docs-frontier-refresh-test",
+            "pipeline_run_id": "018f5e13-2d73-7a77-a052-8d1bcbf96543",
+            "pipeline_status": "indexed",
+            "post_index_state": "activation_pending",
+            "seed_id": "k3s-docs--111111111111",
+        }
+    )
+    seed_refresh_result_path.write_text(
+        json.dumps(
+            {
+                "artifact_type": "public_docs_seed_refresh_batch_evidence",
+                "batch_evidence": batch_evidence,
+                "batch_evidence_sha256": sha256(
+                    json.dumps(
+                        batch_evidence,
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ).encode("utf-8")
+                ).hexdigest(),
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    _write_public_docs_bc21_pipeline_state_receipt(
+        Path(plan.payload["artifact_paths"]["public_docs_bc21_pipeline_state_receipt"])
+    )
+
+    trigger_artifact = write_public_docs_publish_activation_trigger_conf_artifact(
+        plan.to_canonical_json()
+    )
+
+    target_conf = trigger_artifact["payload"]["target_dag_run_conf"]
+    assert target_conf["policy_source_type"] == "website"
+    assert target_conf["policy_data_class"] == "PUBLIC"
+    assert target_conf["policy_license_obligation_state"] == "public_share_allowed"
+    assert target_conf["policy_trust_state"] == "trusted"
+    assert target_conf["policy_freshness_state"] == "pending"
+
+
 def test_d20_writes_public_docs_publish_activation_trigger_conf_from_s3_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
