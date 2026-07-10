@@ -224,7 +224,7 @@ def _bounded_int(policy: Mapping[str, Any], key: str, lower: int, upper: int) ->
 def _sitemap_urls(seed_uri: str, robot_parser: RobotFileParser) -> list[str]:
     return [
         _canonical_url(value)
-        for value in (robot_parser.site_maps() or [urljoin(seed_uri, "/sitemap.xml")])
+        for value in (robot_parser.site_maps() or [urljoin(seed_uri, "sitemap.xml")])
         if value
     ]
 
@@ -307,7 +307,9 @@ class _LinkParser(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.links: list[str] = []
 
-    def handle_starttag(self, _tag: str, attrs: list[tuple[str, str | None]]) -> None:
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() not in {"a", "area"}:
+            return
         for key, value in attrs:
             if (
                 key.lower() == "href"
@@ -432,8 +434,6 @@ def _canonical_url(url: str) -> str:
     without_fragment, _ = urldefrag(url)
     parsed = urlparse(without_fragment)
     path = parsed.path or "/"
-    if path != "/" and path.endswith("/"):
-        path = path.rstrip("/")
     return urlunparse(
         (parsed.scheme.lower(), (parsed.hostname or "").lower(), path, "", parsed.query, "")
     )

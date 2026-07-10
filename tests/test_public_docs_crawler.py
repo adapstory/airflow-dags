@@ -205,6 +205,51 @@ def test_crawler_records_missing_robots_as_implicit_allow() -> None:
     assert evidence["changed_urls"] == [root]
 
 
+def test_crawler_preserves_directory_seed_base_and_ignores_non_navigation_hrefs() -> None:
+    root = "https://docs.example.com/latest/"
+    sitemap = "https://docs.example.com/latest/sitemap.xml"
+    guide = "https://docs.example.com/latest/guide"
+    static_asset = "https://docs.example.com/latest/site.css"
+    fetcher = FakeFetcher(
+        {
+            "https://docs.example.com/robots.txt": CrawlResponse(404, {}, b""),
+            sitemap: CrawlResponse(404, {}, b""),
+            root: CrawlResponse(
+                200,
+                {"content-type": "text/html"},
+                b'<link rel="stylesheet" href="site.css"><a href="guide">guide</a>',
+            ),
+            guide: CrawlResponse(200, {"content-type": "text/html"}, b"guide"),
+        },
+        [],
+    )
+
+    evidence = crawl_public_docs(
+        seed_uri=root,
+        crawl_policy={
+            "allowed_domains": ["docs.example.com"],
+            "deny_patterns": [],
+            "max_depth": 1,
+            "max_pages": 5,
+            "respect_robots_txt": True,
+            "sitemap_discovery": True,
+            "user_agent": "serp-test/1",
+        },
+        previous_state={},
+        fetcher=fetcher,
+    )
+
+    assert evidence["status"] == "completed"
+    assert evidence["changed_urls"] == [root, guide]
+    assert static_asset not in [url for url, _ in fetcher.requests]
+    assert [url for url, _ in fetcher.requests] == [
+        "https://docs.example.com/robots.txt",
+        sitemap,
+        root,
+        guide,
+    ]
+
+
 def test_crawler_quarantines_a_recoverable_page_failure_without_tombstoning_state() -> None:
     root = "https://docs.example.com/"
     protected = "https://docs.example.com/protected"
