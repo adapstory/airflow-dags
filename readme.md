@@ -127,6 +127,9 @@ SERP eval DAG contracts:
   discovered, state-tracked, or tombstoned. Discovery uses the bounded
   `ADAPSTORY_SERP_PUBLIC_DOCS_CRAWLER_WORKERS` pool (default `6`, maximum
   `16`) and preserves stable seed output order for reproducible evidence.
+  The last D5-committed page state is supplied to the crawler before every
+  discovery pass, so ETag, Last-Modified, content-hash, deletion, and tombstone
+  decisions are evaluated against the active pack rather than an empty cache.
   Website seeds with approved `frontier_urls` are expanded into deterministic
   per-page `source_fetch_requests` before the packaged pipeline CLI runs, so
   D20 evidence records the exact pages selected for fetch/parse/chunk/embed/

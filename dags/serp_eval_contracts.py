@@ -4935,8 +4935,15 @@ def _public_docs_crawl_policy(
             raise ValueError("source_uri host must be in allowed_domains")
         if _public_docs_url_matches_deny_patterns(source_uri, deny_patterns):
             raise ValueError("source_uri must not match deny_patterns")
+    freshness_state = seed.get("freshness_state")
+    previous_state = (
+        freshness_state.get("page_state", {}) if isinstance(freshness_state, Mapping) else {}
+    )
+    if not isinstance(previous_state, Mapping):
+        raise ValueError("freshness_state.page_state must be an object")
+    crawler_policy = {**policy, "previous_state": dict(previous_state)}
     frontier_urls, crawl_evidence = _public_docs_frontier_urls(
-        policy,
+        crawler_policy,
         source_uri=source_uri,
         source_type=source_type,
         allowed_domains=allowed_domains,
@@ -4945,12 +4952,6 @@ def _public_docs_crawl_policy(
         max_pages=max_pages,
         sitemap_frontier_discoverer=sitemap_frontier_discoverer,
     )
-    freshness_state = seed.get("freshness_state")
-    previous_state = (
-        freshness_state.get("page_state", {}) if isinstance(freshness_state, Mapping) else {}
-    )
-    if not isinstance(previous_state, Mapping):
-        raise ValueError("freshness_state.page_state must be an object")
     return {
         "allowed_domains": allowed_domains,
         "deny_patterns": list(deny_patterns),

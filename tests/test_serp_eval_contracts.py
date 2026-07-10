@@ -240,6 +240,36 @@ def test_public_docs_seed_refresh_plan_runs_crawler_discovery_with_bounded_concu
     assert plan.payload["crawler_discovery_workers"] == 2
 
 
+def test_public_docs_seed_refresh_passes_committed_page_state_to_live_crawler(
+    tmp_path: Path,
+) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    prior_page_state = {
+        "https://docs.k3s.io/": {
+            "content_hash": "a" * 64,
+            "etag": '"k3s-v1"',
+            "http_status": 200,
+            "last_modified": "Wed, 08 Jul 2026 12:00:00 GMT",
+            "status": "active",
+        }
+    }
+    conf["seed_registry"][0]["freshness_state"] = {
+        "page_state": prior_page_state,
+        "status": "indexed",
+    }
+    observed_previous_states: list[Mapping[str, Any]] = []
+
+    def discover(source_uri: str, policy: Mapping[str, Any], _max_urls: int) -> list[str]:
+        if source_uri == "https://docs.k3s.io/":
+            observed_previous_states.append(policy["previous_state"])
+        return []
+
+    build_public_docs_seed_refresh_plan(conf, sitemap_frontier_discoverer=discover)
+
+    assert observed_previous_states == [prior_page_state]
+
+
 def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:
     plan = build_nightly_regression_plan(_nightly_conf())
     repeated = build_nightly_regression_plan(json.loads(plan.to_canonical_json()))
