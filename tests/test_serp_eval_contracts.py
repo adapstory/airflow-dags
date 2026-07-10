@@ -7,6 +7,7 @@ import json
 import sys
 import types
 from collections.abc import Mapping
+from email.message import Message
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, cast
@@ -84,17 +85,19 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 def test_public_docs_crawler_preserves_http_status_when_error_body_times_out(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class TimedOutErrorBody:
-        def read(self, _size: int) -> bytes:
+    class TimedOutErrorBody(io.BytesIO):
+        def read(self, _size: int = -1) -> bytes:
             raise TimeoutError("error body timed out")
 
     def fake_urlopen(_request: object, *, timeout: int) -> object:
         assert timeout > 0
+        response_headers = Message()
+        response_headers["Content-Type"] = "text/plain"
         raise HTTPError(
             "https://docs.example.com/robots.txt",
             404,
             "Not Found",
-            {"Content-Type": "text/plain"},
+            response_headers,
             TimedOutErrorBody(),
         )
 
@@ -3582,11 +3585,17 @@ def test_serp_public_docs_dag_dispatches_d5_natively_and_waits_for_completion() 
     )
     values = {keyword.arg: keyword.value for keyword in trigger_call.keywords}
 
-    assert values["task_id"].value == "trigger_public_docs_d5_publish_activation"
-    assert values["trigger_dag_id"].value == "serp_publish_signed_pack"
-    assert values["wait_for_completion"].value is True
-    assert values["skip_when_already_exists"].value is True
-    assert values["fail_when_dag_is_paused"].value is True
+    expected_values = {
+        "task_id": "trigger_public_docs_d5_publish_activation",
+        "trigger_dag_id": "serp_publish_signed_pack",
+        "wait_for_completion": True,
+        "skip_when_already_exists": True,
+        "fail_when_dag_is_paused": True,
+    }
+    for name, expected in expected_values.items():
+        value = values[name]
+        assert isinstance(value, ast.Constant)
+        assert value.value == expected
 
 
 def test_prepare_public_docs_d5_dispatch_returns_only_validated_ready_conf(
