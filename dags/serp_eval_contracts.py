@@ -5046,9 +5046,13 @@ def discover_public_docs_crawler_frontier(
     previous_state = crawl_policy.get("previous_state", {})
     if not isinstance(previous_state, Mapping):
         raise ValueError("crawl_policy.previous_state must be an object")
+    bounded_crawl_policy = dict(crawl_policy)
+    configured_max_pages = bounded_crawl_policy.get("max_pages")
+    if isinstance(configured_max_pages, int) and not isinstance(configured_max_pages, bool):
+        bounded_crawl_policy["max_pages"] = min(configured_max_pages, max_urls + 1)
     evidence = crawl_public_docs(
         seed_uri=source_uri,
-        crawl_policy=crawl_policy,
+        crawl_policy=bounded_crawl_policy,
         previous_state=previous_state,
         fetcher=_fetch_public_docs_crawler_response,
     )

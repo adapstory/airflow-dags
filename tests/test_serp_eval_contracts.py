@@ -42,6 +42,7 @@ from dags.serp_eval_contracts import (
     build_tenant_golden_regression_plan,
     build_tenant_golden_runner_cli_spec,
     default_public_docs_seed_refresh_conf,
+    discover_public_docs_crawler_frontier,
     dispatch_public_docs_seed_refresh_handoff,
     evaluate_nightly_regression_gate,
     evaluate_tenant_golden_gate,
@@ -166,6 +167,47 @@ def test_public_docs_crawler_uses_configured_source_proxy(
             "https": "http://forward-proxy.forward-proxy.svc.cluster.local:3128",
         }
     ]
+
+
+def test_public_docs_crawler_discovery_caps_crawl_before_fetching_optional_frontier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_policies: list[dict[str, object]] = []
+
+    def fake_crawl_public_docs(**kwargs: object) -> dict[str, object]:
+        observed_policies.append(dict(cast(Mapping[str, object], kwargs["crawl_policy"])))
+        return {
+            "changed_urls": [
+                "https://docs.example.com/guide-a",
+                "https://docs.example.com/guide-b",
+            ],
+            "status": "completed",
+        }
+
+    monkeypatch.setattr("dags.serp_eval_contracts.crawl_public_docs", fake_crawl_public_docs)
+    crawl_policy = {
+        "allowed_domains": ["docs.example.com"],
+        "max_depth": 2,
+        "max_pages": 25,
+        "respect_robots_txt": True,
+        "user_agent": "serp-test/1",
+    }
+
+    result = discover_public_docs_crawler_frontier(
+        "https://docs.example.com/", crawl_policy, max_urls=4
+    )
+
+    assert result["urls"] == [
+        "https://docs.example.com/guide-a",
+        "https://docs.example.com/guide-b",
+    ]
+    assert observed_policies == [
+        {
+            **crawl_policy,
+            "max_pages": 5,
+        }
+    ]
+    assert crawl_policy["max_pages"] == 25
 
 
 def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:
