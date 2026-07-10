@@ -112,6 +112,62 @@ def test_public_docs_crawler_preserves_http_status_when_error_body_times_out(
     assert response.body == b""
 
 
+def test_public_docs_crawler_uses_configured_source_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_proxy_urls: list[dict[str, str]] = []
+
+    class Response:
+        def __init__(self) -> None:
+            self.status = 200
+            self.headers = {"Content-Type": "text/html"}
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self, _size: int) -> bytes:
+            return b"<html>proxied</html>"
+
+    class Opener:
+        def open(self, _request: object, *, timeout: int) -> Response:
+            assert timeout > 0
+            return Response()
+
+    class FakeProxyHandler:
+        def __init__(self, proxy_urls: Mapping[str, str]) -> None:
+            captured_proxy_urls.append(dict(proxy_urls))
+
+    def fake_build_opener(_proxy_handler: object) -> Opener:
+        return Opener()
+
+    monkeypatch.setenv(
+        "ADAPSTORY_SERP_SOURCE_PROXY_URL",
+        "http://forward-proxy.forward-proxy.svc.cluster.local:3128",
+    )
+    monkeypatch.setattr(
+        "dags.serp_eval_contracts.urlopen",
+        lambda *_args, **_kwargs: pytest.fail("crawler bypassed configured proxy"),
+    )
+    monkeypatch.setattr("dags.serp_eval_contracts.ProxyHandler", FakeProxyHandler)
+    monkeypatch.setattr("dags.serp_eval_contracts.build_opener", fake_build_opener)
+
+    response = _fetch_public_docs_crawler_response(
+        "https://cert-manager.io/docs", {"User-Agent": "serp-test/1"}
+    )
+
+    assert response.status_code == 200
+    assert response.body == b"<html>proxied</html>"
+    assert captured_proxy_urls == [
+        {
+            "http": "http://forward-proxy.forward-proxy.svc.cluster.local:3128",
+            "https": "http://forward-proxy.forward-proxy.svc.cluster.local:3128",
+        }
+    ]
+
+
 def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:
     plan = build_nightly_regression_plan(_nightly_conf())
     repeated = build_nightly_regression_plan(json.loads(plan.to_canonical_json()))

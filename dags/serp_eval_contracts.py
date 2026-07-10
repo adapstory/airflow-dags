@@ -19,7 +19,7 @@ from time import perf_counter, sleep
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener, urlopen
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from dags.public_docs_crawler import CrawlResponse, crawl_public_docs
@@ -92,6 +92,7 @@ _PUBLIC_DOCS_EMBEDDING_MODE_ENV = "ADAPSTORY_SERP_PUBLIC_DOCS_EMBEDDING_MODE"
 _PUBLIC_DOCS_QDRANT_COLLECTION_ENV = "ADAPSTORY_SERP_PUBLIC_DOCS_QDRANT_COLLECTION"
 _PUBLIC_DOCS_OPENSEARCH_INDEX_ENV = "ADAPSTORY_SERP_PUBLIC_DOCS_OPENSEARCH_INDEX"
 _PUBLIC_DOCS_NEO4J_DATABASE_ENV = "ADAPSTORY_SERP_PUBLIC_DOCS_NEO4J_DATABASE"
+_PUBLIC_DOCS_SOURCE_PROXY_URL_ENV = "ADAPSTORY_SERP_SOURCE_PROXY_URL"
 _BC21_BASE_URL_ENV = "ADAPSTORY_SERP_BC21_BASE_URL"
 _PUBLIC_DOCS_DEFAULT_QDRANT_COLLECTION = "serp_vectors_dev"
 _PUBLIC_DOCS_DEFAULT_OPENSEARCH_INDEX = "serp_lexical_dev"
@@ -5074,7 +5075,10 @@ def _fetch_public_docs_crawler_response(
         headers={"Accept": "text/html,application/xml,text/plain,*/*", **dict(headers)},
     )
     try:
-        with urlopen(request, timeout=_PUBLIC_DOCS_SITEMAP_FETCH_TIMEOUT_SECONDS) as response:
+        with _open_public_docs_crawler_request(
+            request,
+            timeout=_PUBLIC_DOCS_SITEMAP_FETCH_TIMEOUT_SECONDS,
+        ) as response:
             return CrawlResponse(
                 status_code=int(response.status),
                 headers={str(key): str(value) for key, value in response.headers.items()},
@@ -5092,6 +5096,30 @@ def _fetch_public_docs_crawler_response(
         )
     except (URLError, OSError, TimeoutError):
         return CrawlResponse(status_code=599, headers={}, body=b"")
+
+
+def _open_public_docs_crawler_request(
+    request: Request,
+    *,
+    timeout: int,
+) -> Any:
+    proxy_url = _public_docs_source_proxy_url()
+    if proxy_url is None:
+        return urlopen(request, timeout=timeout)
+    opener = build_opener(ProxyHandler({"http": proxy_url, "https": proxy_url}))
+    return opener.open(request, timeout=timeout)
+
+
+def _public_docs_source_proxy_url() -> str | None:
+    raw_value = os.environ.get(_PUBLIC_DOCS_SOURCE_PROXY_URL_ENV, "").strip()
+    if not raw_value:
+        return None
+    parsed = urlparse(raw_value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError(f"{_PUBLIC_DOCS_SOURCE_PROXY_URL_ENV} must be an HTTP(S) proxy URL")
+    if parsed.username or parsed.password:
+        raise ValueError(f"{_PUBLIC_DOCS_SOURCE_PROXY_URL_ENV} must not contain proxy credentials")
+    return raw_value
 
 
 def _post_json(
