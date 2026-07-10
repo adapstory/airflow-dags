@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from airflow.exceptions import AirflowException
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
+from airflow.utils.trigger_rule import TriggerRule
 
 from dags.serp_eval_contracts import (
     build_public_docs_publish_activation_cli_spec,
@@ -16,6 +18,7 @@ from dags.serp_eval_contracts import (
     write_airflow_plan_artifact,
     write_public_docs_coverage_proof_artifact,
     write_public_docs_crawl_state_artifact,
+    write_public_docs_post_activation_rollback_artifact,
     write_public_docs_retrieval_golden_artifact,
     write_public_docs_search_serve_smoke_artifact,
 )
@@ -25,6 +28,16 @@ def validate_publish_signed_pack_plan(**context: Any) -> str:
     dag_run = context.get("dag_run")
     conf = getattr(dag_run, "conf", None) or {}
     return write_airflow_plan_artifact(build_public_docs_publish_activation_plan(conf))
+
+
+def rollback_public_docs_post_activation_failure(plan_json: dict[str, Any] | str) -> None:
+    """Compensate a failed post-activation check without converting D5 to success."""
+
+    artifact = write_public_docs_post_activation_rollback_artifact(plan_json)
+    raise AirflowException(
+        "D5 post-activation validation failed; automatic rollback completed: "
+        + str(artifact["artifactPath"])
+    )
 
 
 default_args = {
@@ -92,6 +105,16 @@ run_retrieval_golden = PythonOperator(
     dag=dag,
 )
 
+rollback_post_activation_failure = PythonOperator(
+    task_id="rollback_public_docs_post_activation_failure",
+    python_callable=rollback_public_docs_post_activation_failure,
+    op_args=["{{ ti.xcom_pull(task_ids='validate_publish_signed_pack_plan') }}"],
+    retries=2,
+    retry_delay=timedelta(seconds=30),
+    trigger_rule=TriggerRule.ONE_FAILED,
+    dag=dag,
+)
+
 write_coverage_proof = PythonOperator(
     task_id="write_public_docs_coverage_proof",
     python_callable=write_public_docs_coverage_proof_artifact,
@@ -142,3 +165,8 @@ notify_governance = PythonOperator(
     >> cleanup_retired_pack_versions
     >> notify_governance
 )
+
+# The compensation task has both validation steps as direct parents: Airflow
+# evaluates ONE_FAILED only across direct upstream tasks.
+verify_search_serve >> rollback_post_activation_failure
+run_retrieval_golden >> rollback_post_activation_failure

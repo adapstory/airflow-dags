@@ -584,6 +584,10 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
                     "public-docs-retrieval-golden.json",
                 ),
                 (
+                    "public_docs_post_activation_rollback",
+                    "public-docs-post-activation-rollback.json",
+                ),
+                (
                     "public_docs_coverage_proof",
                     "public-docs-coverage-proof.json",
                 ),
@@ -639,6 +643,7 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
                 "submit_publish_activation_to_bc21",
                 "verify_public_docs_search_serve",
                 "run_public_docs_retrieval_golden",
+                "rollback_public_docs_post_activation_failure",
                 "write_public_docs_coverage_proof",
                 "commit_public_docs_crawl_state",
                 "build_retired_public_docs_pack_cleanup",
@@ -1374,6 +1379,135 @@ def write_public_docs_retrieval_golden_artifact(
     )
 
 
+def write_public_docs_post_activation_rollback_artifact(
+    plan_json: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    """Restore the directly preceding active pack after a D5 serve-validation failure.
+
+    The rollback is intentionally constrained to the predecessor captured by D20;
+    neither the scheduler nor an operator can select an arbitrary historical pack.
+    The caller must fail the DAG after this durable artifact is written so a
+    successful compensation never masks the original validation failure.
+    """
+
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != "serp_publish_signed_pack":
+        raise ValueError("plan dag_id does not match public docs post-activation rollback")
+    artifact_paths = _required_artifact_paths(
+        plan,
+        (
+            "public_docs_publish_activation_receipt",
+            "public_docs_post_activation_rollback",
+        ),
+    )
+    previous_pack_version_id = _optional_previous_active_pack_version_id(plan)
+    if previous_pack_version_id is None:
+        raise ValueError(
+            "post-activation rollback requires a previous_active_pack_version_id; "
+            "a first activation has no safe restore target"
+        )
+    failed_pack_version_id = _required_str(plan, "pack_version_id")
+    activation_receipt_path = _artifact_path(
+        "public_docs_publish_activation_receipt",
+        artifact_paths["public_docs_publish_activation_receipt"],
+    )
+    activation_receipt = _read_json_file(
+        activation_receipt_path,
+        "public_docs_publish_activation_receipt",
+    )
+    if _required_str(activation_receipt, "active_pack_version_id") != failed_pack_version_id:
+        raise ValueError("post-activation rollback requires the candidate pack to be active")
+    _assert_equal("tenant_id", _required_str(plan, "tenant_id"), activation_receipt)
+    _assert_equal("pack_id", _required_str(plan, "pack_id"), activation_receipt)
+
+    rollback_reason_code = "public-docs-d5-post-activation-validation-failed"
+    request_payload = {
+        "failedPackVersionId": failed_pack_version_id,
+        "restoredPackVersionId": previous_pack_version_id,
+        "rollbackReasonCode": rollback_reason_code,
+    }
+    tenant_id = _required_str(plan, "tenant_id")
+    pack_id = _required_str(plan, "pack_id")
+    actor_id = _required_str(plan, "actor_id")
+    idempotency_key = str(
+        uuid5(
+            _PUBLIC_DOCS_NAMESPACE,
+            "\n".join(
+                (
+                    "public-docs-d5-post-activation-rollback/v1",
+                    tenant_id,
+                    pack_id,
+                    _required_str(plan, "operation_id"),
+                    failed_pack_version_id,
+                    previous_pack_version_id,
+                )
+            ),
+        )
+    )
+    fingerprint = "sha256:" + sha256(_canonical_json(request_payload).encode("utf-8")).hexdigest()
+    endpoint = (
+        _required_bc21_base_url(plan).rstrip("/")
+        + f"/api/bc-21/serp/v1/packs/{pack_id}/publish-rollbacks"
+    )
+    response_payload = _bc21_json_request(
+        endpoint,
+        method="POST",
+        body=request_payload,
+        headers={
+            "X-Adapstory-Actor-Id": actor_id,
+            "X-Adapstory-Tenant-Id": tenant_id,
+            "X-Adapstory-Trusted-Actor-Id": actor_id,
+            "X-Adapstory-Trusted-Tenant-Id": tenant_id,
+            "X-Fingerprint": fingerprint,
+            "X-Idempotency-Key": idempotency_key,
+        },
+        error_label="public docs post-activation rollback",
+    )
+    if response_payload is None:
+        raise ValueError("public docs post-activation rollback returned no response")
+    if _required_str(response_payload, "tenantId") != tenant_id:
+        raise ValueError("post-activation rollback tenantId does not match plan")
+    if _required_str(response_payload, "packId") != pack_id:
+        raise ValueError("post-activation rollback packId does not match plan")
+    if _required_str(response_payload, "failedPackVersionId") != failed_pack_version_id:
+        raise ValueError("post-activation rollback failedPackVersionId does not match plan")
+    if _required_str(response_payload, "restoredPackVersionId") != previous_pack_version_id:
+        raise ValueError("post-activation rollback restoredPackVersionId does not match plan")
+    if _required_str(response_payload, "rollbackReasonCode") != rollback_reason_code:
+        raise ValueError("post-activation rollback reason code does not match contract")
+    rollback_run_id = str(_required_uuid(response_payload, "rollbackRunId"))
+
+    payload = {
+        "activation_receipt_path": activation_receipt_path,
+        "artifact_type": "public_docs_post_activation_rollback",
+        "bc21_endpoint": endpoint,
+        "contract_version": _EVAL_CONTRACT_VERSION,
+        "failed_pack_version_id": failed_pack_version_id,
+        "fingerprint": fingerprint,
+        "generated_at": _required_datetime_string(plan, "generated_at"),
+        "idempotency_key": idempotency_key,
+        "operation_id": _required_str(plan, "operation_id"),
+        "request": request_payload,
+        "response": response_payload,
+        "response_sha256": sha256(_canonical_json(response_payload).encode("utf-8")).hexdigest(),
+        "restored_pack_version_id": previous_pack_version_id,
+        "rollback_reason_code": rollback_reason_code,
+        "rollback_run_id": rollback_run_id,
+        "status": "rolled_back_to_previous_active_pack",
+        "tenant_id": tenant_id,
+    }
+    artifact_path = artifact_paths["public_docs_post_activation_rollback"]
+    _write_json_artifact(artifact_path, payload)
+    _emit_public_docs_operational_gauge("post_activation_rollback", 1)
+    return _artifact_result(
+        artifact_path,
+        artifact_type="public_docs_post_activation_rollback",
+        operation_id=_required_str(plan, "operation_id"),
+        payload=payload,
+    )
+
+
 def write_public_docs_coverage_proof_artifact(
     plan_json: Mapping[str, Any] | str,
 ) -> dict[str, Any]:
@@ -1417,6 +1551,7 @@ def write_public_docs_coverage_proof_artifact(
     _write_json_artifact(artifact_path, payload)
     _emit_public_docs_operational_gauge("coverage_ratio", 1)
     _emit_public_docs_operational_gauge("index_consistency", 1)
+    _emit_public_docs_operational_gauge("post_activation_rollback", 0)
     _emit_public_docs_operational_gauge(
         "active_pack_published_timestamp",
         _datetime_value(

@@ -62,6 +62,7 @@ from dags.serp_eval_contracts import (
     write_online_eval_rollup_plan_artifact,
     write_public_docs_coverage_proof_artifact,
     write_public_docs_crawl_state_artifact,
+    write_public_docs_post_activation_rollback_artifact,
     write_public_docs_publish_activation_trigger_conf_artifact,
     write_public_docs_retrieval_golden_artifact,
     write_public_docs_search_serve_smoke_artifact,
@@ -2470,6 +2471,13 @@ def test_public_docs_publish_activation_plan_dispatches_d5_handoff(tmp_path: Pat
                 "public-docs-retrieval-golden.json",
             )
         ),
+        "public_docs_post_activation_rollback": "/".join(
+            (
+                str(tmp_path),
+                plan.payload["operation_id"],
+                "public-docs-post-activation-rollback.json",
+            )
+        ),
         "public_docs_coverage_proof": "/".join(
             (
                 str(tmp_path),
@@ -2500,6 +2508,7 @@ def test_public_docs_publish_activation_plan_dispatches_d5_handoff(tmp_path: Pat
         "submit_publish_activation_to_bc21",
         "verify_public_docs_search_serve",
         "run_public_docs_retrieval_golden",
+        "rollback_public_docs_post_activation_failure",
         "write_public_docs_coverage_proof",
         "commit_public_docs_crawl_state",
         "build_retired_public_docs_pack_cleanup",
@@ -2552,6 +2561,98 @@ def test_public_docs_publish_activation_plan_dispatches_d5_handoff(tmp_path: Pat
     assert submit_spec["argv"][submit_spec["argv"].index("--bc21-base-url") + 1] == (
         "http://serp-context-platform.env-dev.svc.cluster.local"
     )
+
+
+def test_post_activation_failure_rolls_back_to_direct_predecessor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed_refresh_result = tmp_path / "public-docs-seed-refresh-result.json"
+    _write_public_docs_seed_refresh_result(seed_refresh_result)
+    previous_pack_version_id = "018f5e13-2d73-7a77-a052-8d1bcbf96542"
+    conf = _public_docs_publish_activation_conf(str(seed_refresh_result))
+    conf["artifact_root_path"] = str(tmp_path)
+    conf["previous_active_pack_version_id"] = previous_pack_version_id
+    plan = build_public_docs_publish_activation_plan(conf)
+    receipt_path = Path(plan.payload["artifact_paths"]["public_docs_publish_activation_receipt"])
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "active_pack_version_id": PACK_VERSION_ID,
+                "artifact_type": "public_docs_publish_activation_receipt",
+                "pack_id": PACK_ID,
+                "status": "activated",
+                "tenant_id": TENANT_ID,
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_bc21_json_request(
+        url: str,
+        *,
+        method: str,
+        body: Mapping[str, object] | None,
+        headers: Mapping[str, str],
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        calls.append(
+            {"body": dict(body or {}), "headers": dict(headers), "method": method, "url": url}
+        )
+        return {
+            "failedPackVersionId": PACK_VERSION_ID,
+            "packId": PACK_ID,
+            "rollbackReasonCode": "public-docs-d5-post-activation-validation-failed",
+            "rollbackRunId": "018f5e13-2d73-7a77-a052-8d1bcbf96609",
+            "rolledBackAt": "2026-07-08T22:03:00Z",
+            "rolledBackBy": "airflow-serp-public-docs-refresh",
+            "restoredPackVersionId": previous_pack_version_id,
+            "tenantId": TENANT_ID,
+        }
+
+    monkeypatch.setattr("dags.serp_eval_contracts._bc21_json_request", fake_bc21_json_request)
+
+    artifact = write_public_docs_post_activation_rollback_artifact(plan.to_canonical_json())
+
+    assert calls == [
+        {
+            "body": {
+                "failedPackVersionId": PACK_VERSION_ID,
+                "restoredPackVersionId": previous_pack_version_id,
+                "rollbackReasonCode": "public-docs-d5-post-activation-validation-failed",
+            },
+            "headers": {
+                "X-Adapstory-Actor-Id": "airflow-serp-public-docs-refresh",
+                "X-Adapstory-Tenant-Id": TENANT_ID,
+                "X-Adapstory-Trusted-Actor-Id": "airflow-serp-public-docs-refresh",
+                "X-Adapstory-Trusted-Tenant-Id": TENANT_ID,
+                "X-Fingerprint": artifact["payload"]["fingerprint"],
+                "X-Idempotency-Key": artifact["payload"]["idempotency_key"],
+            },
+            "method": "POST",
+            "url": (
+                "http://serp-context-platform.env-dev.svc.cluster.local"
+                f"/api/bc-21/serp/v1/packs/{PACK_ID}/publish-rollbacks"
+            ),
+        }
+    ]
+    assert artifact["artifactType"] == "public_docs_post_activation_rollback"
+    assert artifact["payload"]["status"] == "rolled_back_to_previous_active_pack"
+    assert artifact["payload"]["restored_pack_version_id"] == previous_pack_version_id
+    assert Path(artifact["artifactPath"]).exists()
+
+
+def test_post_activation_failure_fails_closed_without_restore_target(tmp_path: Path) -> None:
+    seed_refresh_result = tmp_path / "public-docs-seed-refresh-result.json"
+    _write_public_docs_seed_refresh_result(seed_refresh_result)
+    conf = _public_docs_publish_activation_conf(str(seed_refresh_result))
+    conf["artifact_root_path"] = str(tmp_path)
+    plan = build_public_docs_publish_activation_plan(conf)
+
+    with pytest.raises(ValueError, match="no safe restore target"):
+        write_public_docs_post_activation_rollback_artifact(plan.to_canonical_json())
 
 
 def test_public_docs_retired_pack_cleanup_runs_only_for_a_previous_active_pack(
@@ -3441,6 +3542,7 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
                 "submit_publish_activation_to_bc21",
                 "verify_public_docs_search_serve",
                 "run_public_docs_retrieval_golden",
+                "rollback_public_docs_post_activation_failure",
                 "write_public_docs_coverage_proof",
                 "commit_public_docs_crawl_state",
                 "build_retired_public_docs_pack_cleanup",
@@ -3598,6 +3700,50 @@ def test_serp_public_docs_dag_dispatches_d5_natively_and_waits_for_completion() 
         assert value.value == expected
 
 
+def test_d5_post_activation_failure_uses_direct_parent_rollback_compensation() -> None:
+    source = (REPO_ROOT / "dags" / "serp_publish_signed_pack.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    rollback_call = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and _matches_call(node, "PythonOperator")
+        and any(
+            keyword.arg == "task_id"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value == "rollback_public_docs_post_activation_failure"
+            for keyword in node.keywords
+        )
+    )
+    values = {keyword.arg: keyword.value for keyword in rollback_call.keywords}
+
+    assert isinstance(values["python_callable"], ast.Name)
+    assert values["python_callable"].id == "rollback_public_docs_post_activation_failure"
+    assert isinstance(values["trigger_rule"], ast.Attribute)
+    assert isinstance(values["trigger_rule"].value, ast.Name)
+    assert values["trigger_rule"].value.id == "TriggerRule"
+    assert values["trigger_rule"].attr == "ONE_FAILED"
+    assert "verify_search_serve >> rollback_post_activation_failure" in source
+    assert "run_retrieval_golden >> rollback_post_activation_failure" in source
+    assert "raise AirflowException(" in source
+
+
+def test_d5_rollback_compensation_preserves_validation_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    module = importlib.import_module("dags.serp_publish_signed_pack")
+    module = importlib.reload(module)
+    monkeypatch.setattr(
+        module,
+        "write_public_docs_post_activation_rollback_artifact",
+        lambda _plan: {"artifactPath": "/tmp/public-docs-post-activation-rollback.json"},
+    )
+
+    with pytest.raises(module.AirflowException, match="automatic rollback completed"):
+        module.rollback_public_docs_post_activation_failure("{}")
+
+
 def test_prepare_public_docs_d5_dispatch_returns_only_validated_ready_conf(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3667,6 +3813,12 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeAirflowSkipException(Exception):
         pass
 
+    class FakeAirflowException(Exception):
+        pass
+
+    class FakeTriggerRule:
+        ONE_FAILED = "one_failed"
+
     class FakeDAG:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
@@ -3696,15 +3848,19 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
             "airflow.providers.standard.operators.trigger_dagrun"
         ),
         "airflow.sdk": types.ModuleType("airflow.sdk"),
+        "airflow.utils": types.ModuleType("airflow.utils"),
+        "airflow.utils.trigger_rule": types.ModuleType("airflow.utils.trigger_rule"),
     }
     cast(
         Any, modules["airflow.providers.standard.operators.python"]
     ).PythonOperator = FakePythonOperator
     cast(Any, modules["airflow.exceptions"]).AirflowSkipException = FakeAirflowSkipException
+    cast(Any, modules["airflow.exceptions"]).AirflowException = FakeAirflowException
     cast(
         Any, modules["airflow.providers.standard.operators.trigger_dagrun"]
     ).TriggerDagRunOperator = FakeTriggerDagRunOperator
     cast(Any, modules["airflow.sdk"]).DAG = FakeDAG
+    cast(Any, modules["airflow.utils.trigger_rule"]).TriggerRule = FakeTriggerRule
     for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)
 
