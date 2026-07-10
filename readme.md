@@ -121,6 +121,12 @@ SERP eval DAG contracts:
   URI, license/distribution state, daily/nightly refresh policy, and a bounded
   crawl policy with robots enforcement, sitemap intent, allowlist, denylist,
   optional governed `frontier_urls`, max depth, max pages, and user agent.
+  Live crawler discovery always traverses the complete per-seed policy window
+  before D20 chooses bounded ingestion work. The `frontier_budget` therefore
+  controls deterministic rotating fetch selection, not what pages can be
+  discovered, state-tracked, or tombstoned. Discovery uses the bounded
+  `ADAPSTORY_SERP_PUBLIC_DOCS_CRAWLER_WORKERS` pool (default `6`, maximum
+  `16`) and preserves stable seed output order for reproducible evidence.
   Website seeds with approved `frontier_urls` are expanded into deterministic
   per-page `source_fetch_requests` before the packaged pipeline CLI runs, so
   D20 evidence records the exact pages selected for fetch/parse/chunk/embed/

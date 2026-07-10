@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from email.message import Message
 from hashlib import sha256
 from pathlib import Path
+from threading import Barrier
 from typing import Any, cast
 from urllib.error import HTTPError
 from urllib.parse import urlparse
@@ -169,18 +170,23 @@ def test_public_docs_crawler_uses_configured_source_proxy(
     ]
 
 
-def test_public_docs_crawler_discovery_caps_crawl_before_fetching_optional_frontier(
+def test_public_docs_crawler_discovery_scans_full_policy_before_bounding_ingestion_frontier(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed_policies: list[dict[str, object]] = []
 
     def fake_crawl_public_docs(**kwargs: object) -> dict[str, object]:
         observed_policies.append(dict(cast(Mapping[str, object], kwargs["crawl_policy"])))
+        urls = [
+            "https://docs.example.com/guide-a",
+            "https://docs.example.com/guide-b",
+            "https://docs.example.com/guide-c",
+            "https://docs.example.com/guide-d",
+            "https://docs.example.com/guide-e",
+        ]
         return {
-            "changed_urls": [
-                "https://docs.example.com/guide-a",
-                "https://docs.example.com/guide-b",
-            ],
+            "changed_urls": urls,
+            "state": {url: {"status": "active"} for url in urls},
             "status": "completed",
         }
 
@@ -200,14 +206,38 @@ def test_public_docs_crawler_discovery_caps_crawl_before_fetching_optional_front
     assert result["urls"] == [
         "https://docs.example.com/guide-a",
         "https://docs.example.com/guide-b",
+        "https://docs.example.com/guide-c",
+        "https://docs.example.com/guide-d",
     ]
-    assert observed_policies == [
-        {
-            **crawl_policy,
-            "max_pages": 5,
-        }
-    ]
+    assert observed_policies == [crawl_policy]
     assert crawl_policy["max_pages"] == 25
+
+
+def test_public_docs_seed_refresh_plan_runs_crawler_discovery_with_bounded_concurrency(
+    tmp_path: Path,
+) -> None:
+    conf = default_public_docs_seed_refresh_conf(
+        generated_at="2026-07-10T12:00:00Z",
+        artifact_root_path=str(tmp_path),
+    )
+    conf["crawler_discovery_workers"] = 2
+    barrier = Barrier(2, timeout=2)
+    synchronized_sources = {
+        "https://pve.proxmox.com/pve-docs/",
+        "https://docs.k3s.io/",
+    }
+
+    def discover(source_uri: str, _policy: Mapping[str, Any], _max_urls: int) -> list[str]:
+        if source_uri in synchronized_sources:
+            barrier.wait()
+        return []
+
+    plan = build_public_docs_seed_refresh_plan(
+        conf,
+        sitemap_frontier_discoverer=discover,
+    )
+
+    assert plan.payload["crawler_discovery_workers"] == 2
 
 
 def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:
@@ -2254,7 +2284,7 @@ def test_public_docs_seed_refresh_expands_sitemap_discovered_frontier_urls(
         if source_uri != "https://docs.k3s.io/":
             return []
         assert policy["sitemap_discovery"] is True
-        assert max_urls == 1
+        assert max_urls == 3
         return ["https://docs.k3s.io/advanced"]
 
     plan = build_public_docs_seed_refresh_plan(conf, sitemap_frontier_discoverer=discover)
@@ -2309,11 +2339,11 @@ def test_public_docs_sitemap_discovery_respects_optional_frontier_budget(
         for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
         if request["seed_id"].startswith("k3s-docs")
     ]
-    assert observed_max_urls == [2]
+    assert observed_max_urls == [conf["seed_registry"][0]["crawl_policy"]["max_pages"] - 1]
     assert [request["source_uri"] for request in website_requests] == [
         "https://docs.k3s.io/",
         "https://docs.k3s.io/quick-start",
-        "https://docs.k3s.io/installation/requirements",
+        "https://docs.k3s.io/advanced",
     ]
     assert (
         sum(
@@ -2325,25 +2355,26 @@ def test_public_docs_sitemap_discovery_respects_optional_frontier_budget(
     )
 
 
-def test_public_docs_seed_refresh_does_not_call_sitemap_discoverer_without_remaining_budget(
+def test_public_docs_seed_refresh_crawls_for_evidence_without_remaining_frontier_capacity(
     tmp_path: Path,
 ) -> None:
     conf = _public_docs_seed_refresh_conf()
     conf["artifact_root_path"] = str(tmp_path)
     conf["seed_registry"][0]["crawl_policy"]["max_pages"] = 3
-    called = False
+    called_sources: list[str] = []
 
     def discover(source_uri: str, policy: Mapping[str, Any], max_urls: int) -> list[str]:
-        nonlocal called
         if source_uri != "https://docs.k3s.io/":
             return []
-        called = True
+        called_sources.append(source_uri)
+        assert policy["max_pages"] == 3
+        assert max_urls == 0
         return ["https://docs.k3s.io/advanced"]
 
     plan = build_public_docs_seed_refresh_plan(conf, sitemap_frontier_discoverer=discover)
     refresh_plan_artifact = write_public_docs_seed_refresh_plan_artifact(plan.to_canonical_json())
 
-    assert called is False
+    assert called_sources == ["https://docs.k3s.io/"]
     assert [
         request["source_uri"]
         for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
