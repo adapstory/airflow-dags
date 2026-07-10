@@ -25,6 +25,8 @@ def test_context_benchmark_dag_is_scheduled_in_cluster_and_never_dispatches_to_g
 
     assert isinstance(keywords["schedule"], ast.Constant)
     assert keywords["schedule"].value == "15 3 * * *"
+    assert isinstance(keywords["is_paused_upon_creation"], ast.Constant)
+    assert keywords["is_paused_upon_creation"].value is False
     assert "workflow_dispatch" not in source
     assert "COMPETITOR_BENCHMARK_URL" not in source
     assert [

@@ -34,6 +34,7 @@ dag = DAG(
     description="In-cluster PublicDocsGolden benchmark with BC-21 and GitHub status evidence",
     schedule="15 3 * * *",
     catchup=False,
+    is_paused_upon_creation=False,
     max_active_runs=1,
     render_template_as_native_obj=True,
     tags=["serp", "public-docs", "benchmark", "bc21"],
