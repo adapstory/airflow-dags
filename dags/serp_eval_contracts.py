@@ -1358,7 +1358,14 @@ def write_public_docs_retrieval_golden_artifact(
         ),
         "public_docs_seed_refresh_plan",
     )
-    cases = _public_docs_retrieval_golden_cases(refresh_plan)
+    refresh_result = _read_json_file(
+        _artifact_path(
+            "public_docs_seed_refresh_result_path",
+            _required_str(plan, "public_docs_seed_refresh_result_path"),
+        ),
+        "public_docs_seed_refresh_result",
+    )
+    cases = _public_docs_retrieval_golden_cases(refresh_plan, refresh_result=refresh_result)
     endpoint = _public_docs_search_serve_base_url(plan) + "/api/serp/search/v1/query"
     observed_cases: list[dict[str, Any]] = []
     latency_seconds: list[float] = []
@@ -2805,37 +2812,59 @@ def _public_docs_search_serve_smoke_request(plan: Mapping[str, Any]) -> dict[str
     }
 
 
-def _public_docs_retrieval_golden_cases(refresh_plan: Mapping[str, Any]) -> list[dict[str, Any]]:
-    seeds = _required_object_list(refresh_plan, "seed_registry")
+def _public_docs_retrieval_golden_cases(
+    refresh_plan: Mapping[str, Any],
+    *,
+    refresh_result: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    registry_seeds = _required_object_list(refresh_plan, "seed_registry")
+    components_by_seed_id = {
+        _required_str(seed, "seed_id"): _required_str(
+            _required_mapping(seed, "inventory_evidence"), "component"
+        )
+        for seed in registry_seeds
+    }
+    coverage_proof = _required_mapping(refresh_result, "coverage_proof")
+    if _required_str(coverage_proof, "coverage_status") != "indexed_pending_publish":
+        raise ValueError("public docs retrieval golden requires indexed pending-publish coverage")
+    indexed_seeds = _required_object_list(coverage_proof, "seeds")
     cases: list[dict[str, Any]] = []
-    for seed in sorted(seeds, key=lambda item: _required_str(item, "seed_id")):
-        component = _required_str(_required_mapping(seed, "inventory_evidence"), "component")
+    for seed in sorted(indexed_seeds, key=lambda item: _required_str(item, "seed_id")):
+        if _required_str(seed, "status") != "indexed":
+            continue
+        if _required_str(seed, "index_status") != "passed":
+            continue
+        seed_id = _required_str(seed, "seed_id")
+        component = components_by_seed_id.get(seed_id)
+        if component is None:
+            raise ValueError("public docs coverage proof seed_id is missing from seed registry")
         source_uri = _required_str(seed, "source_uri")
         cases.append(
             _public_docs_retrieval_golden_case(
-                seed_id=_required_str(seed, "seed_id"),
+                seed_id=seed_id,
                 component=component,
                 source_uri=source_uri,
                 query=f"{component} official documentation overview",
             )
         )
-    for seed in sorted(seeds, key=lambda item: _required_str(item, "seed_id")):
-        component = _required_str(_required_mapping(seed, "inventory_evidence"), "component")
-        raw_frontier_urls = _required_mapping(seed, "crawl_policy").get("frontier_urls", [])
-        if not isinstance(raw_frontier_urls, list) or not all(
-            isinstance(value, str) and value for value in raw_frontier_urls
+        raw_frontier = seed.get("optional_frontier", [])
+        if not isinstance(raw_frontier, list) or not all(
+            isinstance(frontier, Mapping) for frontier in raw_frontier
         ):
-            raise ValueError("crawl_policy.frontier_urls must be a list of non-empty strings")
-        for frontier_url in raw_frontier_urls:
+            raise ValueError("optional_frontier must be a list of objects")
+        indexed_frontier = [
+            frontier for frontier in raw_frontier if frontier.get("status") == "indexed"
+        ]
+        for frontier in sorted(
+            indexed_frontier, key=lambda item: _required_str(item, "source_uri")
+        ):
+            frontier_url = _required_str(frontier, "source_uri")
             cases.append(
                 _public_docs_retrieval_golden_case(
-                    seed_id=_required_str(seed, "seed_id"),
+                    seed_id=seed_id,
                     component=component,
                     source_uri=frontier_url,
-                    query=(
-                        f"{component} documentation "
-                        f"{urlparse(frontier_url).path.rsplit('/', 1)[-1]}"
-                    ),
+                    query=_public_docs_retrieval_golden_query(component, frontier_url),
                 )
             )
     unique_cases: dict[str, dict[str, Any]] = {}
@@ -2844,13 +2873,35 @@ def _public_docs_retrieval_golden_cases(refresh_plan: Mapping[str, Any]) -> list
         if case_id in unique_cases:
             raise ValueError("public docs retrieval golden contains duplicate case_id")
         unique_cases[case_id] = case
-    selected = [unique_cases[case_id] for case_id in sorted(unique_cases)]
+    selected = list(unique_cases.values())
     if len(selected) < _PUBLIC_DOCS_RETRIEVAL_GOLDEN_MIN_CASES:
         raise ValueError(
             "public docs retrieval golden requires at least "
             f"{_PUBLIC_DOCS_RETRIEVAL_GOLDEN_MIN_CASES} governed cases"
         )
     return selected[:_PUBLIC_DOCS_RETRIEVAL_GOLDEN_MIN_CASES]
+
+
+def _public_docs_retrieval_golden_query(component: str, source_uri: str) -> str:
+    parsed = urlparse(source_uri)
+    tokens: list[str] = []
+    for raw_segment in parsed.path.split("/"):
+        segment = raw_segment.strip().removesuffix(".html")
+        if not segment or segment in {
+            "current",
+            "docs",
+            "documentation",
+            "en",
+            "index",
+            "latest",
+            "stable",
+        }:
+            continue
+        tokens.extend(token for token in re.split(r"[-_]+", segment) if token)
+    suffix = " ".join(tokens[:12])
+    if not suffix:
+        return f"{component} official documentation overview"
+    return f"{component} documentation {suffix}"
 
 
 def _public_docs_retrieval_golden_case(
@@ -2891,6 +2942,7 @@ def _public_docs_search_request_for_golden_case(
         **_required_mapping(request, "metadata"),
         "golden_case_expected_source_uri": _required_str(expected, "source_uri_prefix"),
         "golden_case_id": case_id,
+        "source_uri_filter": _required_str(expected, "source_uri_prefix"),
         "surface": "airflow-public-docs-retrieval-golden",
     }
     request["policy_rule_ids_applied"] = ["serp-public-docs-active-pack-retrieval-golden"]

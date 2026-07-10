@@ -18,6 +18,7 @@ from uuid import UUID
 
 import pytest
 
+import dags.serp_eval_contracts as serp_eval_contracts_module
 from dags.serp_eval_contracts import (
     MANDATORY_SERP_BENCHMARK_SUITES,
     SERP_NORMALIZED_GATE_FLOOR,
@@ -3309,6 +3310,54 @@ def test_public_docs_retrieval_golden_runs_thirty_live_contract_cases_with_repla
     assert artifact["payload"]["latency_seconds"]["p95"] <= 2.0
 
 
+def test_public_docs_retrieval_golden_cases_use_indexed_coverage_not_planned_frontier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refresh_plan = build_public_docs_seed_refresh_plan(
+        default_public_docs_seed_refresh_conf(generated_at="2026-07-08T22:00:00Z")
+    ).payload
+    monkeypatch.setattr(
+        serp_eval_contracts_module,
+        "_PUBLIC_DOCS_RETRIEVAL_GOLDEN_MIN_CASES",
+        2,
+    )
+    refresh_result = {
+        "artifact_type": "public_docs_seed_refresh_batch_evidence",
+        "coverage_proof": {
+            "coverage_status": "indexed_pending_publish",
+            "seeds": [
+                {
+                    "index_status": "passed",
+                    "optional_frontier": [
+                        {
+                            "source_uri": "https://docs.k3s.io/quick-start",
+                            "status": "indexed",
+                        },
+                        {
+                            "source_uri": "https://docs.k3s.io/installation/requirements",
+                            "status": "failed",
+                        },
+                    ],
+                    "seed_id": "k3s-docs",
+                    "source_uri": "https://docs.k3s.io/",
+                    "status": "indexed",
+                }
+            ],
+        },
+    }
+
+    cases = serp_eval_contracts_module._public_docs_retrieval_golden_cases(
+        refresh_plan,
+        refresh_result=refresh_result,
+    )
+
+    assert [case["expected"]["source_uri_prefix"] for case in cases] == [
+        "https://docs.k3s.io/",
+        "https://docs.k3s.io/quick-start",
+    ]
+    assert cases[1]["query"] == "K3s documentation quick start"
+
+
 def test_public_docs_publish_activation_plan_accepts_s3_d20_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4498,6 +4547,11 @@ def _write_public_docs_seed_refresh_result(
                         sort_keys=True,
                     ).encode("utf-8")
                 ).hexdigest(),
+                "coverage_proof": _public_docs_indexed_pending_publish_coverage_proof(
+                    tenant_id=tenant_id,
+                    pack_id=pack_id,
+                    pack_version_id=pack_version_id,
+                ),
             },
             sort_keys=True,
         ),
@@ -4574,6 +4628,57 @@ def _public_docs_seed_refresh_batch_evidence(*, status: str) -> dict[str, object
         "source_results": source_results,
         "status": status,
         "tenant_id": TENANT_ID,
+    }
+
+
+def _public_docs_indexed_pending_publish_coverage_proof(
+    *,
+    tenant_id: str = TENANT_ID,
+    pack_id: str = PACK_ID,
+    pack_version_id: str = PACK_VERSION_ID,
+) -> dict[str, object]:
+    seeds: list[dict[str, object]] = []
+    for seed in default_public_docs_seed_refresh_conf(generated_at="2026-07-08T22:00:00Z")[
+        "seed_registry"
+    ]:
+        frontier_urls = cast(list[str], seed["crawl_policy"]["frontier_urls"])
+        seeds.append(
+            {
+                "counts": {
+                    "chunks": 1,
+                    "documents": 1,
+                    "embeddings": 1,
+                    "neo4j": 1,
+                    "opensearch": 1,
+                    "qdrant": 1,
+                    "sections": 1,
+                },
+                "failure": {"code": None, "message": None},
+                "index_status": "passed",
+                "optional_frontier": [
+                    {
+                        "failure_code": None,
+                        "seed_id": f"{seed['seed_id']}--{sha256(url.encode()).hexdigest()[:12]}",
+                        "source_uri": url,
+                        "status": "indexed",
+                    }
+                    for url in frontier_urls[:2]
+                ],
+                "seed_id": seed["seed_id"],
+                "source_id": seed["source_id"],
+                "source_type": seed["source_type"],
+                "source_uri": seed["source_uri"],
+                "status": "indexed",
+            }
+        )
+    return {
+        "artifact_type": "public_docs_coverage_proof",
+        "coverage_proof_version": "2026.07.1",
+        "coverage_status": "indexed_pending_publish",
+        "pack_id": pack_id,
+        "pack_version_id": pack_version_id,
+        "seeds": seeds,
+        "tenant_id": tenant_id,
     }
 
 
