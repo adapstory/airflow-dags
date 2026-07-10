@@ -19,6 +19,7 @@ import pytest
 from dags.serp_eval_contracts import (
     MANDATORY_SERP_BENCHMARK_SUITES,
     SERP_NORMALIZED_GATE_FLOOR,
+    _fetch_public_docs_crawler_response,
     build_benchmark_improvement_decision_cli_spec,
     build_benchmark_improvement_scoreboard_cli_spec,
     build_benchmark_improvement_wave_plan,
@@ -78,6 +79,33 @@ PACK_ID = "00000000-0000-4000-a000-000000000201"
 PACK_VERSION_ID = "018f5e13-2d73-7a77-a052-8d1bcbf96541"
 REGISTRY_RESOURCE_ID = "018f5e13-2d73-7a77-a052-8d1bcbf96541"
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_public_docs_crawler_preserves_http_status_when_error_body_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TimedOutErrorBody:
+        def read(self, _size: int) -> bytes:
+            raise TimeoutError("error body timed out")
+
+    def fake_urlopen(_request: object, *, timeout: int) -> object:
+        assert timeout > 0
+        raise HTTPError(
+            "https://docs.example.com/robots.txt",
+            404,
+            "Not Found",
+            {"Content-Type": "text/plain"},
+            TimedOutErrorBody(),
+        )
+
+    monkeypatch.setattr("dags.serp_eval_contracts.urlopen", fake_urlopen)
+
+    response = _fetch_public_docs_crawler_response(
+        "https://docs.example.com/robots.txt", {"User-Agent": "serp-test/1"}
+    )
+
+    assert response.status_code == 404
+    assert response.body == b""
 
 
 def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:

@@ -4946,10 +4946,14 @@ def _fetch_public_docs_crawler_response(
                 body=response.read(1_000_001),
             )
     except HTTPError as exc:
+        try:
+            body = exc.read(1_000_001)
+        except (OSError, TimeoutError):
+            body = b""
         return CrawlResponse(
             status_code=int(exc.code),
             headers={str(key): str(value) for key, value in exc.headers.items()},
-            body=exc.read(1_000_001),
+            body=body,
         )
     except (URLError, OSError, TimeoutError):
         return CrawlResponse(status_code=599, headers={}, body=b"")
