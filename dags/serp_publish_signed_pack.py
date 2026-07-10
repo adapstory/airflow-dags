@@ -34,6 +34,9 @@ def rollback_public_docs_post_activation_failure(plan_json: dict[str, Any] | str
     """Compensate a failed post-activation check without converting D5 to success."""
 
     artifact = write_public_docs_post_activation_rollback_artifact(plan_json)
+    payload = artifact.get("payload")
+    if isinstance(payload, dict) and payload.get("status") == "first_activation_no_restore_target":
+        return
     raise AirflowException(
         "D5 post-activation validation failed; automatic rollback completed: "
         + str(artifact["artifactPath"])

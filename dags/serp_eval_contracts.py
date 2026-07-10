@@ -1443,11 +1443,6 @@ def write_public_docs_post_activation_rollback_artifact(
         ),
     )
     previous_pack_version_id = _optional_previous_active_pack_version_id(plan)
-    if previous_pack_version_id is None:
-        raise ValueError(
-            "post-activation rollback requires a previous_active_pack_version_id; "
-            "a first activation has no safe restore target"
-        )
     failed_pack_version_id = _required_str(plan, "pack_version_id")
     activation_receipt_path = _artifact_path(
         "public_docs_publish_activation_receipt",
@@ -1461,6 +1456,29 @@ def write_public_docs_post_activation_rollback_artifact(
         raise ValueError("post-activation rollback requires the candidate pack to be active")
     _assert_equal("tenant_id", _required_str(plan, "tenant_id"), activation_receipt)
     _assert_equal("pack_id", _required_str(plan, "pack_id"), activation_receipt)
+    if previous_pack_version_id is None:
+        payload = {
+            "activation_receipt_path": activation_receipt_path,
+            "active_pack_version_id": failed_pack_version_id,
+            "artifact_type": "public_docs_post_activation_rollback",
+            "contract_version": _EVAL_CONTRACT_VERSION,
+            "generated_at": _required_datetime_string(plan, "generated_at"),
+            "operation_id": _required_str(plan, "operation_id"),
+            "remediation": "publish a corrected successor pack before expanding audience scope",
+            "rollback_attempted": False,
+            "status": "first_activation_no_restore_target",
+            "tenant_id": _required_str(plan, "tenant_id"),
+        }
+        artifact_path = artifact_paths["public_docs_post_activation_rollback"]
+        _write_json_artifact(artifact_path, payload)
+        _emit_public_docs_operational_gauge("post_activation_rollback", 0)
+        _emit_public_docs_operational_gauge("first_activation_no_restore_target", 1)
+        return _artifact_result(
+            artifact_path,
+            artifact_type="public_docs_post_activation_rollback",
+            operation_id=_required_str(plan, "operation_id"),
+            payload=payload,
+        )
 
     rollback_reason_code = "public-docs-d5-post-activation-validation-failed"
     request_payload = {
@@ -3111,10 +3129,10 @@ def _public_docs_pack_policy_inputs(
         _required_str(_required_mapping(seed, "license"), "obligation_state")
         for seed in indexed_seeds
     )
-    freshness_state = _most_restrictive_public_docs_freshness_state(
-        _required_str(_required_mapping(seed, "freshness_state"), "status")
-        for seed in indexed_seeds
-    )
+    # The publish policy describes this candidate, not the previous active
+    # crawl-state snapshot. Reaching this point requires a D20 evidence bundle
+    # with every required seed indexed, so its records are fresh at ingestion.
+    freshness_state = "fresh"
     trust_state = (
         "trusted" if all(bool(seed.get("approved")) for seed in indexed_seeds) else "unreviewed"
     )

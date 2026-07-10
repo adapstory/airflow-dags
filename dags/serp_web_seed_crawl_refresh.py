@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from airflow.configuration import conf
 from airflow.exceptions import AirflowSkipException
+from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sdk import DAG
+from kubernetes.client import models as k8s
 
 from dags.serp_eval_contracts import (
     build_public_docs_seed_refresh_plan as build_public_docs_seed_refresh_plan_contract,
@@ -16,7 +20,6 @@ from dags.serp_eval_contracts import (
     default_public_docs_seed_refresh_conf,
     discover_public_docs_crawler_frontier,
     dispatch_public_docs_seed_refresh_handoff,
-    execute_pipeline_cli_spec,
     governance_notification_pending,
     load_public_docs_crawl_state_conf,
     submit_public_docs_bc21_pipeline_state_artifact,
@@ -25,6 +28,91 @@ from dags.serp_eval_contracts import (
     write_public_docs_seed_refresh_plan_artifact,
     write_public_docs_seed_registry_artifact,
 )
+
+_PIPELINE_RUNNER_ENV_NAMES = (
+    "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT",
+    "ADAPSTORY_AIRFLOW_ARTIFACT_S3_PATH_STYLE",
+    "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION",
+    "ADAPSTORY_SERP_EMBEDDING_BATCH_SIZE",
+    "ADAPSTORY_SERP_EMBEDDING_DIMENSION",
+    "ADAPSTORY_SERP_EMBEDDING_MAX_ATTEMPTS",
+    "ADAPSTORY_SERP_EMBEDDING_MODEL_ID",
+    "ADAPSTORY_SERP_EMBEDDING_MODEL_VERSION",
+    "ADAPSTORY_SERP_EMBEDDING_PROFILE_VERSION",
+    "ADAPSTORY_SERP_EMBEDDING_PROVIDER_MODEL",
+    "ADAPSTORY_SERP_EMBEDDING_RETRY_DELAY_SECONDS",
+    "ADAPSTORY_SERP_EMBEDDING_TIMEOUT_SECONDS",
+    "ADAPSTORY_SERP_EMBEDDING_URL",
+    "ADAPSTORY_SERP_NEO4J_HTTP_URL",
+    "ADAPSTORY_SERP_NEO4J_MUTATION_BATCH_SIZE",
+    "ADAPSTORY_SERP_NEO4J_TIMEOUT_SECONDS",
+    "ADAPSTORY_SERP_NEO4J_USERNAME",
+    "ADAPSTORY_SERP_OPENSEARCH_TIMEOUT_SECONDS",
+    "ADAPSTORY_SERP_OPENSEARCH_URL",
+    "ADAPSTORY_SERP_QDRANT_TIMEOUT_SECONDS",
+    "ADAPSTORY_SERP_QDRANT_URL",
+    "ADAPSTORY_SERP_PUBLIC_DOCS_RETRY_DELAY_SECONDS",
+    "ADAPSTORY_SERP_SOURCE_CURL_FALLBACK_ENABLED",
+    "ADAPSTORY_SERP_SOURCE_FETCH_TIMEOUT_SECONDS",
+    "ADAPSTORY_SERP_SOURCE_PROXY_URL",
+)
+SERP_PIPELINE_RUNNER_RESOURCES = k8s.V1ResourceRequirements(
+    requests={"cpu": "250m", "memory": "512Mi"},
+    limits={"cpu": "1000m", "memory": "2Gi"},
+)
+
+
+def current_airflow_runtime_image() -> str:
+    repository = conf.get("kubernetes_executor", "worker_container_repository").strip()
+    tag = conf.get("kubernetes_executor", "worker_container_tag").strip()
+    if not repository or not tag:
+        raise ValueError("KubernetesExecutor worker image configuration is required")
+    return f"{repository}:{tag}"
+
+
+def pipeline_runner_env_vars(cli_spec_task_id: str) -> list[k8s.V1EnvVar]:
+    values: list[k8s.V1EnvVar] = []
+    for name in _PIPELINE_RUNNER_ENV_NAMES:
+        value = os.environ.get(name)
+        if value is None or not value.strip():
+            raise ValueError(f"public docs pipeline runner environment is required: {name}")
+        values.append(k8s.V1EnvVar(name=name, value=value))
+    values.extend(
+        (
+            k8s.V1EnvVar(
+                name="ADAPSTORY_AIRFLOW_ARTIFACT_S3_ACCESS_KEY",
+                value_from=k8s.V1EnvVarSource(
+                    secret_key_ref=k8s.V1SecretKeySelector(
+                        name="airflow-artifact-store",
+                        key="access-key",
+                    )
+                ),
+            ),
+            k8s.V1EnvVar(
+                name="ADAPSTORY_AIRFLOW_ARTIFACT_S3_SECRET_KEY",
+                value_from=k8s.V1EnvVarSource(
+                    secret_key_ref=k8s.V1SecretKeySelector(
+                        name="airflow-artifact-store",
+                        key="secret-key",
+                    )
+                ),
+            ),
+            k8s.V1EnvVar(
+                name="ADAPSTORY_SERP_NEO4J_PASSWORD",
+                value_from=k8s.V1EnvVarSource(
+                    secret_key_ref=k8s.V1SecretKeySelector(
+                        name="airflow-serp-neo4j",
+                        key="neo4j-password",
+                    )
+                ),
+            ),
+            k8s.V1EnvVar(
+                name="ADAPSTORY_SERP_PIPELINE_CLI_SPEC_JSON",
+                value="{{ ti.xcom_pull(task_ids='" + cli_spec_task_id + "') | tojson }}",
+            ),
+        )
+    )
+    return values
 
 
 def validate_public_docs_seed_registry(**context: Any) -> str:
@@ -123,10 +211,26 @@ dispatch_handoff = PythonOperator(
     dag=dag,
 )
 
-run_pipeline = PythonOperator(
+run_pipeline = KubernetesPodOperator(
     task_id="run_public_docs_seed_refresh_pipeline",
-    python_callable=execute_pipeline_cli_spec,
-    op_args=["{{ ti.xcom_pull(task_ids='dispatch_pipeline_seed_refresh_handoff') }}"],
+    name="serp-public-docs-seed-refresh",
+    namespace=conf.get("kubernetes_executor", "namespace"),
+    image=current_airflow_runtime_image(),
+    cmds=["python", "-m", "adapstory_serp_pipeline.orchestration.seed_refresh_remote_runner"],
+    env_vars=pipeline_runner_env_vars("dispatch_pipeline_seed_refresh_handoff"),
+    service_account_name="airflow-worker",
+    automount_service_account_token=False,
+    container_resources=SERP_PIPELINE_RUNNER_RESOURCES,
+    container_security_context=k8s.V1SecurityContext(
+        allow_privilege_escalation=False,
+        capabilities=k8s.V1Capabilities(drop=["ALL"]),
+    ),
+    get_logs=True,
+    log_events_on_failure=True,
+    random_name_suffix=True,
+    reattach_on_restart=True,
+    on_kill_action="keep_pod",
+    on_finish_action="delete_pod",
     retries=1,
     retry_delay=timedelta(seconds=5),
     dag=dag,

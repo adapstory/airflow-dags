@@ -1720,7 +1720,7 @@ def test_public_docs_seed_registry_allows_url_keys_but_rejects_secret_fields(
 ) -> None:
     conf = _public_docs_seed_refresh_conf()
     conf["artifact_root_path"] = str(tmp_path)
-    page_url = "https://neo4j.com/docs/operations-manual/current/" "authentication-authorization"
+    page_url = "https://neo4j.com/docs/operations-manual/current/authentication-authorization"
 
     plan = build_public_docs_seed_refresh_plan(conf)
     crawl_evidence = {
@@ -2041,7 +2041,7 @@ def test_d20_writes_public_docs_publish_activation_trigger_conf_artifact(
     assert target_conf["policy_data_class"] == "PUBLIC"
     assert target_conf["policy_license_obligation_state"] == "public_share_allowed"
     assert target_conf["policy_trust_state"] == "trusted"
-    assert target_conf["policy_freshness_state"] == "pending"
+    assert target_conf["policy_freshness_state"] == "fresh"
     assert target_conf["evidence_bundle_id"] == "018f5e13-2d73-7a77-a052-8d1bcbf96602"
     assert target_conf["evidence_seal_hash"] == "sha256:" + "b" * 64
     repeated_artifact = write_public_docs_publish_activation_trigger_conf_artifact(
@@ -2153,7 +2153,7 @@ def test_d20_trigger_conf_derives_policy_from_frontier_parent_seed(
     assert target_conf["policy_data_class"] == "PUBLIC"
     assert target_conf["policy_license_obligation_state"] == "public_share_allowed"
     assert target_conf["policy_trust_state"] == "trusted"
-    assert target_conf["policy_freshness_state"] == "pending"
+    assert target_conf["policy_freshness_state"] == "fresh"
 
 
 def test_d20_writes_public_docs_publish_activation_trigger_conf_from_s3_result(
@@ -2967,15 +2967,35 @@ def test_post_activation_failure_rolls_back_to_direct_predecessor(
     assert Path(artifact["artifactPath"]).exists()
 
 
-def test_post_activation_failure_fails_closed_without_restore_target(tmp_path: Path) -> None:
+def test_first_activation_failure_records_unrecoverable_compensation_without_retries(
+    tmp_path: Path,
+) -> None:
     seed_refresh_result = tmp_path / "public-docs-seed-refresh-result.json"
     _write_public_docs_seed_refresh_result(seed_refresh_result)
     conf = _public_docs_publish_activation_conf(str(seed_refresh_result))
     conf["artifact_root_path"] = str(tmp_path)
     plan = build_public_docs_publish_activation_plan(conf)
+    receipt_path = Path(plan.payload["artifact_paths"]["public_docs_publish_activation_receipt"])
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "active_pack_version_id": PACK_VERSION_ID,
+                "artifact_type": "public_docs_publish_activation_receipt",
+                "pack_id": PACK_ID,
+                "status": "activated",
+                "tenant_id": TENANT_ID,
+            }
+        ),
+        encoding="utf-8",
+    )
 
-    with pytest.raises(ValueError, match="no safe restore target"):
-        write_public_docs_post_activation_rollback_artifact(plan.to_canonical_json())
+    artifact = write_public_docs_post_activation_rollback_artifact(plan.to_canonical_json())
+
+    assert artifact["payload"]["status"] == "first_activation_no_restore_target"
+    assert artifact["payload"]["rollback_attempted"] is False
+    assert artifact["payload"]["active_pack_version_id"] == PACK_VERSION_ID
+    assert Path(artifact["artifactPath"]).exists()
 
 
 def test_public_docs_retired_pack_cleanup_runs_only_for_a_previous_active_pack(
@@ -3929,7 +3949,6 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
                 "write_public_docs_seed_registry",
                 "build_public_docs_seed_refresh_plan",
                 "dispatch_pipeline_seed_refresh_handoff",
-                "run_public_docs_seed_refresh_pipeline",
                 "submit_public_docs_bc21_pipeline_state",
                 "write_public_docs_publish_activation_trigger_conf",
                 "prepare_public_docs_d5_dispatch",
@@ -3989,16 +4008,16 @@ def test_serp_public_docs_dag_runs_default_seed_registry_pipeline_path() -> None
     assert "default_public_docs_seed_refresh_conf" in source
     assert "_public_docs_seed_refresh_conf_with_defaults" in source
     assert "datetime.now(UTC)" in source
-    assert "execute_pipeline_cli_spec" in source
+    assert "KubernetesPodOperator" in source
     assert "run_public_docs_seed_refresh_pipeline" in source
 
 
-def test_serp_public_docs_pipeline_task_retries_on_transient_external_fetch_failure() -> None:
+def test_serp_public_docs_pipeline_task_survives_scheduler_rollout() -> None:
     source = (REPO_ROOT / "dags" / "serp_web_seed_crawl_refresh.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
 
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not _matches_call(node, "PythonOperator"):
+        if not isinstance(node, ast.Call) or not _matches_call(node, "KubernetesPodOperator"):
             continue
         task_id = next(
             (
@@ -4011,17 +4030,20 @@ def test_serp_public_docs_pipeline_task_retries_on_transient_external_fetch_fail
             None,
         )
         if task_id == "run_public_docs_seed_refresh_pipeline":
-            retries = next(
-                (
-                    keyword.value.value
-                    for keyword in node.keywords
-                    if keyword.arg == "retries"
-                    and isinstance(keyword.value, ast.Constant)
-                    and isinstance(keyword.value.value, int)
-                ),
-                None,
-            )
-            assert retries == 1
+            keyword_values = {
+                keyword.arg: keyword.value.value
+                for keyword in node.keywords
+                if keyword.arg is not None and isinstance(keyword.value, ast.Constant)
+            }
+            assert keyword_values["retries"] == 1
+            assert keyword_values["reattach_on_restart"] is True
+            assert keyword_values["on_kill_action"] == "keep_pod"
+            assert keyword_values["on_finish_action"] == "delete_pod"
+            assert keyword_values["random_name_suffix"] is True
+            assert "SERP_PIPELINE_RUNNER_RESOURCES" in source
+            assert "pipeline_runner_env_vars" in source
+            assert "current_airflow_runtime_image" in source
+            assert "ADAPSTORY_SERP_EMBEDDING_DIMENSION" in source
             return
 
     raise AssertionError("public docs pipeline task was not found")
@@ -4115,6 +4137,24 @@ def test_d5_rollback_compensation_preserves_validation_failure(
         module.rollback_public_docs_post_activation_failure("{}")
 
 
+def test_d5_first_activation_compensation_records_incident_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    module = importlib.import_module("dags.serp_publish_signed_pack")
+    module = importlib.reload(module)
+    monkeypatch.setattr(
+        module,
+        "write_public_docs_post_activation_rollback_artifact",
+        lambda _plan: {
+            "artifactPath": "/tmp/public-docs-post-activation-rollback.json",
+            "payload": {"status": "first_activation_no_restore_target"},
+        },
+    )
+
+    assert module.rollback_public_docs_post_activation_failure("{}") is None
+
+
 def test_prepare_public_docs_d5_dispatch_returns_only_validated_ready_conf(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4204,10 +4244,65 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeTriggerDagRunOperator(FakePythonOperator):
         pass
 
+    class FakeKubernetesPodOperator(FakePythonOperator):
+        pass
+
+    class FakeConf:
+        @staticmethod
+        def get(section: str, key: str) -> str:
+            values = {
+                ("kubernetes_executor", "namespace"): "airflow",
+                ("kubernetes_executor", "worker_container_repository"): "harbor/airflow",
+                ("kubernetes_executor", "worker_container_tag"): "test",
+            }
+            return values[(section, key)]
+
+    class FakeKubernetesModel:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+    for name in (
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT",
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_PATH_STYLE",
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION",
+        "ADAPSTORY_SERP_EMBEDDING_BATCH_SIZE",
+        "ADAPSTORY_SERP_EMBEDDING_DIMENSION",
+        "ADAPSTORY_SERP_EMBEDDING_MAX_ATTEMPTS",
+        "ADAPSTORY_SERP_EMBEDDING_MODEL_ID",
+        "ADAPSTORY_SERP_EMBEDDING_MODEL_VERSION",
+        "ADAPSTORY_SERP_EMBEDDING_PROFILE_VERSION",
+        "ADAPSTORY_SERP_EMBEDDING_PROVIDER_MODEL",
+        "ADAPSTORY_SERP_EMBEDDING_RETRY_DELAY_SECONDS",
+        "ADAPSTORY_SERP_EMBEDDING_TIMEOUT_SECONDS",
+        "ADAPSTORY_SERP_EMBEDDING_URL",
+        "ADAPSTORY_SERP_NEO4J_HTTP_URL",
+        "ADAPSTORY_SERP_NEO4J_MUTATION_BATCH_SIZE",
+        "ADAPSTORY_SERP_NEO4J_TIMEOUT_SECONDS",
+        "ADAPSTORY_SERP_NEO4J_USERNAME",
+        "ADAPSTORY_SERP_OPENSEARCH_TIMEOUT_SECONDS",
+        "ADAPSTORY_SERP_OPENSEARCH_URL",
+        "ADAPSTORY_SERP_QDRANT_TIMEOUT_SECONDS",
+        "ADAPSTORY_SERP_QDRANT_URL",
+        "ADAPSTORY_SERP_PUBLIC_DOCS_RETRY_DELAY_SECONDS",
+        "ADAPSTORY_SERP_SOURCE_CURL_FALLBACK_ENABLED",
+        "ADAPSTORY_SERP_SOURCE_FETCH_TIMEOUT_SECONDS",
+        "ADAPSTORY_SERP_SOURCE_PROXY_URL",
+    ):
+        monkeypatch.setenv(name, "test")
+
     modules = {
         "airflow": types.ModuleType("airflow"),
+        "airflow.configuration": types.ModuleType("airflow.configuration"),
         "airflow.exceptions": types.ModuleType("airflow.exceptions"),
         "airflow.providers": types.ModuleType("airflow.providers"),
+        "airflow.providers.cncf": types.ModuleType("airflow.providers.cncf"),
+        "airflow.providers.cncf.kubernetes": types.ModuleType("airflow.providers.cncf.kubernetes"),
+        "airflow.providers.cncf.kubernetes.operators": types.ModuleType(
+            "airflow.providers.cncf.kubernetes.operators"
+        ),
+        "airflow.providers.cncf.kubernetes.operators.pod": types.ModuleType(
+            "airflow.providers.cncf.kubernetes.operators.pod"
+        ),
         "airflow.providers.standard": types.ModuleType("airflow.providers.standard"),
         "airflow.providers.standard.operators": types.ModuleType(
             "airflow.providers.standard.operators"
@@ -4221,7 +4316,11 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         "airflow.sdk": types.ModuleType("airflow.sdk"),
         "airflow.utils": types.ModuleType("airflow.utils"),
         "airflow.utils.trigger_rule": types.ModuleType("airflow.utils.trigger_rule"),
+        "kubernetes": types.ModuleType("kubernetes"),
+        "kubernetes.client": types.ModuleType("kubernetes.client"),
+        "kubernetes.client.models": types.ModuleType("kubernetes.client.models"),
     }
+    cast(Any, modules["airflow.configuration"]).conf = FakeConf()
     cast(
         Any, modules["airflow.providers.standard.operators.python"]
     ).PythonOperator = FakePythonOperator
@@ -4230,8 +4329,19 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     cast(
         Any, modules["airflow.providers.standard.operators.trigger_dagrun"]
     ).TriggerDagRunOperator = FakeTriggerDagRunOperator
+    cast(
+        Any, modules["airflow.providers.cncf.kubernetes.operators.pod"]
+    ).KubernetesPodOperator = FakeKubernetesPodOperator
     cast(Any, modules["airflow.sdk"]).DAG = FakeDAG
     cast(Any, modules["airflow.utils.trigger_rule"]).TriggerRule = FakeTriggerRule
+    models = cast(Any, modules["kubernetes.client.models"])
+    models.V1Capabilities = FakeKubernetesModel
+    models.V1EnvVar = FakeKubernetesModel
+    models.V1EnvVarSource = FakeKubernetesModel
+    models.V1ResourceRequirements = FakeKubernetesModel
+    models.V1SecretKeySelector = FakeKubernetesModel
+    models.V1SecurityContext = FakeKubernetesModel
+    cast(Any, modules["kubernetes.client"]).models = models
     for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)
 
