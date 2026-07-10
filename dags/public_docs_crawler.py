@@ -13,6 +13,41 @@ from xml.etree import ElementTree
 CRAWLER_CONTRACT_VERSION = "2026.07.1"
 _MAX_DISCOVERY_BYTES = 1_000_000
 _MAX_SITEMAP_DEPTH = 2
+_NON_DOCUMENT_ASSET_SUFFIXES = frozenset(
+    {
+        ".7z",
+        ".avif",
+        ".bmp",
+        ".css",
+        ".eot",
+        ".gif",
+        ".gz",
+        ".ico",
+        ".jpeg",
+        ".jpg",
+        ".js",
+        ".map",
+        ".mjs",
+        ".mov",
+        ".mp3",
+        ".mp4",
+        ".otf",
+        ".png",
+        ".rar",
+        ".svg",
+        ".tar",
+        ".tgz",
+        ".tif",
+        ".tiff",
+        ".ttf",
+        ".wav",
+        ".webm",
+        ".webp",
+        ".woff",
+        ".woff2",
+        ".zip",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +156,8 @@ def crawl_public_docs(
             if _is_html(response.headers, response.body):
                 for link in _extract_links(url, response.body):
                     if link in queued:
+                        continue
+                    if not _is_crawl_document_url(link):
                         continue
                     if _is_allowed_url(link, policy) and robot_parser.can_fetch(
                         str(policy["user_agent"]), link
@@ -268,8 +305,10 @@ def _discover_sitemap_pages(
         elif root_name == "urlset":
             for location in locations:
                 candidate = _canonical_url(location)
-                if _is_allowed_url(candidate, policy) and robot_parser.can_fetch(
-                    str(policy["user_agent"]), candidate
+                if (
+                    _is_crawl_document_url(candidate)
+                    and _is_allowed_url(candidate, policy)
+                    and robot_parser.can_fetch(str(policy["user_agent"]), candidate)
                 ):
                     pages.append(candidate)
                     if len(pages) >= int(policy["max_pages"]):
@@ -423,6 +462,11 @@ def _is_allowed_url(url: str, policy: Mapping[str, Any]) -> bool:
     return not any(
         pattern in path_and_query or pattern in url for pattern in policy["deny_patterns"]
     )
+
+
+def _is_crawl_document_url(url: str) -> bool:
+    path = urlparse(url).path.lower()
+    return not any(path.endswith(suffix) for suffix in _NON_DOCUMENT_ASSET_SUFFIXES)
 
 
 def _require_allowed_url(url: str, policy: Mapping[str, Any]) -> None:

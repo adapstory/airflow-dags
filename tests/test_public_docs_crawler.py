@@ -250,6 +250,55 @@ def test_crawler_preserves_directory_seed_base_and_ignores_non_navigation_hrefs(
     ]
 
 
+def test_crawler_ignores_linked_media_assets_for_quarantine() -> None:
+    root = "https://neo4j.com/docs/"
+    guide = "https://neo4j.com/docs/operations-manual/current/"
+    missing_image = "https://neo4j.com/wp-content/uploads/titanic-1.png"
+    fetcher = FakeFetcher(
+        {
+            "https://neo4j.com/robots.txt": CrawlResponse(
+                200,
+                {"content-type": "text/plain"},
+                b"User-agent: *\nAllow: /\nSitemap: https://neo4j.com/sitemap.xml\n",
+            ),
+            "https://neo4j.com/sitemap.xml": CrawlResponse(
+                200,
+                {"content-type": "application/xml"},
+                f"<urlset><url><loc>{root}</loc></url></urlset>".encode(),
+            ),
+            root: CrawlResponse(
+                200,
+                {"content-type": "text/html"},
+                (
+                    f'<a href="{guide}">operations</a>' f'<a href="{missing_image}">diagram</a>'
+                ).encode(),
+            ),
+            guide: CrawlResponse(200, {"content-type": "text/html"}, b"guide"),
+        },
+        [],
+    )
+
+    evidence = crawl_public_docs(
+        seed_uri=root,
+        crawl_policy={
+            "allowed_domains": ["neo4j.com"],
+            "deny_patterns": ["/login", "/admin"],
+            "max_depth": 2,
+            "max_pages": 10,
+            "respect_robots_txt": True,
+            "sitemap_discovery": True,
+            "user_agent": "serp-test/1",
+        },
+        previous_state={},
+        fetcher=fetcher,
+    )
+
+    assert evidence["status"] == "completed"
+    assert evidence["failed_urls"] == []
+    assert missing_image not in evidence["pages"]
+    assert missing_image not in [url for url, _ in fetcher.requests]
+
+
 def test_crawler_quarantines_a_recoverable_page_failure_without_tombstoning_state() -> None:
     root = "https://docs.example.com/"
     protected = "https://docs.example.com/protected"
