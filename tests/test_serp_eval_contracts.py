@@ -3058,6 +3058,27 @@ def test_serp_public_docs_pipeline_task_retries_on_transient_external_fetch_fail
     raise AssertionError("public docs pipeline task was not found")
 
 
+def test_serp_public_docs_dag_serializes_manual_and_nightly_runs() -> None:
+    source = (REPO_ROOT / "dags" / "serp_web_seed_crawl_refresh.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    dag_call = next(
+        node for node in ast.walk(tree) if isinstance(node, ast.Call) and _matches_call(node, "DAG")
+    )
+    max_active_runs = next(
+        (
+            keyword.value.value
+            for keyword in dag_call.keywords
+            if keyword.arg == "max_active_runs"
+            and isinstance(keyword.value, ast.Constant)
+            and isinstance(keyword.value.value, int)
+        ),
+        None,
+    )
+
+    assert max_active_runs == 1
+
+
 def test_serp_public_docs_dag_overlays_partial_run_conf_on_default_seed_registry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

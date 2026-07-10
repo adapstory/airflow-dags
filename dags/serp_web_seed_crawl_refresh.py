@@ -59,6 +59,7 @@ dag = DAG(
     description="SERP D20 governed public-docs seed refresh handoff contract",
     schedule="@daily",
     catchup=False,
+    max_active_runs=1,
     render_template_as_native_obj=True,
     tags=["serp", "public-docs", "seed-refresh", "bc21"],
 )
