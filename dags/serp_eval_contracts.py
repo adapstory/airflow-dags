@@ -3397,7 +3397,7 @@ def _public_docs_frontier_budget(
         "max_optional_frontier_per_seed": max_optional_frontier_per_seed,
         "max_optional_frontier_sources": max_optional_frontier_sources,
         "rotation_key": rotation_key_value.strip(),
-        "strategy": "seed-root-required-rotating-optional-frontier-budget",
+        "strategy": "seed-and-curated-required-rotating-optional-frontier-budget",
     }
 
 
@@ -3558,7 +3558,7 @@ def _public_docs_budgeted_source_fetch_requests(
         mandatory = [
             expanded_seed
             for expanded_seed in expanded
-            if _frontier_role(expanded_seed) == "seed-root"
+            if _frontier_role(expanded_seed) in {"seed-root", "curated-frontier"}
         ]
         optional = [
             expanded_seed
@@ -3740,6 +3740,10 @@ def _expanded_public_docs_seed_frontier(seed: Mapping[str, Any]) -> list[dict[st
     source_uri = _required_str(seed, "source_uri")
     crawl_policy = _required_mapping(seed, "crawl_policy")
     frontier_urls = list(crawl_policy.get("frontier_urls", []))
+    curated_frontier_urls = {
+        _canonical_public_docs_url(url)
+        for url in _curated_frontier_urls(crawl_policy)
+    }
     if source_type != "website" or not frontier_urls:
         singleton = dict(seed)
         singleton["frontier"] = _frontier_metadata(
@@ -3758,7 +3762,15 @@ def _expanded_public_docs_seed_frontier(seed: Mapping[str, Any]) -> list[dict[st
             seed,
             source_uri=url,
             frontier_index=index,
-            frontier_role="seed-root" if index == 0 else "sitemap-frontier",
+            frontier_role=(
+                "seed-root"
+                if index == 0
+                else (
+                    "curated-frontier"
+                    if _canonical_public_docs_url(url) in curated_frontier_urls
+                    else "sitemap-frontier"
+                )
+            ),
             frontier_url_count=frontier_url_count,
         )
         for index, url in enumerate(bounded_urls)
@@ -5037,6 +5049,7 @@ def _default_public_docs_seed(
         "connector_name": source_type,
         "crawl_policy": {
             "allowed_domains": [allowed_domain],
+            "curated_frontier_urls": list(frontier_urls),
             "deny_patterns": ["/login", "/admin"],
             "frontier_urls": list(frontier_urls),
             "max_depth": 2,
@@ -5215,6 +5228,7 @@ def _public_docs_crawl_policy(
             raise ValueError("source_uri host must be in allowed_domains")
         if _public_docs_url_matches_deny_patterns(source_uri, deny_patterns):
             raise ValueError("source_uri must not match deny_patterns")
+    curated_frontier_urls = _curated_frontier_urls(policy)
     freshness_state = seed.get("freshness_state")
     previous_state = (
         freshness_state.get("page_state", {}) if isinstance(freshness_state, Mapping) else {}
@@ -5234,6 +5248,7 @@ def _public_docs_crawl_policy(
     )
     return {
         "allowed_domains": allowed_domains,
+        "curated_frontier_urls": curated_frontier_urls,
         "deny_patterns": list(deny_patterns),
         "frontier_urls": frontier_urls,
         "max_depth": max_depth,
@@ -5257,18 +5272,14 @@ def _public_docs_frontier_urls(
     max_pages: int,
     sitemap_frontier_discoverer: PublicDocsSitemapFrontierDiscoverer | None = None,
 ) -> tuple[list[str], Mapping[str, Any] | None]:
-    raw_urls = policy.get("frontier_urls", [])
-    if raw_urls is None:
-        raw_urls = []
-    if not isinstance(raw_urls, list) or not all(isinstance(value, str) for value in raw_urls):
-        raise ValueError("frontier_urls must be a list of strings")
+    curated_urls = _curated_frontier_urls(policy)
     if source_type != "website":
-        if raw_urls:
-            raise ValueError("frontier_urls are supported only for website seeds")
+        if curated_urls:
+            raise ValueError("curated_frontier_urls are supported only for website seeds")
         return [], None
-    remaining_slots = max_pages - len(raw_urls) - 1
+    remaining_slots = max_pages - len(curated_urls) - 1
     if remaining_slots < 0:
-        raise ValueError("frontier_urls must leave room for the seed source_uri")
+        raise ValueError("curated_frontier_urls must leave room for the seed source_uri")
     discovered_urls: Sequence[str] = ()
     crawl_evidence: Mapping[str, Any] | None = None
     if sitemap_discovery and sitemap_frontier_discoverer is not None:
@@ -5288,7 +5299,7 @@ def _public_docs_frontier_urls(
         if not all(isinstance(value, str) for value in discovered_urls):
             raise ValueError("sitemap frontier discoverer must return strings")
         discovered_urls = tuple(discovered_urls)[: max_pages - 1]
-    candidate_urls = [*raw_urls, *discovered_urls]
+    candidate_urls = [*curated_urls, *discovered_urls]
     allowed_domain_set = set(allowed_domains)
     source_host = urlparse(source_uri).hostname
     normalized: list[str] = []
@@ -5296,24 +5307,35 @@ def _public_docs_frontier_urls(
     for value in candidate_urls:
         url = value.strip()
         if not url:
-            raise ValueError("frontier_urls entries must be non-empty")
+            raise ValueError("curated and discovered frontier URLs must be non-empty")
         if _contains_raw_secret(url):
-            raise ValueError("frontier_urls must not contain raw secret material")
+            raise ValueError(
+                "curated and discovered frontier URLs must not contain raw secret material"
+            )
         parsed = urlparse(url)
         if parsed.scheme != "https" or not parsed.hostname:
-            raise ValueError("frontier_urls must use https")
+            raise ValueError("curated and discovered frontier URLs must use https")
         if parsed.hostname not in allowed_domain_set:
-            raise ValueError("frontier_urls host must be in allowed_domains")
+            raise ValueError("curated and discovered frontier URLs host must be in allowed_domains")
         if source_host and parsed.hostname != source_host:
-            raise ValueError("frontier_urls host must match source_uri host")
+            raise ValueError("curated and discovered frontier URLs host must match source_uri host")
         if _public_docs_url_matches_deny_patterns(url, deny_patterns):
-            raise ValueError("frontier_urls must not match deny_patterns")
+            raise ValueError("curated and discovered frontier URLs must not match deny_patterns")
         canonical_url = _canonical_public_docs_url(url)
         if canonical_url in seen:
             continue
         seen.add(canonical_url)
         normalized.append(url)
     return normalized[: max_pages - 1], crawl_evidence
+
+
+def _curated_frontier_urls(policy: Mapping[str, Any]) -> list[str]:
+    value = policy.get("curated_frontier_urls")
+    if not isinstance(value, list) or not all(
+        isinstance(url, str) and url.strip() for url in value
+    ):
+        raise ValueError("curated_frontier_urls must be a list of non-empty strings")
+    return [url.strip() for url in value]
 
 
 def _public_docs_url_matches_deny_patterns(

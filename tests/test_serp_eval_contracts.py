@@ -2023,8 +2023,28 @@ def test_public_docs_seed_refresh_frontier_budget_keeps_roots_and_skips_optional
         "https://www.postgresql.org/docs/16/index.html",
         "https://www.postgresql.org/docs/16/libpq.html",
     ]
+    conf["seed_registry"][0]["crawl_policy"]["curated_frontier_urls"] = []
+    conf["seed_registry"][2]["crawl_policy"]["curated_frontier_urls"] = []
 
-    plan = build_public_docs_seed_refresh_plan(conf)
+    def discover(source_uri: str, policy: Mapping[str, Any], max_urls: int) -> list[str]:
+        del policy, max_urls
+        if source_uri == "https://docs.k3s.io/":
+            return [
+                "https://docs.k3s.io/quick-start",
+                "https://docs.k3s.io/installation/requirements",
+                "https://docs.k3s.io/advanced",
+                "https://docs.k3s.io/cli",
+            ]
+        if source_uri == "https://www.postgresql.org/docs/16/":
+            return [
+                "https://www.postgresql.org/docs/16/tutorial.html",
+                "https://www.postgresql.org/docs/16/sql.html",
+                "https://www.postgresql.org/docs/16/index.html",
+                "https://www.postgresql.org/docs/16/libpq.html",
+            ]
+        return []
+
+    plan = build_public_docs_seed_refresh_plan(conf, sitemap_frontier_discoverer=discover)
     refresh_plan_artifact = write_public_docs_seed_refresh_plan_artifact(plan.to_canonical_json())
 
     payload = refresh_plan_artifact["payload"]
@@ -2043,7 +2063,7 @@ def test_public_docs_seed_refresh_frontier_budget_keeps_roots_and_skips_optional
         "max_optional_frontier_per_seed": 2,
         "max_optional_frontier_sources": 3,
         "rotation_key": "day-1",
-        "strategy": "seed-root-required-rotating-optional-frontier-budget",
+        "strategy": "seed-and-curated-required-rotating-optional-frontier-budget",
     }
     assert len(root_requests) == 4
     assert payload["optional_frontier_selected_count"] == 3
@@ -2064,6 +2084,51 @@ def test_public_docs_seed_refresh_frontier_budget_keeps_roots_and_skips_optional
         "kubernetes-openapi-docs",
         "postgresql-reference-docs",
     }
+
+
+def test_public_docs_seed_refresh_never_budgets_curated_frontier_urls(
+    tmp_path: Path,
+) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    conf["frontier_budget"] = {
+        "max_optional_frontier_per_seed": 0,
+        "max_optional_frontier_sources": 0,
+        "rotation_key": "day-1",
+    }
+    k3s_policy = conf["seed_registry"][0]["crawl_policy"]
+    k3s_policy["curated_frontier_urls"] = [
+        "https://docs.k3s.io/quick-start",
+        "https://docs.k3s.io/installation/requirements",
+    ]
+    k3s_policy["frontier_urls"] = [
+        *k3s_policy["curated_frontier_urls"],
+        "https://docs.k3s.io/advanced",
+    ]
+
+    plan = build_public_docs_seed_refresh_plan(conf)
+    refresh_plan = write_public_docs_seed_refresh_plan_artifact(plan.to_canonical_json())["payload"]
+    k3s_requests = [
+        request
+        for request in refresh_plan["source_fetch_requests"]
+        if request["seed_id"].startswith("k3s-docs")
+    ]
+
+    assert [request["source_uri"] for request in k3s_requests] == [
+        "https://docs.k3s.io/",
+        "https://docs.k3s.io/quick-start",
+        "https://docs.k3s.io/installation/requirements",
+    ]
+    assert [
+        request["source_metadata"]["frontier"]["frontier_role"] for request in k3s_requests
+    ] == ["seed-root", "curated-frontier", "curated-frontier"]
+    assert refresh_plan["optional_frontier_selected_count"] == 0
+    k3s_skipped = [
+        skipped
+        for skipped in refresh_plan["skipped_frontier_fetches"]
+        if skipped["parent_seed_id"] == "k3s-docs"
+    ]
+    assert k3s_skipped == []
 
 
 def test_d20_writes_public_docs_publish_activation_trigger_conf_artifact(
@@ -2511,6 +2576,7 @@ def test_public_docs_seed_refresh_uses_single_website_request_when_frontier_disa
     conf = _public_docs_seed_refresh_conf()
     conf["artifact_root_path"] = str(tmp_path)
     conf["seed_registry"][0]["crawl_policy"]["sitemap_discovery"] = False
+    conf["seed_registry"][0]["crawl_policy"]["curated_frontier_urls"] = []
     conf["seed_registry"][0]["crawl_policy"].pop("frontier_urls", None)
 
     plan = build_public_docs_seed_refresh_plan(conf)
@@ -2553,12 +2619,14 @@ def test_public_docs_seed_refresh_deduplicates_canonical_frontier_urls(
 ) -> None:
     conf = _public_docs_seed_refresh_conf()
     conf["artifact_root_path"] = str(tmp_path)
-    conf["seed_registry"][0]["crawl_policy"]["frontier_urls"] = [
+    k3s_policy = conf["seed_registry"][0]["crawl_policy"]
+    k3s_policy["curated_frontier_urls"] = [
         "https://docs.k3s.io",
         "https://docs.k3s.io/#overview",
         "https://docs.k3s.io/quick-start#install",
         "https://docs.k3s.io/quick-start",
     ]
+    k3s_policy["frontier_urls"] = k3s_policy["curated_frontier_urls"]
 
     plan = build_public_docs_seed_refresh_plan(conf)
     refresh_plan_artifact = write_public_docs_seed_refresh_plan_artifact(plan.to_canonical_json())
@@ -2619,6 +2687,7 @@ def test_public_docs_sitemap_discovery_respects_optional_frontier_budget(
         "rotation_key": "day-1",
     }
     conf["seed_registry"][0]["crawl_policy"]["frontier_urls"] = []
+    conf["seed_registry"][0]["crawl_policy"]["curated_frontier_urls"] = []
     observed_max_urls: list[int] = []
 
     def discover(source_uri: str, policy: Mapping[str, Any], max_urls: int) -> list[str]:
@@ -3963,10 +4032,13 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
         build_public_docs_seed_refresh_plan(missing_robot_policy)
 
     cross_domain_frontier = _public_docs_seed_refresh_conf()
-    cross_domain_frontier["seed_registry"][0]["crawl_policy"]["frontier_urls"] = [
+    cross_domain_frontier["seed_registry"][0]["crawl_policy"]["curated_frontier_urls"] = [
         "https://evil.example.com/k3s"
     ]
-    with pytest.raises(ValueError, match="frontier_urls host must be in allowed_domains"):
+    with pytest.raises(
+        ValueError,
+        match="curated and discovered frontier URLs host must be in allowed_domains",
+    ):
         build_public_docs_seed_refresh_plan(cross_domain_frontier)
 
     denied_seed_uri = _public_docs_seed_refresh_conf()
@@ -4952,6 +5024,7 @@ def _public_docs_seed(
         "connector_name": source_type,
         "crawl_policy": {
             "allowed_domains": [allowed_domain],
+            "curated_frontier_urls": list(frontier_urls),
             "deny_patterns": ["/login", "/admin"],
             "frontier_urls": frontier_urls,
             "max_depth": 2,
