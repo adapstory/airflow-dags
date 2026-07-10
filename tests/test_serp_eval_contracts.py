@@ -4177,6 +4177,30 @@ def test_serp_public_docs_dag_serializes_manual_and_nightly_runs() -> None:
     assert max_active_runs == 1
 
 
+@pytest.mark.parametrize(
+    "dag_file",
+    ("serp_web_seed_crawl_refresh.py", "serp_publish_signed_pack.py"),
+)
+def test_public_docs_dags_are_unpaused_when_airflow_creates_them(dag_file: str) -> None:
+    source = (REPO_ROOT / "dags" / dag_file).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    dag_call = next(
+        node for node in ast.walk(tree) if isinstance(node, ast.Call) and _matches_call(node, "DAG")
+    )
+    is_paused_upon_creation = next(
+        (
+            keyword.value.value
+            for keyword in dag_call.keywords
+            if keyword.arg == "is_paused_upon_creation"
+            and isinstance(keyword.value, ast.Constant)
+            and isinstance(keyword.value.value, bool)
+        ),
+        None,
+    )
+
+    assert is_paused_upon_creation is False
+
+
 def test_serp_public_docs_dag_dispatches_d5_natively_and_waits_for_completion() -> None:
     source = (REPO_ROOT / "dags" / "serp_web_seed_crawl_refresh.py").read_text(encoding="utf-8")
     tree = ast.parse(source)

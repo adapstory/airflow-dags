@@ -55,6 +55,7 @@ dag = DAG(
     description="SERP D5 governed publish activation handoff contract",
     schedule=None,
     catchup=False,
+    is_paused_upon_creation=False,
     max_active_runs=1,
     render_template_as_native_obj=True,
     tags=["serp", "public-docs", "publish", "bc21"],
