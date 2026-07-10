@@ -683,6 +683,133 @@ def test_execute_pipeline_cli_spec_runs_without_shell_and_persists_stdout(
     assert result["artifactPath"] == str(output_path)
 
 
+def test_execute_pipeline_cli_spec_persists_redacted_failure_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    input_path = tmp_path / "public-docs-seed-refresh-plan.json"
+    output_path = tmp_path / "public-docs-seed-refresh-result.json"
+    input_path.write_text("{}", encoding="utf-8")
+
+    class Result:
+        returncode = 2
+        stdout = ""
+        stderr = (
+            "ValueError: live store request failed; "
+            "authorization=super-secret-token; "
+            "Bearer another-secret-token; "
+            '{"api_key": "json-secret-token"}'
+        )
+
+    monkeypatch.setattr(
+        "dags.serp_eval_contracts.subprocess.run", lambda *_args, **_kwargs: Result()
+    )
+
+    with pytest.raises(ValueError, match="failure_artifact_path=") as error:
+        execute_pipeline_cli_spec(
+            {
+                "argv": [
+                    "python",
+                    "-m",
+                    "adapstory_serp_pipeline.orchestration.seed_refresh_cli",
+                ],
+                "contract_version": "serp-airflow-pipeline-cli-bridge/v1",
+                "dag_id": "serp_web_seed_crawl_refresh",
+                "input_paths": [str(input_path)],
+                "operation_id": "op-1",
+                "status": "ready_for_pipeline_cli_runner",
+                "stdout_path": str(output_path),
+                "task_id": "public_docs_seed_refresh_pipeline",
+                "tenant_id": TENANT_ID,
+            }
+        )
+
+    failure_path = tmp_path / "public-docs-seed-refresh-result.failure.json"
+    receipt = json.loads(failure_path.read_text(encoding="utf-8"))
+
+    assert f"failure_artifact_path={failure_path}" in str(error.value)
+    assert receipt["artifact_type"] == "pipeline_cli_failure"
+    assert receipt["returncode"] == 2
+    assert receipt["stderr_sha256"] == sha256(Result.stderr.encode("utf-8")).hexdigest()
+    assert "live store request failed" in receipt["stderr_excerpt"]
+    assert "super-secret-token" not in receipt["stderr_excerpt"]
+    assert "another-secret-token" not in receipt["stderr_excerpt"]
+    assert "json-secret-token" not in receipt["stderr_excerpt"]
+    assert "[REDACTED]" in receipt["stderr_excerpt"]
+
+
+def test_execute_pipeline_cli_spec_persists_failure_receipt_to_s3(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = {
+        (
+            "airflow-serp-artifacts",
+            "serp-evals/op/public-docs-seed-refresh-plan.json",
+        ): b"{}",
+    }
+    put_calls: list[tuple[str, str, str]] = []
+
+    class FakeS3Client:
+        def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
+            return {"Body": io.BytesIO(storage[(Bucket, Key)])}
+
+        def put_object(
+            self,
+            *,
+            Bucket: str,
+            Key: str,
+            Body: bytes,
+            ContentType: str,
+        ) -> None:
+            assert ContentType == "application/json"
+            storage[(Bucket, Key)] = Body
+            put_calls.append((Bucket, Key, Body.decode("utf-8")))
+
+    class Result:
+        returncode = 1
+        stdout = ""
+        stderr = "ValueError: OPENSEARCH_PASSWORD=do-not-persist"
+
+    monkeypatch.setattr("dags.serp_eval_contracts._s3_client", lambda: FakeS3Client())
+    monkeypatch.setattr(
+        "dags.serp_eval_contracts.subprocess.run", lambda *_args, **_kwargs: Result()
+    )
+
+    with pytest.raises(ValueError, match="failure_artifact_path="):
+        execute_pipeline_cli_spec(
+            {
+                "argv": [
+                    "python",
+                    "-m",
+                    "adapstory_serp_pipeline.orchestration.seed_refresh_cli",
+                    "--refresh-plan",
+                    "s3://airflow-serp-artifacts/serp-evals/op/public-docs-seed-refresh-plan.json",
+                    "--evidence-output",
+                    "s3://airflow-serp-artifacts/serp-evals/op/public-docs-seed-refresh-result.json",
+                ],
+                "contract_version": "serp-airflow-pipeline-cli-bridge/v1",
+                "dag_id": "serp_web_seed_crawl_refresh",
+                "input_paths": [
+                    "s3://airflow-serp-artifacts/serp-evals/op/public-docs-seed-refresh-plan.json"
+                ],
+                "operation_id": "op-1",
+                "status": "ready_for_pipeline_cli_runner",
+                "stdout_path": "s3://airflow-serp-artifacts/serp-evals/op/public-docs-seed-refresh-result.json",
+                "task_id": "public_docs_seed_refresh_pipeline",
+                "tenant_id": TENANT_ID,
+            }
+        )
+
+    assert len(put_calls) == 1
+    bucket, key, raw_receipt = put_calls[0]
+    assert (bucket, key) == (
+        "airflow-serp-artifacts",
+        "serp-evals/op/public-docs-seed-refresh-result.failure.json",
+    )
+    assert "do-not-persist" not in raw_receipt
+    assert json.loads(raw_receipt)["stderr_excerpt"].endswith("[REDACTED]")
+
+
 def test_execute_pipeline_cli_spec_rejects_evidence_only_public_docs_success(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

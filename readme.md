@@ -150,6 +150,11 @@ SERP eval DAG contracts:
   `python -m adapstory_serp_pipeline.orchestration.seed_refresh_cli` without
   shell expansion, passes the selected `--embedding-mode`, `--index-mode`, and
   store target names, then persists `public-docs-seed-refresh-result.json`.
+  A non-zero packaged-CLI exit is a hard D20 failure: the bridge writes the
+  adjacent `public-docs-seed-refresh-result.failure.json` receipt first, with
+  task/operation identity, exit code, stderr SHA-256, and a bounded redacted
+  stderr excerpt. This keeps the exact failure observable from the artifact
+  store without exposing raw credentials, and prevents BC-21/D5 progression.
   The packaged CLI executes the current fetch/parse/chunk/embed/index path
   through the SERP pipeline ports and writes deterministic batch evidence.
   `index_mode=live` requires `embedding_mode=live-gateway`; evidence-only

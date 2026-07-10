@@ -129,6 +129,29 @@ _SECRET_VALUE_PATTERNS = (
     re.compile(r"(?i)^bearer\s+[a-z0-9._-]+$"),
     re.compile(r"(?i)^sk-[a-z0-9_-]{16,}$"),
 )
+_PIPELINE_CLI_FAILURE_EXCERPT_MAX_CHARS = 2048
+_PIPELINE_CLI_FAILURE_SECRET_ASSIGNMENT_RE = re.compile(
+    r"""(?ix)
+    \b
+    (?P<field>
+        (?:[a-z0-9]+[_-])*(?:
+            access[_-]?token|api[_-]?key|apikey|authorization|client[_-]?secret|
+            connector[_-]?secret|credential|password|private[_-]?key|
+            secret(?:[_-]?value)?|token
+        )
+    )
+    \b
+    [\"']?
+    (?P<separator>\s*[:=]\s*)
+    (?P<value>[^,;\r\n]+)
+    """
+)
+_PIPELINE_CLI_FAILURE_BEARER_RE = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
+_PIPELINE_CLI_FAILURE_BASIC_RE = re.compile(r"(?i)\bbasic\s+[^\s,;]+")
+_PIPELINE_CLI_FAILURE_URL_CREDENTIALS_RE = re.compile(
+    r"(?i)(?P<scheme>https?://)(?P<username>[^\s/:@]+):(?P<password>[^\s/@]+)@"
+)
+_PIPELINE_CLI_FAILURE_SK_RE = re.compile(r"(?i)\bsk-[a-z0-9_-]{16,}\b")
 
 PublicDocsSitemapFrontierDiscoverer = Callable[
     [str, Mapping[str, Any], int],
@@ -1831,10 +1854,17 @@ def execute_pipeline_cli_spec(cli_spec: Mapping[str, Any] | str) -> dict[str, An
         )
     if completed.returncode != 0:
         stderr_sha256 = sha256(completed.stderr.encode("utf-8")).hexdigest()
+        failure_artifact_path = _write_pipeline_cli_failure_receipt(
+            spec,
+            stdout_path=stdout_path,
+            returncode=completed.returncode,
+            stderr=completed.stderr,
+        )
         raise ValueError(
             "pipeline cli execution failed: "
             f"task_id={_required_str(spec, 'task_id')} "
-            f"returncode={completed.returncode} stderr_sha256={stderr_sha256}"
+            f"returncode={completed.returncode} stderr_sha256={stderr_sha256} "
+            f"failure_artifact_path={failure_artifact_path}"
         )
     payload = _json_object(completed.stdout, "pipeline_cli_stdout")
     _reject_raw_secrets(payload)
@@ -1846,6 +1876,54 @@ def execute_pipeline_cli_spec(cli_spec: Mapping[str, Any] | str) -> dict[str, An
         operation_id=_required_str(spec, "operation_id"),
         payload=payload,
     )
+
+
+def _write_pipeline_cli_failure_receipt(
+    spec: Mapping[str, Any],
+    *,
+    stdout_path: str,
+    returncode: int,
+    stderr: str,
+) -> str:
+    failure_artifact_path = _pipeline_cli_failure_artifact_path(stdout_path)
+    payload = {
+        "artifact_type": "pipeline_cli_failure",
+        "contract_version": _PIPELINE_CLI_CONTRACT_VERSION,
+        "operation_id": _required_str(spec, "operation_id"),
+        "returncode": returncode,
+        "stderr_excerpt": _sanitize_pipeline_cli_failure_excerpt(stderr),
+        "stderr_sha256": sha256(stderr.encode("utf-8")).hexdigest(),
+        "task_id": _required_str(spec, "task_id"),
+    }
+    _reject_raw_secrets(payload)
+    _write_json_artifact(failure_artifact_path, payload)
+    return failure_artifact_path
+
+
+def _pipeline_cli_failure_artifact_path(stdout_path: str) -> str:
+    artifact = _artifact_ref("stdout_path", stdout_path)
+    if artifact.kind == "s3":
+        key = PurePosixPath(_required_str_ref(artifact.key))
+        return (
+            f"s3://{_required_str_ref(artifact.bucket)}/{key.with_name(f'{key.stem}.failure.json')}"
+        )
+    local_path = Path(_required_str_ref(artifact.local_path))
+    return str(local_path.with_name(f"{local_path.stem}.failure.json"))
+
+
+def _sanitize_pipeline_cli_failure_excerpt(stderr: str) -> str:
+    redacted = _PIPELINE_CLI_FAILURE_SECRET_ASSIGNMENT_RE.sub(
+        lambda match: f"{match.group('field')}{match.group('separator')}[REDACTED]",
+        stderr,
+    )
+    redacted = _PIPELINE_CLI_FAILURE_BEARER_RE.sub("Bearer [REDACTED]", redacted)
+    redacted = _PIPELINE_CLI_FAILURE_BASIC_RE.sub("Basic [REDACTED]", redacted)
+    redacted = _PIPELINE_CLI_FAILURE_URL_CREDENTIALS_RE.sub(
+        lambda match: f"{match.group('scheme')}[REDACTED]@",
+        redacted,
+    )
+    redacted = _PIPELINE_CLI_FAILURE_SK_RE.sub("[REDACTED]", redacted)
+    return redacted[:_PIPELINE_CLI_FAILURE_EXCERPT_MAX_CHARS]
 
 
 def _raise_for_failed_pipeline_payload(
