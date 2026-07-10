@@ -8,7 +8,6 @@ import os
 import re
 import subprocess
 import sys
-import xml.etree.ElementTree as ElementTree
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -16,14 +15,14 @@ from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
-from time import sleep
-from typing import Any, cast
+from time import perf_counter, sleep
+from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
-from urllib.robotparser import RobotFileParser
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from dags.public_docs_crawler import CrawlResponse, crawl_public_docs
 from dags.serp_public_docs_seed_catalog import (
     PUBLIC_DOCS_NIGHTLY_SOURCE_CATALOG_PATH,
     STACK_INVENTORY_SOURCE_PATH,
@@ -46,6 +45,9 @@ GATEWAY_CLI_MODULE = "adapstory_serp_mcp_gateway.airflow_eval_cli"
 GATEWAY_CLI_PYTHON = "python"
 PIPELINE_CLI_MODULE = "adapstory_serp_pipeline.orchestration.seed_refresh_cli"
 PIPELINE_PUBLISH_ACTIVATION_CLI_MODULE = "adapstory_serp_pipeline.registry.publish_activation_cli"
+PIPELINE_RETIRED_PACK_CLEANUP_CLI_MODULE = (
+    "adapstory_serp_pipeline.orchestration.retired_pack_cleanup_cli"
+)
 
 _RESOURCE_TYPES = frozenset({"pack", "tenant", "workflow"})
 _GATEWAY_CLI_CONTRACT_VERSION = "serp-airflow-gateway-cli-bridge/v1"
@@ -94,6 +96,9 @@ _BC21_BASE_URL_ENV = "ADAPSTORY_SERP_BC21_BASE_URL"
 _PUBLIC_DOCS_DEFAULT_QDRANT_COLLECTION = "serp_vectors_dev"
 _PUBLIC_DOCS_DEFAULT_OPENSEARCH_INDEX = "serp_lexical_dev"
 _PUBLIC_DOCS_DEFAULT_NEO4J_DATABASE = "serp_graph_dev"
+_PUBLIC_DOCS_RETRIEVAL_GOLDEN_MIN_CASES = 30
+_PUBLIC_DOCS_RETRIEVAL_GOLDEN_MAX_FRESHNESS_HOURS = 24
+_PUBLIC_DOCS_RETRIEVAL_GOLDEN_P95_SLO_SECONDS = 2.0
 _ARTIFACT_S3_ENDPOINT_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT"
 _ARTIFACT_S3_REGION_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION"
 _ARTIFACT_S3_ACCESS_KEY_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ACCESS_KEY"
@@ -122,7 +127,7 @@ _SECRET_VALUE_PATTERNS = (
 
 PublicDocsSitemapFrontierDiscoverer = Callable[
     [str, Mapping[str, Any], int],
-    Sequence[str],
+    Sequence[str] | Mapping[str, Any],
 ]
 
 
@@ -499,6 +504,10 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
         "public_docs_seed_refresh_result_path",
         _required_str(payload, "public_docs_seed_refresh_result_path"),
     )
+    seed_refresh_plan_path = _artifact_path(
+        "public_docs_seed_refresh_plan_path",
+        _required_str(payload, "public_docs_seed_refresh_plan_path"),
+    )
     seed_refresh_identity = _public_docs_seed_refresh_result_identity(seed_refresh_result_path)
     if seed_refresh_identity["tenant_id"] != str(tenant_id):
         raise ValueError("public_docs_seed_refresh_result identity must match tenant_id")
@@ -508,6 +517,28 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
         raise ValueError("public_docs_seed_refresh_result identity must match pack_version_id")
     activation_reason_code = _required_str(payload, "activation_reason_code")
     artifact_root_path = _required_artifact_root_path(payload)
+    crawl_state_path = _public_docs_crawl_state_path(payload, artifact_root_path)
+    previous_active_pack_version_id = _optional_previous_active_pack_version_id(payload)
+    if previous_active_pack_version_id == str(pack_version_id):
+        raise ValueError("previous_active_pack_version_id must not equal candidate pack_version_id")
+    qdrant_collection = _public_docs_store_name(
+        payload,
+        "qdrant_collection",
+        env_name=_PUBLIC_DOCS_QDRANT_COLLECTION_ENV,
+        default=_PUBLIC_DOCS_DEFAULT_QDRANT_COLLECTION,
+    )
+    opensearch_index = _public_docs_store_name(
+        payload,
+        "opensearch_index",
+        env_name=_PUBLIC_DOCS_OPENSEARCH_INDEX_ENV,
+        default=_PUBLIC_DOCS_DEFAULT_OPENSEARCH_INDEX,
+    )
+    neo4j_database = _public_docs_store_name(
+        payload,
+        "neo4j_database",
+        env_name=_PUBLIC_DOCS_NEO4J_DATABASE_ENV,
+        default=_PUBLIC_DOCS_DEFAULT_NEO4J_DATABASE,
+    )
     search_serve_base_url = _public_docs_search_serve_base_url(payload)
     operation_id = _operation_id(
         "serp-airflow-publish-signed-pack",
@@ -517,6 +548,8 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
         pack_id,
         pack_version_id,
         generated_at,
+        previous_active_pack_version_id or "",
+        seed_refresh_plan_path,
         seed_refresh_result_path,
         approval_idempotency_key,
         evidence_bundle_id,
@@ -546,6 +579,22 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
                     "public_docs_search_serve_smoke",
                     "public-docs-search-serve-smoke.json",
                 ),
+                (
+                    "public_docs_retrieval_golden",
+                    "public-docs-retrieval-golden.json",
+                ),
+                (
+                    "public_docs_coverage_proof",
+                    "public-docs-coverage-proof.json",
+                ),
+                (
+                    "public_docs_crawl_state_commit_receipt",
+                    "public-docs-crawl-state-commit-receipt.json",
+                ),
+                (
+                    "public_docs_retired_pack_cleanup",
+                    "public-docs-retired-pack-cleanup.json",
+                ),
             ),
         ),
         "benchmark_gate_export_sha256": benchmark_gate_export_sha256,
@@ -557,6 +606,9 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
         "operation_id": operation_id,
         "pack_id": str(pack_id),
         "pack_version_id": str(pack_version_id),
+        "qdrant_collection": qdrant_collection,
+        "opensearch_index": opensearch_index,
+        "neo4j_database": neo4j_database,
         "policy_data_class": _required_str(payload, "policy_data_class"),
         "policy_freshness_state": _required_str(payload, "policy_freshness_state"),
         "policy_license_obligation_state": _required_str(
@@ -567,6 +619,13 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
         "policy_trust_state": _required_str(payload, "policy_trust_state"),
         "policy_version": _required_str(payload, "policy_version"),
         "public_docs_seed_refresh_result_path": seed_refresh_result_path,
+        "public_docs_seed_refresh_plan_path": seed_refresh_plan_path,
+        "public_docs_crawl_state_path": crawl_state_path,
+        **(
+            {"previous_active_pack_version_id": previous_active_pack_version_id}
+            if previous_active_pack_version_id is not None
+            else {}
+        ),
         "registry_resource_id": str(registry_resource_id),
         "registry_resource_type": registry_resource_type,
         "search_serve_base_url": search_serve_base_url,
@@ -579,6 +638,11 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
                 "dispatch_publish_activation_submit",
                 "submit_publish_activation_to_bc21",
                 "verify_public_docs_search_serve",
+                "run_public_docs_retrieval_golden",
+                "write_public_docs_coverage_proof",
+                "commit_public_docs_crawl_state",
+                "build_retired_public_docs_pack_cleanup",
+                "cleanup_retired_public_docs_pack_versions",
                 "notify_governance_eval_surfaces",
             )
         ),
@@ -601,6 +665,8 @@ def build_public_docs_seed_refresh_plan(
     pack_id = _required_uuid(payload, "pack_id")
     pack_version_id = _required_uuid(payload, "pack_version_id")
     artifact_root_path = _required_artifact_root_path(payload)
+    crawl_state_path = _public_docs_crawl_state_path(payload, artifact_root_path)
+    active_pack_version_id = _optional_public_docs_active_pack_version_id(payload)
     index_mode = _public_docs_index_mode(payload)
     embedding_mode = _public_docs_embedding_mode(payload, index_mode)
     qdrant_collection = _public_docs_store_name(
@@ -648,6 +714,11 @@ def build_public_docs_seed_refresh_plan(
     )
     plan_payload = {
         "actor_id": _required_str(payload, "actor_id"),
+        **(
+            {"previous_active_pack_version_id": active_pack_version_id}
+            if active_pack_version_id is not None
+            else {}
+        ),
         "artifact_root_path": artifact_root_path,
         "artifact_paths": _artifact_paths(
             artifact_root_path,
@@ -685,6 +756,7 @@ def build_public_docs_seed_refresh_plan(
         "opensearch_index": opensearch_index,
         "pack_id": str(pack_id),
         "pack_version_id": str(pack_version_id),
+        "public_docs_crawl_state_path": crawl_state_path,
         "qdrant_collection": qdrant_collection,
         "registry_resource_id": str(registry_resource_id),
         "registry_resource_type": registry_resource_type,
@@ -708,6 +780,46 @@ def build_public_docs_seed_refresh_plan(
         "tenant_id": str(tenant_id),
     }
     return SerpDagPlan(plan_payload)
+
+
+def load_public_docs_crawl_state_conf(conf: Mapping[str, Any]) -> dict[str, Any]:
+    """Overlay the last D5-committed crawl state onto a D20 source catalog.
+
+    The stable state object is intentionally read before planning and only written
+    after D5 activates a fully covered pack.  A failed candidate therefore cannot
+    advance validators or turn changed content into a false no-op on the next run.
+    """
+
+    payload = _payload(conf)
+    _reject_raw_secrets(payload)
+    artifact_root_path = _required_artifact_root_path(payload)
+    state_path = _public_docs_crawl_state_path(payload, artifact_root_path)
+    raw_state = _read_optional_json_file(state_path, "public_docs_crawl_state")
+    if raw_state is None:
+        return {**payload, "public_docs_crawl_state_path": state_path}
+    _validate_public_docs_crawl_state_identity(raw_state, payload)
+    active_pack_version_id = str(_required_uuid(raw_state, "active_pack_version_id"))
+    persisted_seeds = _required_mapping(raw_state, "seeds")
+    hydrated_registry: list[dict[str, Any]] = []
+    for raw_seed in _required_object_list(payload, "seed_registry"):
+        seed = dict(raw_seed)
+        seed_id = _required_seed_id(seed)
+        persisted_seed = persisted_seeds.get(seed_id)
+        if persisted_seed is not None:
+            if not isinstance(persisted_seed, Mapping):
+                raise ValueError("public_docs_crawl_state seed must be an object")
+            freshness_state = _required_mapping(persisted_seed, "freshness_state")
+            # Validate before the persisted state becomes planner input.
+            seed["freshness_state"] = _public_docs_freshness_state(
+                {"freshness_state": freshness_state}
+            )
+        hydrated_registry.append(seed)
+    return {
+        **payload,
+        "active_pack_version_id": active_pack_version_id,
+        "public_docs_crawl_state_path": state_path,
+        "seed_registry": hydrated_registry,
+    }
 
 
 def default_public_docs_seed_refresh_conf(
@@ -830,6 +942,7 @@ def write_public_docs_publish_activation_trigger_conf_artifact(
         plan,
         (
             "public_docs_bc21_pipeline_state_receipt",
+            "public_docs_seed_refresh_plan",
             "public_docs_seed_refresh_result",
             "public_docs_publish_activation_trigger_conf",
         ),
@@ -842,6 +955,12 @@ def write_public_docs_publish_activation_trigger_conf_artifact(
         seed_refresh_result_path,
         "public_docs_seed_refresh_result",
     )
+    if _required_str(seed_refresh_result, "artifact_type") == "public_docs_seed_refresh_noop":
+        return _write_public_docs_noop_publish_trigger_artifact(
+            plan=plan,
+            artifact_paths=artifact_paths,
+            seed_refresh_result_path=seed_refresh_result_path,
+        )
     seed_refresh_identity = _public_docs_seed_refresh_result_identity(seed_refresh_result_path)
     if seed_refresh_identity["tenant_id"] != _required_str(plan, "tenant_id"):
         raise ValueError("public_docs_seed_refresh_result identity must match tenant_id")
@@ -899,6 +1018,14 @@ def write_public_docs_publish_activation_trigger_conf_artifact(
         "generated_at": _required_datetime_string(plan, "generated_at"),
         "pack_id": _required_str(plan, "pack_id"),
         "pack_version_id": _required_str(plan, "pack_version_id"),
+        "qdrant_collection": _required_str(plan, "qdrant_collection"),
+        "opensearch_index": _required_str(plan, "opensearch_index"),
+        "neo4j_database": _required_str(plan, "neo4j_database"),
+        "public_docs_crawl_state_path": _public_docs_crawl_state_path(
+            plan,
+            _required_artifact_root_path(plan),
+        ),
+        "public_docs_seed_refresh_plan_path": artifact_paths["public_docs_seed_refresh_plan"],
         **policy_inputs,
         "public_docs_seed_refresh_result_path": seed_refresh_result_path,
         "registry_resource_id": _required_str(plan, "registry_resource_id"),
@@ -907,6 +1034,13 @@ def write_public_docs_publish_activation_trigger_conf_artifact(
     }
     if bc21_base_url := plan.get("bc21_base_url"):
         trigger_conf["bc21_base_url"] = _required_bc21_base_url({"bc21_base_url": bc21_base_url})
+    if previous_active_pack_version_id := plan.get("previous_active_pack_version_id"):
+        trigger_conf["previous_active_pack_version_id"] = str(
+            _required_uuid(
+                {"previous_active_pack_version_id": previous_active_pack_version_id},
+                "previous_active_pack_version_id",
+            )
+        )
     governance_required_fields: list[str] = []
     if "bc21_base_url" not in trigger_conf:
         governance_required_fields.append("bc21_base_url")
@@ -939,15 +1073,10 @@ def write_public_docs_publish_activation_trigger_conf_artifact(
 def submit_public_docs_bc21_pipeline_state_artifact(
     plan_json: Mapping[str, Any] | str,
 ) -> dict[str, Any]:
-    bc21_pipeline_state: Any = importlib.import_module(
-        "adapstory_serp_pipeline.registry.bc21_pipeline_state"
-    )
-
     plan = _json_object(plan_json, "plan_json")
     _reject_raw_secrets(plan)
     if _required_str(plan, "dag_id") != "serp_web_seed_crawl_refresh":
         raise ValueError("plan dag_id does not match public docs BC-21 pipeline-state submit")
-    bc21_base_url = _required_bc21_base_url(plan)
     artifact_paths = _required_artifact_paths(
         plan,
         (
@@ -963,7 +1092,27 @@ def submit_public_docs_bc21_pipeline_state_artifact(
         seed_refresh_result_path,
         "public_docs_seed_refresh_result",
     )
+    if _required_str(refresh_result, "artifact_type") == "public_docs_seed_refresh_noop":
+        return _write_public_docs_noop_bc21_receipt(
+            plan=plan,
+            artifact_paths=artifact_paths,
+            seed_refresh_result_path=seed_refresh_result_path,
+        )
+    bc21_base_url = _required_bc21_base_url(plan)
+    bc21_pipeline_state: Any = importlib.import_module(
+        "adapstory_serp_pipeline.registry.bc21_pipeline_state"
+    )
     batch_evidence = _required_mapping(refresh_result, "batch_evidence")
+    coverage_proof = _required_mapping(refresh_result, "coverage_proof")
+    if _required_str(coverage_proof, "coverage_status") != "indexed_pending_publish":
+        raise ValueError(
+            "public docs coverage proof must be fully indexed before BC-21 registration"
+        )
+    _assert_equal("tenant_id", _required_str(batch_evidence, "tenant_id"), coverage_proof)
+    _assert_equal("pack_id", _required_str(batch_evidence, "pack_id"), coverage_proof)
+    _assert_equal(
+        "pack_version_id", _required_str(batch_evidence, "pack_version_id"), coverage_proof
+    )
     status = _required_str(batch_evidence, "status")
     if status not in {
         "indexed",
@@ -995,9 +1144,78 @@ def submit_public_docs_bc21_pipeline_state_artifact(
     }
     artifact_path = artifact_paths["public_docs_bc21_pipeline_state_receipt"]
     _write_json_artifact(artifact_path, payload)
+    _emit_public_docs_operational_gauge(
+        "refresh_success_timestamp",
+        _datetime_value(
+            _required_datetime_string(plan, "generated_at"),
+            "generated_at",
+        ).timestamp(),
+    )
+    _emit_public_docs_operational_gauge("quarantined_sources", 0)
     return _artifact_result(
         artifact_path,
         artifact_type="public_docs_bc21_pipeline_state_receipt",
+        operation_id=_required_str(plan, "operation_id"),
+        payload=payload,
+    )
+
+
+def _write_public_docs_noop_bc21_receipt(
+    *,
+    plan: Mapping[str, Any],
+    artifact_paths: Mapping[str, str],
+    seed_refresh_result_path: str,
+) -> dict[str, Any]:
+    active_pack_version_id = str(_required_uuid(plan, "previous_active_pack_version_id"))
+    payload = {
+        "active_pack_version_id": active_pack_version_id,
+        "artifact_type": "public_docs_noop_pipeline_state_receipt",
+        "contract_version": _EVAL_CONTRACT_VERSION,
+        "operation_id": _required_str(plan, "operation_id"),
+        "public_docs_seed_refresh_result_path": seed_refresh_result_path,
+        "reason": "all_seed_refreshes_within_max_age",
+        "status": "not_submitted_no_change",
+        "tenant_id": _required_str(plan, "tenant_id"),
+    }
+    artifact_path = artifact_paths["public_docs_bc21_pipeline_state_receipt"]
+    _write_json_artifact(artifact_path, payload)
+    return _artifact_result(
+        artifact_path,
+        artifact_type="public_docs_bc21_pipeline_state_receipt",
+        operation_id=_required_str(plan, "operation_id"),
+        payload=payload,
+    )
+
+
+def _write_public_docs_noop_publish_trigger_artifact(
+    *,
+    plan: Mapping[str, Any],
+    artifact_paths: Mapping[str, str],
+    seed_refresh_result_path: str,
+) -> dict[str, Any]:
+    receipt_path = artifact_paths["public_docs_bc21_pipeline_state_receipt"]
+    noop_receipt = _read_json_file(receipt_path, "public_docs_bc21_pipeline_state_receipt")
+    if _required_str(noop_receipt, "status") != "not_submitted_no_change":
+        raise ValueError("public docs no-op receipt must retain the active pack")
+    active_pack_version_id = str(_required_uuid(plan, "previous_active_pack_version_id"))
+    if _required_str(noop_receipt, "active_pack_version_id") != active_pack_version_id:
+        raise ValueError("public docs no-op receipt active_pack_version_id must match state")
+    payload = {
+        "active_pack_version_id": active_pack_version_id,
+        "artifact_type": "public_docs_publish_activation_trigger_conf",
+        "contract_version": _EVAL_CONTRACT_VERSION,
+        "dag_id": "serp_web_seed_crawl_refresh",
+        "generated_at": _required_datetime_string(plan, "generated_at"),
+        "operation_id": _required_str(plan, "operation_id"),
+        "source_seed_refresh_result_path": seed_refresh_result_path,
+        "status": "no_change_active_pack_retained",
+        "tenant_id": _required_str(plan, "tenant_id"),
+    }
+    artifact_path = artifact_paths["public_docs_publish_activation_trigger_conf"]
+    _write_json_artifact(artifact_path, payload)
+    return _artifact_result(
+        artifact_path,
+        artifact_type="public_docs_publish_activation_trigger_conf",
         operation_id=_required_str(plan, "operation_id"),
         payload=payload,
     )
@@ -1067,6 +1285,284 @@ def write_public_docs_search_serve_smoke_artifact(
         operation_id=_required_str(plan, "operation_id"),
         payload=payload,
     )
+
+
+def write_public_docs_retrieval_golden_artifact(
+    plan_json: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    """Run the governed public-docs retrieval acceptance set against the live MCP API."""
+
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != "serp_publish_signed_pack":
+        raise ValueError("plan dag_id does not match public docs retrieval golden runner")
+    artifact_paths = _required_artifact_paths(
+        plan,
+        (
+            "public_docs_publish_activation_receipt",
+            "public_docs_retrieval_golden",
+        ),
+    )
+    receipt = _read_json_file(
+        artifact_paths["public_docs_publish_activation_receipt"],
+        "public_docs_publish_activation_receipt",
+    )
+    expected_pack_version_id = _required_str(plan, "pack_version_id")
+    if _required_str(receipt, "active_pack_version_id") != expected_pack_version_id:
+        raise ValueError("retrieval golden requires the candidate pack to be active")
+    refresh_plan = _read_json_file(
+        _artifact_path(
+            "public_docs_seed_refresh_plan_path",
+            _required_str(plan, "public_docs_seed_refresh_plan_path"),
+        ),
+        "public_docs_seed_refresh_plan",
+    )
+    cases = _public_docs_retrieval_golden_cases(refresh_plan)
+    endpoint = _public_docs_search_serve_base_url(plan) + "/api/serp/search/v1/query"
+    observed_cases: list[dict[str, Any]] = []
+    latency_seconds: list[float] = []
+    for case in cases:
+        request = _public_docs_search_request_for_golden_case(plan, case)
+        first_started_at = perf_counter()
+        first_response = _post_json(endpoint, request, attempts=3, retry_statuses=(503,))
+        latency_seconds.append(perf_counter() - first_started_at)
+        second_started_at = perf_counter()
+        second_response = _post_json(endpoint, request, attempts=3, retry_statuses=(503,))
+        latency_seconds.append(perf_counter() - second_started_at)
+        observed_cases.append(
+            _validate_public_docs_retrieval_golden_case(
+                case=case,
+                expected_pack_version_id=expected_pack_version_id,
+                generated_at=_required_datetime_string(plan, "generated_at"),
+                first_response=first_response,
+                second_response=second_response,
+                first_latency_seconds=latency_seconds[-2],
+                second_latency_seconds=latency_seconds[-1],
+            )
+        )
+    p50 = _public_docs_latency_percentile(latency_seconds, percentile=0.50)
+    p95 = _public_docs_latency_percentile(latency_seconds, percentile=0.95)
+    if p95 > _PUBLIC_DOCS_RETRIEVAL_GOLDEN_P95_SLO_SECONDS:
+        raise ValueError(
+            "public docs retrieval golden p95 latency exceeds SLO: "
+            f"p95={p95:.6f}s slo={_PUBLIC_DOCS_RETRIEVAL_GOLDEN_P95_SLO_SECONDS:.6f}s"
+        )
+    payload = {
+        "artifact_type": "public_docs_retrieval_golden",
+        "case_count": len(observed_cases),
+        "cases": observed_cases,
+        "contract_version": _EVAL_CONTRACT_VERSION,
+        "endpoint": endpoint,
+        "expected_pack_version_id": expected_pack_version_id,
+        "generated_at": _required_datetime_string(plan, "generated_at"),
+        "latency_seconds": {"p50": p50, "p95": p95},
+        "operation_id": _required_str(plan, "operation_id"),
+        "status": "passed",
+        "tenant_id": _required_str(plan, "tenant_id"),
+    }
+    artifact_path = artifact_paths["public_docs_retrieval_golden"]
+    _write_json_artifact(artifact_path, payload)
+    _emit_public_docs_operational_gauge("retrieval_golden_p95_seconds", p95)
+    _emit_public_docs_operational_gauge("retrieval_golden_passed", 1)
+    return _artifact_result(
+        artifact_path,
+        artifact_type="public_docs_retrieval_golden",
+        operation_id=_required_str(plan, "operation_id"),
+        payload=payload,
+    )
+
+
+def write_public_docs_coverage_proof_artifact(
+    plan_json: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != "serp_publish_signed_pack":
+        raise ValueError("plan dag_id does not match public docs coverage proof")
+    artifact_paths = _required_artifact_paths(
+        plan,
+        (
+            "public_docs_publish_activation_receipt",
+            "public_docs_coverage_proof",
+        ),
+    )
+    refresh_result_path = _artifact_path(
+        "public_docs_seed_refresh_result_path",
+        _required_str(plan, "public_docs_seed_refresh_result_path"),
+    )
+    refresh_result = _read_json_file(refresh_result_path, "public_docs_seed_refresh_result")
+    indexed_proof = _required_mapping(refresh_result, "coverage_proof")
+    receipt_path = _artifact_path(
+        "public_docs_publish_activation_receipt",
+        artifact_paths["public_docs_publish_activation_receipt"],
+    )
+    publish_receipt = _read_json_file(receipt_path, "public_docs_publish_activation_receipt")
+    coverage_module: Any = importlib.import_module("adapstory_serp_pipeline.orchestration.coverage")
+    coverage_proof = coverage_module.finalize_public_docs_coverage_proof(
+        indexed_proof,
+        publish_receipt=publish_receipt,
+    )
+    if coverage_proof.get("coverage_status") != "complete":
+        raise ValueError("public docs coverage proof must be complete before D5 succeeds")
+    payload = {
+        **coverage_proof,
+        "artifact_type": "public_docs_coverage_proof",
+        "d5_operation_id": _required_str(plan, "operation_id"),
+        "publish_receipt_path": receipt_path,
+        "public_docs_seed_refresh_result_path": refresh_result_path,
+    }
+    artifact_path = artifact_paths["public_docs_coverage_proof"]
+    _write_json_artifact(artifact_path, payload)
+    _emit_public_docs_operational_gauge("coverage_ratio", 1)
+    _emit_public_docs_operational_gauge("index_consistency", 1)
+    _emit_public_docs_operational_gauge(
+        "active_pack_published_timestamp",
+        _datetime_value(
+            _required_datetime_string(plan, "generated_at"),
+            "generated_at",
+        ).timestamp(),
+    )
+    return _artifact_result(
+        artifact_path,
+        artifact_type="public_docs_coverage_proof",
+        operation_id=_required_str(plan, "operation_id"),
+        payload=payload,
+    )
+
+
+def write_public_docs_crawl_state_artifact(
+    plan_json: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    """Commit crawler validators only after D5 has activated complete coverage."""
+
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != "serp_publish_signed_pack":
+        raise ValueError("plan dag_id does not match public docs crawl-state writer")
+    artifact_paths = _required_artifact_paths(
+        plan,
+        (
+            "public_docs_coverage_proof",
+            "public_docs_crawl_state_commit_receipt",
+            "public_docs_publish_activation_receipt",
+        ),
+    )
+    coverage_path = artifact_paths["public_docs_coverage_proof"]
+    coverage_proof = _read_json_file(coverage_path, "public_docs_coverage_proof")
+    if _required_str(coverage_proof, "coverage_status") != "complete":
+        raise ValueError("public docs coverage proof must be complete before crawler state commit")
+    _assert_equal("tenant_id", _required_str(plan, "tenant_id"), coverage_proof)
+    _assert_equal("pack_id", _required_str(plan, "pack_id"), coverage_proof)
+    _assert_equal("pack_version_id", _required_str(plan, "pack_version_id"), coverage_proof)
+    activation_receipt_path = artifact_paths["public_docs_publish_activation_receipt"]
+    activation_receipt = _read_json_file(
+        activation_receipt_path,
+        "public_docs_publish_activation_receipt",
+    )
+    if _required_str(activation_receipt, "active_pack_version_id") != _required_str(
+        plan, "pack_version_id"
+    ):
+        raise ValueError("publish activation receipt active_pack_version_id must match plan")
+    if _required_str(activation_receipt, "status") not in {"active", "activated", "published"}:
+        raise ValueError("publish activation receipt must be active before crawler state commit")
+    refresh_plan_path = _artifact_path(
+        "public_docs_seed_refresh_plan_path",
+        _required_str(plan, "public_docs_seed_refresh_plan_path"),
+    )
+    refresh_plan = _read_json_file(refresh_plan_path, "public_docs_seed_refresh_plan")
+    crawl_state_path = _public_docs_crawl_state_path(
+        plan,
+        _required_artifact_root_path(plan),
+    )
+    state_payload = _public_docs_crawl_state_payload(
+        plan=plan,
+        refresh_plan=refresh_plan,
+        coverage_proof=coverage_proof,
+        activation_receipt=activation_receipt,
+    )
+    _write_json_artifact(crawl_state_path, state_payload)
+    commit_payload = {
+        "activation_receipt_path": activation_receipt_path,
+        "artifact_type": "public_docs_crawl_state_commit_receipt",
+        "committed_crawl_state_path": crawl_state_path,
+        "contract_version": _EVAL_CONTRACT_VERSION,
+        "coverage_proof_path": coverage_path,
+        "generated_at": _required_datetime_string(plan, "generated_at"),
+        "operation_id": _required_str(plan, "operation_id"),
+        "refresh_plan_path": refresh_plan_path,
+        "state_sha256": sha256(_canonical_json(state_payload).encode("utf-8")).hexdigest(),
+        "status": "committed",
+        "tenant_id": _required_str(plan, "tenant_id"),
+    }
+    receipt_path = artifact_paths["public_docs_crawl_state_commit_receipt"]
+    _write_json_artifact(receipt_path, commit_payload)
+    return _artifact_result(
+        receipt_path,
+        artifact_type="public_docs_crawl_state_commit_receipt",
+        operation_id=_required_str(plan, "operation_id"),
+        payload=commit_payload,
+    )
+
+
+def _public_docs_crawl_state_payload(
+    *,
+    plan: Mapping[str, Any],
+    refresh_plan: Mapping[str, Any],
+    coverage_proof: Mapping[str, Any],
+    activation_receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    registry = _required_object_list(refresh_plan, "seed_registry")
+    coverage_by_seed: dict[str, Mapping[str, Any]] = {}
+    for report in _required_object_list(coverage_proof, "seeds"):
+        seed_id = _required_str(report, "seed_id")
+        if seed_id in coverage_by_seed:
+            raise ValueError("coverage proof contains duplicate seed_id")
+        if _required_str(report, "status") != "published":
+            raise ValueError("coverage proof contains unpublished seed")
+        if _required_str(report, "index_status") != "passed":
+            raise ValueError("coverage proof contains incompletely indexed seed")
+        coverage_by_seed[seed_id] = report
+    registry_by_seed = {_required_seed_id(seed): seed for seed in registry}
+    if len(registry_by_seed) != len(registry) or set(registry_by_seed) != set(coverage_by_seed):
+        raise ValueError("coverage proof seed set must match refresh plan registry")
+    generated_at = _required_datetime_string(plan, "generated_at")
+    state_seeds: dict[str, dict[str, Any]] = {}
+    for seed_id, seed in sorted(registry_by_seed.items()):
+        report = coverage_by_seed[seed_id]
+        freshness_state = dict(_required_mapping(seed, "freshness_state"))
+        crawl_policy = _required_mapping(seed, "crawl_policy")
+        crawl_evidence = crawl_policy.get("crawl_evidence")
+        if crawl_evidence is not None:
+            if not isinstance(crawl_evidence, Mapping):
+                raise ValueError("crawl_policy.crawl_evidence must be an object")
+            if crawl_evidence.get("status") != "completed":
+                raise ValueError("crawler evidence must be completed before state commit")
+            page_state = _required_mapping(crawl_evidence, "state")
+            freshness_state["page_state"] = _validated_public_docs_page_state(page_state)
+        freshness_state.update(
+            {
+                "last_attempt_at": generated_at,
+                "last_pipeline_evidence_sha256": "sha256:"
+                + sha256(_canonical_json(report).encode("utf-8")).hexdigest(),
+                "last_source_uri_hash": "sha256:"
+                + sha256(_required_str(seed, "source_uri").encode("utf-8")).hexdigest(),
+                "last_success_at": generated_at,
+                "status": "indexed",
+            }
+        )
+        state_seeds[seed_id] = {
+            "freshness_state": _public_docs_freshness_state({"freshness_state": freshness_state})
+        }
+    return {
+        "active_pack_version_id": _required_str(activation_receipt, "active_pack_version_id"),
+        "artifact_type": "public_docs_crawl_state",
+        "contract_version": _EVAL_CONTRACT_VERSION,
+        "pack_id": _required_str(plan, "pack_id"),
+        "seeds": state_seeds,
+        "status": "active",
+        "tenant_id": _required_str(plan, "tenant_id"),
+        "updated_at": generated_at,
+    }
 
 
 def write_nightly_suite_plan_artifact(
@@ -1163,6 +1659,8 @@ def execute_pipeline_cli_spec(cli_spec: Mapping[str, Any] | str) -> dict[str, An
     status = _required_str(spec, "status")
     if status == "no_due_sources":
         return _execute_pipeline_noop_spec(spec)
+    if status == "retired_pack_cleanup_not_required":
+        return _execute_retired_pack_cleanup_noop_spec(spec)
     if status != "ready_for_pipeline_cli_runner":
         raise ValueError("pipeline cli spec is not ready for execution")
     argv = _required_str_list(spec, "argv")
@@ -1227,6 +1725,10 @@ def _raise_for_failed_pipeline_payload(
         _validate_publishable_public_docs_batch_counters(batch_evidence, status=status)
         return
     if status == "indexed_with_quarantined_failures":
+        _emit_public_docs_operational_gauge(
+            "quarantined_sources",
+            _required_non_negative_int(batch_evidence, "quarantined_count"),
+        )
         raise ValueError(
             "public docs seed refresh has required source failures or quarantined sources: "
             f"required_failed_count={batch_evidence.get('required_failed_count')} "
@@ -1286,6 +1788,26 @@ def _execute_pipeline_noop_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
         "status": "no_due_sources",
         "tenant_id": _required_str(spec, "tenant_id"),
         "index_mode": _required_str(spec, "index_mode"),
+    }
+    _write_json_artifact(stdout_path, payload)
+    return _artifact_result(
+        stdout_path,
+        artifact_type=_required_str(spec, "task_id"),
+        operation_id=_required_str(spec, "operation_id"),
+        payload=payload,
+    )
+
+
+def _execute_retired_pack_cleanup_noop_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
+    stdout_path = _artifact_path("stdout_path", _required_str(spec, "stdout_path"))
+    payload = {
+        "artifact_type": "public_docs_retired_pack_cleanup",
+        "contract_version": _PIPELINE_CLI_CONTRACT_VERSION,
+        "dag_id": _required_str(spec, "dag_id"),
+        "operation_id": _required_str(spec, "operation_id"),
+        "reason": "no_previous_active_pack_version",
+        "status": "not_required",
+        "tenant_id": _required_str(spec, "tenant_id"),
     }
     _write_json_artifact(stdout_path, payload)
     return _artifact_result(
@@ -1923,6 +2445,72 @@ def build_public_docs_publish_activation_submit_cli_spec(
     }
 
 
+def build_public_docs_retired_pack_cleanup_cli_spec(
+    plan_json: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    """Build the post-D5 physical cleanup handoff for an old active pack."""
+
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != "serp_publish_signed_pack":
+        raise ValueError("plan dag_id does not match retired public docs pack cleanup")
+    artifact_paths = _required_artifact_paths(plan, ("public_docs_retired_pack_cleanup",))
+    output_path = artifact_paths["public_docs_retired_pack_cleanup"]
+    previous_active_pack_version_id = _optional_previous_active_pack_version_id(plan)
+    if previous_active_pack_version_id is None:
+        return {
+            "argv": [],
+            "contract_version": _PIPELINE_CLI_CONTRACT_VERSION,
+            "dag_id": "serp_publish_signed_pack",
+            "input_paths": [],
+            "operation_id": _required_str(plan, "operation_id"),
+            "plan_sha256": sha256(_canonical_json(plan).encode("utf-8")).hexdigest(),
+            "status": "retired_pack_cleanup_not_required",
+            "stdout_path": output_path,
+            "task_id": "public_docs_retired_pack_cleanup",
+            "tenant_id": _required_str(plan, "tenant_id"),
+        }
+    argv = [
+        GATEWAY_CLI_PYTHON,
+        "-m",
+        PIPELINE_RETIRED_PACK_CLEANUP_CLI_MODULE,
+        "--artifact-root",
+        _required_str(plan, "artifact_root_path"),
+        "--evidence-output",
+        output_path,
+        "--clock-at",
+        _required_datetime_string(plan, "generated_at"),
+        "--index-mode",
+        "live",
+        "--tenant-id",
+        _required_str(plan, "tenant_id"),
+        "--pack-id",
+        _required_str(plan, "pack_id"),
+        "--active-pack-version-id",
+        _required_str(plan, "pack_version_id"),
+        "--retired-pack-version-id",
+        previous_active_pack_version_id,
+        "--qdrant-collection",
+        _required_str(plan, "qdrant_collection"),
+        "--opensearch-index",
+        _required_str(plan, "opensearch_index"),
+        "--neo4j-database",
+        _required_str(plan, "neo4j_database"),
+    ]
+    return {
+        "argv": argv,
+        "contract_version": _PIPELINE_CLI_CONTRACT_VERSION,
+        "dag_id": "serp_publish_signed_pack",
+        "input_paths": [],
+        "operation_id": _required_str(plan, "operation_id"),
+        "plan_sha256": sha256(_canonical_json(plan).encode("utf-8")).hexdigest(),
+        "status": "ready_for_pipeline_cli_runner",
+        "stdout_path": output_path,
+        "task_id": "public_docs_retired_pack_cleanup",
+        "tenant_id": _required_str(plan, "tenant_id"),
+    }
+
+
 def _public_docs_seed_refresh_result_identity(seed_refresh_result_path: str) -> dict[str, str]:
     result = _read_json_file(seed_refresh_result_path, "public_docs_seed_refresh_result")
     if _required_str(result, "artifact_type") != "public_docs_seed_refresh_batch_evidence":
@@ -1989,6 +2577,227 @@ def _public_docs_search_serve_smoke_request(plan: Mapping[str, Any]) -> dict[str
         "tenant_mode": "public",
         "tenant_scope": "public",
     }
+
+
+def _public_docs_retrieval_golden_cases(refresh_plan: Mapping[str, Any]) -> list[dict[str, Any]]:
+    seeds = _required_object_list(refresh_plan, "seed_registry")
+    cases: list[dict[str, Any]] = []
+    for seed in sorted(seeds, key=lambda item: _required_str(item, "seed_id")):
+        component = _required_str(_required_mapping(seed, "inventory_evidence"), "component")
+        source_uri = _required_str(seed, "source_uri")
+        cases.append(
+            _public_docs_retrieval_golden_case(
+                seed_id=_required_str(seed, "seed_id"),
+                component=component,
+                source_uri=source_uri,
+                query=f"{component} official documentation overview",
+            )
+        )
+    for seed in sorted(seeds, key=lambda item: _required_str(item, "seed_id")):
+        component = _required_str(_required_mapping(seed, "inventory_evidence"), "component")
+        raw_frontier_urls = _required_mapping(seed, "crawl_policy").get("frontier_urls", [])
+        if not isinstance(raw_frontier_urls, list) or not all(
+            isinstance(value, str) and value for value in raw_frontier_urls
+        ):
+            raise ValueError("crawl_policy.frontier_urls must be a list of non-empty strings")
+        for frontier_url in raw_frontier_urls:
+            cases.append(
+                _public_docs_retrieval_golden_case(
+                    seed_id=_required_str(seed, "seed_id"),
+                    component=component,
+                    source_uri=frontier_url,
+                    query=(
+                        f"{component} documentation "
+                        f"{urlparse(frontier_url).path.rsplit('/', 1)[-1]}"
+                    ),
+                )
+            )
+    unique_cases: dict[str, dict[str, Any]] = {}
+    for case in cases:
+        case_id = _required_str(case, "case_id")
+        if case_id in unique_cases:
+            raise ValueError("public docs retrieval golden contains duplicate case_id")
+        unique_cases[case_id] = case
+    selected = [unique_cases[case_id] for case_id in sorted(unique_cases)]
+    if len(selected) < _PUBLIC_DOCS_RETRIEVAL_GOLDEN_MIN_CASES:
+        raise ValueError(
+            "public docs retrieval golden requires at least "
+            f"{_PUBLIC_DOCS_RETRIEVAL_GOLDEN_MIN_CASES} governed cases"
+        )
+    return selected[:_PUBLIC_DOCS_RETRIEVAL_GOLDEN_MIN_CASES]
+
+
+def _public_docs_retrieval_golden_case(
+    *,
+    seed_id: str,
+    component: str,
+    source_uri: str,
+    query: str,
+) -> dict[str, Any]:
+    source_uri_hash = sha256(source_uri.encode("utf-8")).hexdigest()[:16]
+    return {
+        "case_id": f"public-docs-{seed_id}-{source_uri_hash}",
+        "component": component,
+        "expected": {
+            "max_freshness_hours": _PUBLIC_DOCS_RETRIEVAL_GOLDEN_MAX_FRESHNESS_HOURS,
+            "minimum_citations": 1,
+            "source_uri_prefix": source_uri,
+        },
+        "query": query,
+        "seed_id": seed_id,
+    }
+
+
+def _public_docs_search_request_for_golden_case(
+    plan: Mapping[str, Any], case: Mapping[str, Any]
+) -> dict[str, Any]:
+    request = _public_docs_search_serve_smoke_request(plan)
+    case_id = _required_str(case, "case_id")
+    expected = _required_mapping(case, "expected")
+    request["request_id"] = str(
+        uuid5(
+            _PUBLIC_DOCS_NAMESPACE,
+            "public-docs-retrieval-golden:" + _required_str(plan, "operation_id") + ":" + case_id,
+        )
+    )
+    request["query"] = _required_str(case, "query")
+    request["metadata"] = {
+        **_required_mapping(request, "metadata"),
+        "golden_case_expected_source_uri": _required_str(expected, "source_uri_prefix"),
+        "golden_case_id": case_id,
+        "surface": "airflow-public-docs-retrieval-golden",
+    }
+    request["policy_rule_ids_applied"] = ["serp-public-docs-active-pack-retrieval-golden"]
+    return request
+
+
+def _validate_public_docs_retrieval_golden_case(
+    *,
+    case: Mapping[str, Any],
+    expected_pack_version_id: str,
+    generated_at: str,
+    first_response: Mapping[str, Any],
+    second_response: Mapping[str, Any],
+    first_latency_seconds: float,
+    second_latency_seconds: float,
+) -> dict[str, Any]:
+    first_signature = _public_docs_retrieval_golden_response_signature(
+        response=first_response,
+        case=case,
+        expected_pack_version_id=expected_pack_version_id,
+        generated_at=generated_at,
+    )
+    second_signature = _public_docs_retrieval_golden_response_signature(
+        response=second_response,
+        case=case,
+        expected_pack_version_id=expected_pack_version_id,
+        generated_at=generated_at,
+    )
+    if first_signature != second_signature:
+        raise ValueError(
+            "public docs retrieval golden replay is non-deterministic: "
+            f"case_id={_required_str(case, 'case_id')}"
+        )
+    return {
+        "case_id": _required_str(case, "case_id"),
+        "expected": dict(_required_mapping(case, "expected")),
+        "latency_seconds": {"first": first_latency_seconds, "replay": second_latency_seconds},
+        "observed": first_signature,
+        "query": _required_str(case, "query"),
+        "seed_id": _required_str(case, "seed_id"),
+        "status": "passed",
+    }
+
+
+def _public_docs_retrieval_golden_response_signature(
+    *,
+    response: Mapping[str, Any],
+    case: Mapping[str, Any],
+    expected_pack_version_id: str,
+    generated_at: str,
+) -> dict[str, Any]:
+    selected_pack_version_ids = _required_str_list(response, "selected_pack_version_ids")
+    if selected_pack_version_ids != [expected_pack_version_id]:
+        raise ValueError("public docs retrieval golden selected pack must match active pack")
+    expected = _required_mapping(case, "expected")
+    expected_source_uri_prefix = _required_str(expected, "source_uri_prefix")
+    minimum_citations = _required_positive_int(expected, "minimum_citations")
+    citations = _required_object_list(response, "citations")
+    if len(citations) < minimum_citations:
+        raise ValueError("public docs retrieval golden response has insufficient citations")
+    canonical_citations: list[dict[str, str]] = []
+    for citation in citations:
+        citation_pack_version_id = _required_str(citation, "pack_version_id")
+        citation_source_uri = _required_str(citation, "source_uri")
+        if citation_pack_version_id != expected_pack_version_id:
+            raise ValueError("public docs retrieval golden citation pack version mismatch")
+        if not citation_source_uri.startswith(expected_source_uri_prefix):
+            raise ValueError("public docs retrieval golden cross-source contamination detected")
+        canonical_citations.append(
+            {
+                "chunk_id": _required_str(citation, "chunk_id"),
+                "source_uri": citation_source_uri,
+            }
+        )
+    result_count = _required_positive_int(response, "result_count")
+    result_cards = _required_object_list(response, "result_cards")
+    if len(result_cards) != result_count:
+        raise ValueError("public docs retrieval golden result cards must match result_count")
+    generated_at_value = _datetime_value(generated_at, "generated_at")
+    max_freshness_hours = _required_positive_int(expected, "max_freshness_hours")
+    canonical_cards: list[dict[str, str]] = []
+    for card in result_cards:
+        provenance = _required_mapping(card, "provenance")
+        source_url = _required_str(provenance, "source_url")
+        if not source_url.startswith(expected_source_uri_prefix):
+            raise ValueError("public docs retrieval golden result source contamination detected")
+        if _required_str(provenance, "freshness_state") != "fresh":
+            raise ValueError("public docs retrieval golden result is not fresh")
+        crawled_at = _datetime_value(_required_str(provenance, "crawl_time"), "crawl_time")
+        freshness_hours = (generated_at_value - crawled_at).total_seconds() / 3600
+        if freshness_hours < 0 or freshness_hours > max_freshness_hours:
+            raise ValueError("public docs retrieval golden result exceeds freshness SLO")
+        canonical_cards.append(
+            {
+                "chunk_id": _required_str(card, "chunk_id"),
+                "source_url": source_url,
+            }
+        )
+    return {
+        "citations": sorted(
+            canonical_citations,
+            key=lambda item: (item["chunk_id"], item["source_uri"]),
+        ),
+        "result_cards": sorted(
+            canonical_cards,
+            key=lambda item: (item["chunk_id"], item["source_url"]),
+        ),
+        "result_chunk_ids": _required_str_list(response, "result_chunk_ids"),
+        "result_count": result_count,
+        "selected_pack_version_ids": selected_pack_version_ids,
+    }
+
+
+def _public_docs_latency_percentile(samples: Sequence[float], *, percentile: float) -> float:
+    if not samples:
+        raise ValueError("public docs retrieval golden requires latency samples")
+    if not 0 < percentile <= 1:
+        raise ValueError("latency percentile must be within (0, 1]")
+    ordered = sorted(samples)
+    index = max(0, math.ceil(percentile * len(ordered)) - 1)
+    return ordered[index]
+
+
+def _emit_public_docs_operational_gauge(metric_name: str, value: float | int) -> None:
+    """Best-effort StatsD emission; durable D20/D5 artifacts remain the source of truth."""
+
+    if not isinstance(value, int | float) or isinstance(value, bool) or not math.isfinite(value):
+        raise ValueError("public docs operational metric value must be finite")
+    try:
+        from airflow.stats import Stats
+    except ImportError:
+        return
+    Stats.gauge(f"serp_public_docs.{metric_name}", value)
 
 
 def _public_docs_pack_policy_inputs(
@@ -2202,9 +3011,41 @@ def _public_docs_seed_refresh_payload(plan: Mapping[str, Any]) -> dict[str, Any]
         _required_object_list(plan, "seed_registry"),
         generated_at,
     )
+    # A D5 activation selects exactly one pack version.  Therefore a delta may
+    # not contain only the due subset: that would silently remove fresh sources
+    # from the new active pack.  Any due seed rebuilds the entire governed pack;
+    # a true no-op is the only cycle that dispatches no source requests.
+    candidate_seeds = (
+        [
+            {
+                **dict(seed),
+                "refresh_selection": {
+                    **_public_docs_seed_refresh_decision(
+                        seed,
+                        _datetime_value(generated_at, "generated_at"),
+                    ),
+                    "candidate_rebuild_mode": "full_pack",
+                },
+            }
+            for seed in _required_object_list(plan, "seed_registry")
+        ]
+        if due_seeds
+        else []
+    )
+    for seed in candidate_seeds:
+        crawl_evidence = _required_mapping(seed, "crawl_policy").get("crawl_evidence")
+        if crawl_evidence is None:
+            continue
+        if not isinstance(crawl_evidence, Mapping):
+            raise ValueError("crawler evidence must be an object")
+        if crawl_evidence.get("status") != "completed":
+            raise ValueError(
+                "crawler evidence must be completed before pipeline dispatch: "
+                f"seed_id={_required_str(seed, 'seed_id')} status={crawl_evidence.get('status')}"
+            )
     source_fetch_requests, skipped_frontier_fetches = _public_docs_budgeted_source_fetch_requests(
         plan,
-        due_seeds,
+        candidate_seeds,
     )
     optional_frontier_selected_count = sum(
         1
@@ -2214,6 +3055,7 @@ def _public_docs_seed_refresh_payload(plan: Mapping[str, Any]) -> dict[str, Any]
     status = "ready_for_pipeline_dispatch" if source_fetch_requests else "no_due_sources"
     return {
         "artifact_paths": artifact_paths,
+        "candidate_rebuild_mode": "full_pack" if source_fetch_requests else "no_change",
         "contract_version": _EVAL_CONTRACT_VERSION,
         "d4_dispatch_target": "serp_scan_parse_index",
         "dag_id": "serp_web_seed_crawl_refresh",
@@ -2229,11 +3071,12 @@ def _public_docs_seed_refresh_payload(plan: Mapping[str, Any]) -> dict[str, Any]
         "neo4j_database": _required_str(plan, "neo4j_database"),
         "optional_frontier_selected_count": optional_frontier_selected_count,
         "seed_count": len(source_fetch_requests),
+        "seed_registry": [dict(seed) for seed in _required_object_list(plan, "seed_registry")],
         "seed_registry_sha256": _required_str(plan, "seed_registry_sha256"),
         "skipped_frontier_count": len(skipped_frontier_fetches),
         "skipped_frontier_fetches": skipped_frontier_fetches,
-        "skipped_seed_count": len(skipped_seed_refreshes),
-        "skipped_seed_refreshes": skipped_seed_refreshes,
+        "skipped_seed_count": 0 if source_fetch_requests else len(skipped_seed_refreshes),
+        "skipped_seed_refreshes": [] if source_fetch_requests else skipped_seed_refreshes,
         "source_fetch_requests": source_fetch_requests,
         "status": status,
         "tenant_id": _required_str(plan, "tenant_id"),
@@ -3918,7 +4761,7 @@ def _public_docs_crawl_policy(
             raise ValueError("source_uri host must be in allowed_domains")
         if _public_docs_url_matches_deny_patterns(source_uri, deny_patterns):
             raise ValueError("source_uri must not match deny_patterns")
-    frontier_urls = _public_docs_frontier_urls(
+    frontier_urls, crawl_evidence = _public_docs_frontier_urls(
         policy,
         source_uri=source_uri,
         source_type=source_type,
@@ -3932,12 +4775,20 @@ def _public_docs_crawl_policy(
         max_pages=max_pages,
         sitemap_frontier_discoverer=sitemap_frontier_discoverer,
     )
+    freshness_state = seed.get("freshness_state")
+    previous_state = (
+        freshness_state.get("page_state", {}) if isinstance(freshness_state, Mapping) else {}
+    )
+    if not isinstance(previous_state, Mapping):
+        raise ValueError("freshness_state.page_state must be an object")
     return {
         "allowed_domains": allowed_domains,
         "deny_patterns": list(deny_patterns),
         "frontier_urls": frontier_urls,
         "max_depth": max_depth,
         "max_pages": max_pages,
+        "previous_state": dict(previous_state),
+        "crawl_evidence": crawl_evidence,
         "respect_robots_txt": True,
         "sitemap_discovery": sitemap_discovery,
         "user_agent": _required_str(policy, "user_agent"),
@@ -3955,7 +4806,7 @@ def _public_docs_frontier_urls(
     sitemap_discovery: bool,
     max_pages: int,
     sitemap_frontier_discoverer: PublicDocsSitemapFrontierDiscoverer | None = None,
-) -> list[str]:
+) -> tuple[list[str], Mapping[str, Any] | None]:
     raw_urls = policy.get("frontier_urls", [])
     if raw_urls is None:
         raw_urls = []
@@ -3964,18 +4815,27 @@ def _public_docs_frontier_urls(
     if source_type != "website":
         if raw_urls:
             raise ValueError("frontier_urls are supported only for website seeds")
-        return []
+        return [], None
     remaining_slots = max_pages - len(raw_urls) - 1
     if remaining_slots < 0:
         raise ValueError("frontier_urls must leave room for the seed source_uri")
     discovery_slots = max(0, min(remaining_slots, max_optional_frontier_per_seed - len(raw_urls)))
     discovered_urls: Sequence[str] = ()
+    crawl_evidence: Mapping[str, Any] | None = None
     if sitemap_discovery and sitemap_frontier_discoverer is not None and discovery_slots > 0:
-        discovered_urls = sitemap_frontier_discoverer(
+        discovery_result = sitemap_frontier_discoverer(
             source_uri,
             policy,
             discovery_slots,
         )
+        if isinstance(discovery_result, Mapping):
+            discovered_urls = discovery_result.get("urls", ())
+            raw_crawl_evidence = discovery_result.get("evidence")
+            if raw_crawl_evidence is not None and not isinstance(raw_crawl_evidence, Mapping):
+                raise ValueError("crawler evidence must be an object")
+            crawl_evidence = raw_crawl_evidence
+        else:
+            discovered_urls = discovery_result
         if not all(isinstance(value, str) for value in discovered_urls):
             raise ValueError("sitemap frontier discoverer must return strings")
         discovered_urls = tuple(discovered_urls)[:discovery_slots]
@@ -4006,7 +4866,7 @@ def _public_docs_frontier_urls(
             continue
         seen.add(canonical_url)
         normalized.append(url)
-    return normalized
+    return normalized, crawl_evidence
 
 
 def _public_docs_url_matches_deny_patterns(
@@ -4036,97 +4896,61 @@ def _canonical_public_docs_url(value: str) -> str:
     return f"{scheme}://{hostname}{port}{path}{query}"
 
 
-def discover_public_docs_sitemap_frontier(
+def discover_public_docs_crawler_frontier(
     source_uri: str,
     crawl_policy: Mapping[str, Any],
     max_urls: int,
-) -> list[str]:
+) -> Mapping[str, Any]:
+    """Discover changed/new same-domain pages through the governed crawler."""
+
     if max_urls <= 0:
-        return []
-    parsed_source = urlparse(source_uri)
-    if parsed_source.scheme not in {"http", "https"} or not parsed_source.hostname:
-        return []
-    allowed_domains = set(_required_str_list(crawl_policy, "allowed_domains"))
-    deny_patterns = tuple(str(value) for value in crawl_policy.get("deny_patterns", ()))
-    user_agent = _required_str(crawl_policy, "user_agent")
-    robots_url = urljoin(source_uri, "/robots.txt")
-    try:
-        robots_payload = _fetch_public_docs_discovery_text(robots_url, user_agent)
-    except (HTTPError, URLError, OSError, TimeoutError, ValueError):
-        return []
-    robot_parser = RobotFileParser(robots_url)
-    robot_parser.parse(robots_payload.splitlines())
-    sitemap_urls = tuple(robot_parser.site_maps() or ()) or (urljoin(source_uri, "/sitemap.xml"),)
-    discovered: list[str] = []
-    sitemap_queue = list(sitemap_urls)
-    seen_sitemaps: set[str] = set()
-    sitemap_index_children = 0
-    while sitemap_queue and len(discovered) < max_urls:
-        sitemap_url = sitemap_queue.pop(0).strip()
-        sitemap_canonical = _canonical_public_docs_url(sitemap_url)
-        if not sitemap_url or sitemap_canonical in seen_sitemaps:
-            continue
-        seen_sitemaps.add(sitemap_canonical)
-        if _contains_raw_secret(sitemap_url) or not robot_parser.can_fetch(user_agent, sitemap_url):
-            continue
-        try:
-            sitemap_payload = _fetch_public_docs_discovery_text(sitemap_url, user_agent)
-            sitemap_kind, locations = _public_docs_sitemap_locations(sitemap_payload)
-        except (HTTPError, URLError, OSError, TimeoutError, ValueError, ElementTree.ParseError):
-            continue
-        if sitemap_kind == "sitemapindex":
-            for location in locations:
-                if sitemap_index_children >= _PUBLIC_DOCS_MAX_SITEMAP_INDEX_CHILDREN:
-                    break
-                sitemap_index_children += 1
-                sitemap_queue.append(location)
-            continue
-        for location in locations:
-            if len(discovered) >= max_urls:
-                break
-            if not _public_docs_discovered_url_is_allowed(
-                location,
-                allowed_domains=allowed_domains,
-                deny_patterns=deny_patterns,
-                source_host=parsed_source.hostname,
-            ):
-                continue
-            if _contains_raw_secret(location) or not robot_parser.can_fetch(user_agent, location):
-                continue
-            discovered.append(location)
-    return discovered
-
-
-def _public_docs_discovered_url_is_allowed(
-    url: str,
-    *,
-    allowed_domains: set[str],
-    deny_patterns: Sequence[str],
-    source_host: str,
-) -> bool:
-    parsed = urlparse(url)
-    return (
-        parsed.scheme == "https"
-        and parsed.hostname == source_host
-        and parsed.hostname in allowed_domains
-        and not _contains_raw_secret(url)
-        and not _public_docs_url_matches_deny_patterns(url, deny_patterns)
+        return {"evidence": None, "urls": []}
+    previous_state = crawl_policy.get("previous_state", {})
+    if not isinstance(previous_state, Mapping):
+        raise ValueError("crawl_policy.previous_state must be an object")
+    evidence = crawl_public_docs(
+        seed_uri=source_uri,
+        crawl_policy=crawl_policy,
+        previous_state=previous_state,
+        fetcher=_fetch_public_docs_crawler_response,
     )
+    if evidence.get("status") != "completed":
+        return {"evidence": evidence, "urls": []}
+    changed_urls = evidence.get("changed_urls", [])
+    if not isinstance(changed_urls, list):
+        raise ValueError("crawler changed_urls must be a list")
+    canonical_seed_uri = _canonical_public_docs_url(source_uri)
+    urls = [
+        url
+        for url in changed_urls
+        if isinstance(url, str) and _canonical_public_docs_url(url) != canonical_seed_uri
+    ][:max_urls]
+    return {"evidence": evidence, "urls": urls}
 
 
-def _fetch_public_docs_discovery_text(url: str, user_agent: str) -> str:
+def _fetch_public_docs_crawler_response(
+    url: str,
+    headers: Mapping[str, str],
+) -> CrawlResponse:
     request = Request(
         url,
-        headers={
-            "Accept": "application/xml,text/xml,text/plain,*/*",
-            "User-Agent": user_agent,
-        },
+        headers={"Accept": "text/html,application/xml,text/plain,*/*", **dict(headers)},
     )
-    with urlopen(request, timeout=_PUBLIC_DOCS_SITEMAP_FETCH_TIMEOUT_SECONDS) as response:
-        payload = cast(bytes, response.read(1_000_001))
-    if len(payload) > 1_000_000:
-        raise ValueError("public docs discovery payload is too large")
-    return payload.decode("utf-8", errors="replace")
+    try:
+        with urlopen(request, timeout=_PUBLIC_DOCS_SITEMAP_FETCH_TIMEOUT_SECONDS) as response:
+            return CrawlResponse(
+                status_code=int(response.status),
+                headers={str(key): str(value) for key, value in response.headers.items()},
+                body=response.read(1_000_001),
+            )
+    except HTTPError as exc:
+        return CrawlResponse(
+            status_code=int(exc.code),
+            headers={str(key): str(value) for key, value in exc.headers.items()},
+            body=exc.read(1_000_001),
+        )
+    except (URLError, OSError, TimeoutError):
+        return CrawlResponse(status_code=599, headers={}, body=b"")
 
 
 def _post_json(
@@ -4168,25 +4992,6 @@ def _post_json(
     if not isinstance(decoded, dict):
         raise ValueError("JSON response payload must be an object")
     return decoded
-
-
-def _public_docs_sitemap_locations(payload: str) -> tuple[str, list[str]]:
-    root = ElementTree.fromstring(payload)
-    root_name = _xml_local_name(root.tag)
-    if root_name not in {"urlset", "sitemapindex"}:
-        raise ValueError("public docs sitemap root is unsupported")
-    locations: list[str] = []
-    for element in root.iter():
-        if _xml_local_name(element.tag) != "loc":
-            continue
-        value = (element.text or "").strip()
-        if value:
-            locations.append(value)
-    return root_name, locations
-
-
-def _xml_local_name(tag: str) -> str:
-    return tag.rsplit("}", maxsplit=1)[-1]
 
 
 def _public_docs_refresh_policy(seed: Mapping[str, Any]) -> dict[str, Any]:
@@ -4233,7 +5038,58 @@ def _public_docs_freshness_state(seed: Mapping[str, Any]) -> dict[str, Any]:
         if not re.fullmatch(r"[a-f0-9]{64}", normalized):
             raise ValueError(f"freshness_state {field_name} must be sha256 hex")
         result[field_name] = f"sha256:{normalized}"
+    page_state = freshness.get("page_state")
+    if page_state is not None:
+        if not isinstance(page_state, Mapping):
+            raise ValueError("freshness_state.page_state must be an object")
+        result["page_state"] = _validated_public_docs_page_state(page_state)
     return result
+
+
+def _validated_public_docs_page_state(page_state: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    normalized: dict[str, dict[str, Any]] = {}
+    for raw_url, raw_state in page_state.items():
+        if (
+            not isinstance(raw_url, str)
+            or not raw_url.strip()
+            or not isinstance(raw_state, Mapping)
+        ):
+            raise ValueError("freshness_state.page_state entries must map URLs to objects")
+        parsed = urlparse(raw_url)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.fragment:
+            raise ValueError("freshness_state.page_state URLs must be canonical https URLs")
+        url = _canonical_public_docs_url(raw_url)
+        if url != raw_url:
+            raise ValueError("freshness_state.page_state URLs must be canonical")
+        if url in normalized:
+            raise ValueError("freshness_state.page_state contains duplicate canonical URL")
+        _reject_raw_secrets(raw_state)
+        status = _required_str(raw_state, "status")
+        if status not in {"active", "tombstoned"}:
+            raise ValueError("freshness_state.page_state status is unsupported")
+        content_hash = raw_state.get("content_hash")
+        if content_hash is not None and (
+            not isinstance(content_hash, str) or not re.fullmatch(r"[a-f0-9]{64}", content_hash)
+        ):
+            raise ValueError("freshness_state.page_state content_hash must be sha256 hex")
+        if status == "active" and content_hash is None:
+            raise ValueError("active freshness_state page requires content_hash")
+        state: dict[str, Any] = {"content_hash": content_hash, "status": status}
+        for field_name in ("etag", "last_modified"):
+            value = raw_state.get(field_name)
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise ValueError(f"freshness_state.page_state {field_name} must be a string")
+            state[field_name] = value
+        http_status = raw_state.get("http_status")
+        if http_status is not None and (
+            isinstance(http_status, bool)
+            or not isinstance(http_status, int)
+            or not 100 <= http_status <= 599
+        ):
+            raise ValueError("freshness_state.page_state http_status must be an HTTP status")
+        state["http_status"] = http_status
+        normalized[url] = state
+    return normalized
 
 
 def _public_docs_due_seed_selection(
@@ -4540,6 +5396,29 @@ def _read_json_file(path: str, field_name: str) -> Mapping[str, Any]:
     return _json_object(raw, field_name)
 
 
+def _read_optional_json_file(path: str, field_name: str) -> Mapping[str, Any] | None:
+    try:
+        raw = _read_artifact_text(path, field_name)
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        if _is_s3_missing_object(exc):
+            return None
+        raise ValueError(f"{field_name} file is not readable: {path}") from exc
+    return _json_object(raw, field_name)
+
+
+def _is_s3_missing_object(exc: Exception) -> bool:
+    response = getattr(exc, "response", None)
+    if not isinstance(response, Mapping):
+        return False
+    error = response.get("Error")
+    if not isinstance(error, Mapping):
+        return False
+    code = error.get("Code")
+    return code in {"404", "NoSuchKey"}
+
+
 def _assert_plan_matches_suite_plan(
     airflow_plan: Mapping[str, Any],
     suite_plan: Mapping[str, Any],
@@ -4808,6 +5687,58 @@ def _artifact_paths(
     root = _artifact_path("artifact_root_path", artifact_root_path).rstrip("/")
     operation_path = f"{root}/{operation_id}"
     return {key: _artifact_path(key, f"{operation_path}/{filename}") for key, filename in filenames}
+
+
+def _public_docs_crawl_state_path(
+    payload: Mapping[str, Any],
+    artifact_root_path: str,
+) -> str:
+    root = _artifact_path("artifact_root_path", artifact_root_path).rstrip("/")
+    expected_path = _artifact_path(
+        "public_docs_crawl_state_path",
+        f"{root}/public-docs-crawl-state.json",
+    )
+    configured_path = payload.get("public_docs_crawl_state_path")
+    if configured_path is None:
+        return expected_path
+    if not isinstance(configured_path, str):
+        raise ValueError("public_docs_crawl_state_path must be a string")
+    actual_path = _artifact_path("public_docs_crawl_state_path", configured_path)
+    if actual_path != expected_path:
+        raise ValueError("public_docs_crawl_state_path must use the canonical artifact location")
+    return actual_path
+
+
+def _validate_public_docs_crawl_state_identity(
+    state: Mapping[str, Any],
+    payload: Mapping[str, Any],
+) -> None:
+    if _required_str(state, "artifact_type") != "public_docs_crawl_state":
+        raise ValueError("public_docs_crawl_state artifact_type is unsupported")
+    if _required_str(state, "contract_version") != _EVAL_CONTRACT_VERSION:
+        raise ValueError("public_docs_crawl_state contract_version is unsupported")
+    if _required_str(state, "status") != "active":
+        raise ValueError("public_docs_crawl_state must be active")
+    if _required_str(state, "tenant_id") != _required_str(payload, "tenant_id"):
+        raise ValueError("public_docs_crawl_state tenant_id must match plan")
+    if _required_str(state, "pack_id") != _required_str(payload, "pack_id"):
+        raise ValueError("public_docs_crawl_state pack_id must match plan")
+    _required_uuid(state, "active_pack_version_id")
+    _required_mapping(state, "seeds")
+
+
+def _optional_public_docs_active_pack_version_id(payload: Mapping[str, Any]) -> str | None:
+    value = payload.get("active_pack_version_id")
+    if value is None:
+        return None
+    return str(_required_uuid(payload, "active_pack_version_id"))
+
+
+def _optional_previous_active_pack_version_id(payload: Mapping[str, Any]) -> str | None:
+    value = payload.get("previous_active_pack_version_id")
+    if value is None:
+        return None
+    return str(_required_uuid(payload, "previous_active_pack_version_id"))
 
 
 def _required_artifact_paths(

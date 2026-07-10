@@ -11,10 +11,11 @@ from dags.serp_eval_contracts import (
 )
 from dags.serp_eval_contracts import (
     default_public_docs_seed_refresh_conf,
-    discover_public_docs_sitemap_frontier,
+    discover_public_docs_crawler_frontier,
     dispatch_public_docs_seed_refresh_handoff,
     execute_pipeline_cli_spec,
     governance_notification_pending,
+    load_public_docs_crawl_state_conf,
     submit_public_docs_bc21_pipeline_state_artifact,
     write_airflow_plan_artifact,
     write_public_docs_publish_activation_trigger_conf_artifact,
@@ -27,10 +28,11 @@ def validate_public_docs_seed_registry(**context: Any) -> str:
     dag_run = context.get("dag_run")
     conf = getattr(dag_run, "conf", None) or {}
     conf = _public_docs_seed_refresh_conf_with_defaults(conf)
+    conf = load_public_docs_crawl_state_conf(conf)
     return write_airflow_plan_artifact(
         build_public_docs_seed_refresh_plan_contract(
             conf,
-            sitemap_frontier_discoverer=discover_public_docs_sitemap_frontier,
+            sitemap_frontier_discoverer=discover_public_docs_crawler_frontier,
         )
     )
 

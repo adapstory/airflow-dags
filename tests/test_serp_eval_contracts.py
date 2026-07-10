@@ -19,7 +19,6 @@ import pytest
 from dags.serp_eval_contracts import (
     MANDATORY_SERP_BENCHMARK_SUITES,
     SERP_NORMALIZED_GATE_FLOOR,
-    _public_docs_sitemap_locations,
     build_benchmark_improvement_decision_cli_spec,
     build_benchmark_improvement_scoreboard_cli_spec,
     build_benchmark_improvement_wave_plan,
@@ -35,6 +34,7 @@ from dags.serp_eval_contracts import (
     build_public_docs_publish_activation_cli_spec,
     build_public_docs_publish_activation_plan,
     build_public_docs_publish_activation_submit_cli_spec,
+    build_public_docs_retired_pack_cleanup_cli_spec,
     build_public_docs_seed_refresh_plan,
     build_tenant_golden_registry_cli_spec,
     build_tenant_golden_regression_plan,
@@ -45,6 +45,7 @@ from dags.serp_eval_contracts import (
     evaluate_tenant_golden_gate,
     execute_gateway_cli_spec,
     execute_pipeline_cli_spec,
+    load_public_docs_crawl_state_conf,
     submit_public_docs_bc21_pipeline_state_artifact,
     write_airflow_plan_artifact,
     write_benchmark_improvement_decision_artifact,
@@ -57,7 +58,10 @@ from dags.serp_eval_contracts import (
     write_nightly_report_artifact,
     write_nightly_suite_plan_artifact,
     write_online_eval_rollup_plan_artifact,
+    write_public_docs_coverage_proof_artifact,
+    write_public_docs_crawl_state_artifact,
     write_public_docs_publish_activation_trigger_conf_artifact,
+    write_public_docs_retrieval_golden_artifact,
     write_public_docs_search_serve_smoke_artifact,
     write_public_docs_seed_refresh_plan_artifact,
     write_public_docs_seed_registry_artifact,
@@ -1391,6 +1395,149 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
     ]
 
 
+def test_public_docs_crawl_state_conf_overlays_persisted_state(tmp_path: Path) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    state_path = tmp_path / "public-docs-crawl-state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "active_pack_version_id": PACK_VERSION_ID,
+                "artifact_type": "public_docs_crawl_state",
+                "contract_version": "2026.07.2",
+                "pack_id": PACK_ID,
+                "seeds": {
+                    "k3s-docs": {
+                        "freshness_state": {
+                            "last_success_at": "2026-07-08T20:30:00Z",
+                            "page_state": {
+                                "https://docs.k3s.io/": {
+                                    "content_hash": "a" * 64,
+                                    "etag": '"k3s-v1"',
+                                    "http_status": 200,
+                                    "last_modified": "Wed, 08 Jul 2026 20:00:00 GMT",
+                                    "status": "active",
+                                }
+                            },
+                            "status": "indexed",
+                        }
+                    }
+                },
+                "status": "active",
+                "tenant_id": TENANT_ID,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    hydrated = load_public_docs_crawl_state_conf(conf)
+    plan = build_public_docs_seed_refresh_plan(hydrated)
+
+    k3s_seed = next(seed for seed in plan.payload["seed_registry"] if seed["seed_id"] == "k3s-docs")
+    assert plan.payload["public_docs_crawl_state_path"] == str(state_path)
+    assert k3s_seed["freshness_state"]["status"] == "indexed"
+    assert k3s_seed["freshness_state"]["page_state"]["https://docs.k3s.io/"]["etag"] == '"k3s-v1"'
+    assert (
+        k3s_seed["crawl_policy"]["previous_state"]["https://docs.k3s.io/"]["content_hash"]
+        == "a" * 64
+    )
+
+
+def test_public_docs_crawl_state_commits_only_after_complete_d5_coverage(
+    tmp_path: Path,
+) -> None:
+    refresh_plan_path = tmp_path / "refresh-plan.json"
+    coverage_path = tmp_path / "coverage.json"
+    activation_receipt_path = tmp_path / "activation-receipt.json"
+    state_path = tmp_path / "public-docs-crawl-state.json"
+    receipt_path = tmp_path / "crawl-state-commit-receipt.json"
+    refresh_plan = {
+        "generated_at": "2026-07-09T21:00:00Z",
+        "seed_registry": [
+            {
+                "crawl_policy": {
+                    "crawl_evidence": {
+                        "state": {
+                            "https://docs.example.com/guide": {
+                                "content_hash": "b" * 64,
+                                "etag": '"docs-v2"',
+                                "http_status": 200,
+                                "last_modified": "Thu, 09 Jul 2026 20:00:00 GMT",
+                                "status": "active",
+                            }
+                        },
+                        "status": "completed",
+                    },
+                    "previous_state": {},
+                },
+                "freshness_state": {"status": "never_indexed"},
+                "seed_id": "example-docs",
+                "source_uri": "https://docs.example.com/guide",
+            }
+        ],
+    }
+    refresh_plan_path.write_text(json.dumps(refresh_plan), encoding="utf-8")
+    coverage_path.write_text(
+        json.dumps(
+            {
+                "coverage_status": "complete",
+                "pack_id": PACK_ID,
+                "pack_version_id": PACK_VERSION_ID,
+                "seeds": [
+                    {
+                        "index_status": "passed",
+                        "seed_id": "example-docs",
+                        "status": "published",
+                    }
+                ],
+                "tenant_id": TENANT_ID,
+            }
+        ),
+        encoding="utf-8",
+    )
+    activation_receipt_path.write_text(
+        json.dumps({"active_pack_version_id": PACK_VERSION_ID, "status": "active"}),
+        encoding="utf-8",
+    )
+    plan = {
+        "artifact_paths": {
+            "public_docs_coverage_proof": str(coverage_path),
+            "public_docs_crawl_state_commit_receipt": str(receipt_path),
+            "public_docs_publish_activation_receipt": str(activation_receipt_path),
+        },
+        "artifact_root_path": str(tmp_path),
+        "dag_id": "serp_publish_signed_pack",
+        "generated_at": "2026-07-09T21:00:00Z",
+        "operation_id": "d5-crawl-state-test",
+        "pack_id": PACK_ID,
+        "pack_version_id": PACK_VERSION_ID,
+        "public_docs_crawl_state_path": str(state_path),
+        "public_docs_seed_refresh_plan_path": str(refresh_plan_path),
+        "tenant_id": TENANT_ID,
+    }
+
+    artifact = write_public_docs_crawl_state_artifact(plan)
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert artifact["payload"]["status"] == "committed"
+    assert state["active_pack_version_id"] == PACK_VERSION_ID
+    assert state["seeds"]["example-docs"]["freshness_state"]["status"] == "indexed"
+    assert (
+        state["seeds"]["example-docs"]["freshness_state"]["page_state"][
+            "https://docs.example.com/guide"
+        ]["etag"]
+        == '"docs-v2"'
+    )
+
+    coverage_path.write_text(
+        json.dumps({"coverage_status": "incomplete", "seeds": []}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="coverage proof must be complete"):
+        write_public_docs_crawl_state_artifact(plan)
+
+
 def test_public_docs_seed_refresh_frontier_budget_keeps_roots_and_skips_optional(
     tmp_path: Path,
 ) -> None:
@@ -1501,12 +1648,17 @@ def test_d20_writes_public_docs_publish_activation_trigger_conf_artifact(
         "generated_at",
         "pack_id",
         "pack_version_id",
+        "qdrant_collection",
+        "opensearch_index",
+        "neo4j_database",
         "policy_data_class",
         "policy_freshness_state",
         "policy_license_obligation_state",
         "policy_source_type",
         "policy_trust_state",
         "policy_version",
+        "public_docs_crawl_state_path",
+        "public_docs_seed_refresh_plan_path",
         "public_docs_seed_refresh_result_path",
         "registry_resource_id",
         "registry_resource_type",
@@ -1518,6 +1670,13 @@ def test_d20_writes_public_docs_publish_activation_trigger_conf_artifact(
     assert target_conf["generated_at"] == "2026-07-08T21:00:00Z"
     assert target_conf["pack_id"] == PACK_ID
     assert target_conf["pack_version_id"] == PACK_VERSION_ID
+    assert target_conf["public_docs_crawl_state_path"] == str(
+        tmp_path / "public-docs-crawl-state.json"
+    )
+    assert (
+        target_conf["public_docs_seed_refresh_plan_path"]
+        == plan.payload["artifact_paths"]["public_docs_seed_refresh_plan"]
+    )
     assert target_conf["public_docs_seed_refresh_result_path"] == str(seed_refresh_result_path)
     assert target_conf["registry_resource_id"] == REGISTRY_RESOURCE_ID
     assert target_conf["registry_resource_type"] == "pack"
@@ -1614,6 +1773,12 @@ def test_d20_trigger_conf_derives_policy_from_frontier_parent_seed(
                         sort_keys=True,
                     ).encode("utf-8")
                 ).hexdigest(),
+                "coverage_proof": {
+                    "coverage_status": "indexed_pending_publish",
+                    "pack_id": PACK_ID,
+                    "pack_version_id": PACK_VERSION_ID,
+                    "tenant_id": TENANT_ID,
+                },
             },
             sort_keys=True,
         ),
@@ -1663,6 +1828,12 @@ def test_d20_writes_public_docs_publish_activation_trigger_conf_from_s3_result(
                         sort_keys=True,
                     ).encode("utf-8")
                 ).hexdigest(),
+                "coverage_proof": {
+                    "coverage_status": "indexed_pending_publish",
+                    "pack_id": PACK_ID,
+                    "pack_version_id": PACK_VERSION_ID,
+                    "tenant_id": TENANT_ID,
+                },
             },
             sort_keys=True,
         ).encode("utf-8"),
@@ -1731,6 +1902,12 @@ def test_d20_bc21_pipeline_state_submit_accepts_quarantined_publishable_batch(
                         sort_keys=True,
                     ).encode("utf-8")
                 ).hexdigest(),
+                "coverage_proof": {
+                    "coverage_status": "indexed_pending_publish",
+                    "pack_id": PACK_ID,
+                    "pack_version_id": PACK_VERSION_ID,
+                    "tenant_id": TENANT_ID,
+                },
             },
             sort_keys=True,
         ),
@@ -2046,22 +2223,30 @@ def test_public_docs_seed_refresh_does_not_call_sitemap_discoverer_without_remai
     ]
 
 
-def test_public_docs_sitemap_locations_parse_urlset_and_sitemapindex() -> None:
-    assert _public_docs_sitemap_locations(
-        """<?xml version="1.0" encoding="UTF-8"?>
-        <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-          <url><loc>https://docs.k3s.io/quick-start</loc></url>
-        </urlset>"""
-    ) == ("urlset", ["https://docs.k3s.io/quick-start"])
-    assert _public_docs_sitemap_locations(
-        """<?xml version="1.0" encoding="UTF-8"?>
-        <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-          <sitemap><loc>https://docs.k3s.io/sitemap-docs.xml</loc></sitemap>
-        </sitemapindex>"""
-    ) == ("sitemapindex", ["https://docs.k3s.io/sitemap-docs.xml"])
+def test_public_docs_seed_refresh_refuses_to_dispatch_a_quarantined_crawl(
+    tmp_path: Path,
+) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+
+    def discover(source_uri: str, _policy: Mapping[str, Any], _max_urls: int) -> Mapping[str, Any]:
+        if source_uri != "https://docs.k3s.io/":
+            return {"evidence": None, "urls": []}
+        return {
+            "evidence": {
+                "failure": {"code": "HTTP_429", "message": "rate limited"},
+                "status": "quarantined",
+            },
+            "urls": [],
+        }
+
+    plan = build_public_docs_seed_refresh_plan(conf, sitemap_frontier_discoverer=discover)
+
+    with pytest.raises(ValueError, match="crawler evidence must be completed"):
+        write_public_docs_seed_refresh_plan_artifact(plan.to_canonical_json())
 
 
-def test_public_docs_seed_refresh_selects_due_seeds_and_records_skips(
+def test_public_docs_seed_refresh_rebuilds_every_seed_when_any_seed_is_due(
     tmp_path: Path,
 ) -> None:
     conf = _public_docs_seed_refresh_conf()
@@ -2080,28 +2265,30 @@ def test_public_docs_seed_refresh_selects_due_seeds_and_records_skips(
     payload = refresh_plan_artifact["payload"]
 
     assert payload["status"] == "ready_for_pipeline_dispatch"
-    assert payload["seed_count"] == 6
-    assert payload["skipped_seed_count"] == 1
-    assert [skip["seed_id"] for skip in payload["skipped_seed_refreshes"]] == ["k3s-docs"]
+    assert payload["candidate_rebuild_mode"] == "full_pack"
+    assert payload["seed_count"] == 9
+    assert payload["skipped_seed_count"] == 0
+    assert payload["skipped_seed_refreshes"] == []
     assert {
         request["seed_id"]
         for request in payload["source_fetch_requests"]
         if "--" not in request["seed_id"]
     } == {
         "adapstory-gitops-docs",
+        "k3s-docs",
         "kubernetes-openapi-docs",
         "postgresql-reference-docs",
     }
     assert {
         request["source_metadata"]["refresh_selection"]["reason"]
         for request in payload["source_fetch_requests"]
-    } == {"max_age_exceeded", "never_indexed"}
+    } == {"max_age_exceeded", "never_indexed", "within_max_age"}
 
     cli_spec = dispatch_public_docs_seed_refresh_handoff(plan.to_canonical_json())
 
     assert cli_spec["status"] == "ready_for_pipeline_cli_runner"
-    assert cli_spec["seed_count"] == 6
-    assert cli_spec["skipped_seed_count"] == 1
+    assert cli_spec["seed_count"] == 9
+    assert cli_spec["skipped_seed_count"] == 0
 
 
 def test_public_docs_seed_refresh_dispatches_live_index_mode(tmp_path: Path) -> None:
@@ -2164,6 +2351,47 @@ def test_public_docs_seed_refresh_noops_when_no_seed_is_due(tmp_path: Path) -> N
     assert result["payload"]["skipped_seed_count"] == 4
 
 
+def test_public_docs_noop_retains_active_pack_without_bc21_or_d5_publish(
+    tmp_path: Path,
+) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    state_path = tmp_path / "public-docs-crawl-state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "active_pack_version_id": PACK_VERSION_ID,
+                "artifact_type": "public_docs_crawl_state",
+                "contract_version": "2026.07.2",
+                "pack_id": PACK_ID,
+                "seeds": {
+                    seed["seed_id"]: {
+                        "freshness_state": {
+                            "last_success_at": "2026-07-08T20:30:00Z",
+                            "status": "indexed",
+                        }
+                    }
+                    for seed in conf["seed_registry"]
+                },
+                "status": "active",
+                "tenant_id": TENANT_ID,
+            }
+        ),
+        encoding="utf-8",
+    )
+    plan = build_public_docs_seed_refresh_plan(load_public_docs_crawl_state_conf(conf))
+
+    cli_spec = dispatch_public_docs_seed_refresh_handoff(plan.to_canonical_json())
+    execute_pipeline_cli_spec(cli_spec)
+    bc21_receipt = submit_public_docs_bc21_pipeline_state_artifact(plan.to_canonical_json())
+    trigger = write_public_docs_publish_activation_trigger_conf_artifact(plan.to_canonical_json())
+
+    assert plan.payload["previous_active_pack_version_id"] == PACK_VERSION_ID
+    assert bc21_receipt["payload"]["status"] == "not_submitted_no_change"
+    assert trigger["payload"]["status"] == "no_change_active_pack_retained"
+    assert "target_dag_run_conf" not in trigger["payload"]
+
+
 def test_public_docs_publish_activation_plan_dispatches_d5_handoff(tmp_path: Path) -> None:
     seed_refresh_result = tmp_path / "public-docs-seed-refresh-result.json"
     _write_public_docs_seed_refresh_result(seed_refresh_result)
@@ -2202,6 +2430,34 @@ def test_public_docs_publish_activation_plan_dispatches_d5_handoff(tmp_path: Pat
                 "public-docs-search-serve-smoke.json",
             )
         ),
+        "public_docs_retrieval_golden": "/".join(
+            (
+                str(tmp_path),
+                plan.payload["operation_id"],
+                "public-docs-retrieval-golden.json",
+            )
+        ),
+        "public_docs_coverage_proof": "/".join(
+            (
+                str(tmp_path),
+                plan.payload["operation_id"],
+                "public-docs-coverage-proof.json",
+            )
+        ),
+        "public_docs_crawl_state_commit_receipt": "/".join(
+            (
+                str(tmp_path),
+                plan.payload["operation_id"],
+                "public-docs-crawl-state-commit-receipt.json",
+            )
+        ),
+        "public_docs_retired_pack_cleanup": "/".join(
+            (
+                str(tmp_path),
+                plan.payload["operation_id"],
+                "public-docs-retired-pack-cleanup.json",
+            )
+        ),
     }
     assert [task["task_id"] for task in plan.payload["tasks"]] == [
         "validate_publish_signed_pack_plan",
@@ -2210,6 +2466,11 @@ def test_public_docs_publish_activation_plan_dispatches_d5_handoff(tmp_path: Pat
         "dispatch_publish_activation_submit",
         "submit_publish_activation_to_bc21",
         "verify_public_docs_search_serve",
+        "run_public_docs_retrieval_golden",
+        "write_public_docs_coverage_proof",
+        "commit_public_docs_crawl_state",
+        "build_retired_public_docs_pack_cleanup",
+        "cleanup_retired_public_docs_pack_versions",
         "notify_governance_eval_surfaces",
     ]
     assert cli_spec["status"] == "ready_for_pipeline_cli_runner"
@@ -2258,6 +2519,126 @@ def test_public_docs_publish_activation_plan_dispatches_d5_handoff(tmp_path: Pat
     assert submit_spec["argv"][submit_spec["argv"].index("--bc21-base-url") + 1] == (
         "http://serp-context-platform.env-dev.svc.cluster.local"
     )
+
+
+def test_public_docs_retired_pack_cleanup_runs_only_for_a_previous_active_pack(
+    tmp_path: Path,
+) -> None:
+    seed_refresh_result = tmp_path / "public-docs-seed-refresh-result.json"
+    _write_public_docs_seed_refresh_result(seed_refresh_result)
+    conf = _public_docs_publish_activation_conf(str(seed_refresh_result))
+    conf["artifact_root_path"] = str(tmp_path)
+    plan_without_retired_pack = build_public_docs_publish_activation_plan(conf)
+
+    no_cleanup = build_public_docs_retired_pack_cleanup_cli_spec(
+        plan_without_retired_pack.to_canonical_json()
+    )
+    assert no_cleanup["status"] == "retired_pack_cleanup_not_required"
+    assert no_cleanup["argv"] == []
+    assert execute_pipeline_cli_spec(no_cleanup)["payload"]["status"] == "not_required"
+
+    conf["previous_active_pack_version_id"] = "018f5e13-2d73-7a77-a052-8d1bcbf96542"
+    plan = build_public_docs_publish_activation_plan(conf)
+    cleanup = build_public_docs_retired_pack_cleanup_cli_spec(plan.to_canonical_json())
+
+    assert cleanup["status"] == "ready_for_pipeline_cli_runner"
+    assert cleanup["argv"][cleanup["argv"].index("--index-mode") + 1] == "live"
+    assert cleanup["argv"][cleanup["argv"].index("--active-pack-version-id") + 1] == (
+        PACK_VERSION_ID
+    )
+    assert cleanup["argv"][cleanup["argv"].index("--retired-pack-version-id") + 1] == (
+        "018f5e13-2d73-7a77-a052-8d1bcbf96542"
+    )
+
+
+def test_public_docs_coverage_proof_artifact_finalizes_d20_after_d5(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipeline_src = REPO_ROOT.parent / "adapstory-serp-pipeline" / "src"
+    monkeypatch.syspath_prepend(str(pipeline_src))
+    seed_refresh_result = tmp_path / "public-docs-seed-refresh-result.json"
+    indexed_proof = {
+        "artifact_type": "public_docs_coverage_proof",
+        "coverage_status": "indexed_pending_publish",
+        "coverage_proof_version": "2026.07.1",
+        "pack_id": PACK_ID,
+        "pack_version_id": PACK_VERSION_ID,
+        "publish": {"status": "pending", "reason": "D5_PUBLISH_RECEIPT_MISSING"},
+        "summary": {
+            "expected_seed_count": 1,
+            "failed_seed_count": 0,
+            "fully_indexed_seed_count": 1,
+            "fully_published_seed_count": 0,
+            "missing_seed_count": 0,
+            "partial_seed_count": 0,
+        },
+        "seeds": [
+            {
+                "counts": {
+                    "chunks": 1,
+                    "documents": 1,
+                    "embeddings": 1,
+                    "neo4j": 1,
+                    "opensearch": 1,
+                    "qdrant": 1,
+                    "sections": 1,
+                },
+                "failure": {"code": None, "message": None},
+                "index_status": "passed",
+                "optional_frontier": [],
+                "seed_id": "k3s-docs",
+                "source_id": "source-k3s",
+                "source_type": "website",
+                "source_uri": "https://docs.k3s.io/",
+                "stages": {
+                    stage: {"reason": "indexed", "status": "passed"}
+                    for stage in ("fetch", "parse", "chunk", "embed", "index")
+                },
+                "status": "indexed",
+                "targets": {
+                    target: {"count": 1, "operation_id": f"{target}-op", "status": "passed"}
+                    for target in ("qdrant", "opensearch", "neo4j")
+                },
+            }
+        ],
+        "tenant_id": TENANT_ID,
+    }
+    seed_refresh_result.write_text(
+        json.dumps(
+            {
+                "artifact_type": "public_docs_seed_refresh_batch_evidence",
+                "batch_evidence": {
+                    "pack_id": PACK_ID,
+                    "pack_version_id": PACK_VERSION_ID,
+                    "tenant_id": TENANT_ID,
+                },
+                "coverage_proof": indexed_proof,
+            }
+        ),
+        encoding="utf-8",
+    )
+    conf = _public_docs_publish_activation_conf(str(seed_refresh_result))
+    conf["artifact_root_path"] = str(tmp_path)
+    plan = build_public_docs_publish_activation_plan(conf)
+    receipt_path = Path(plan.payload["artifact_paths"]["public_docs_publish_activation_receipt"])
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "active_pack_version_id": PACK_VERSION_ID,
+                "pack_id": PACK_ID,
+                "status": "activated",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    artifact = write_public_docs_coverage_proof_artifact(plan.to_canonical_json())
+
+    assert artifact["payload"]["coverage_status"] == "complete"
+    assert artifact["payload"]["seeds"][0]["status"] == "published"
+    assert Path(artifact["artifactPath"]).exists()
 
 
 def test_public_docs_publish_activation_writes_search_serve_smoke_artifact(
@@ -2396,6 +2777,80 @@ def test_public_docs_search_serve_smoke_retries_transient_timeout(
     assert captured["attempts"] == 2
     assert artifact["artifactType"] == "public_docs_search_serve_smoke"
     assert artifact["payload"]["status"] == "served_active_pack"
+
+
+def test_public_docs_retrieval_golden_runs_thirty_live_contract_cases_with_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refresh_conf = default_public_docs_seed_refresh_conf(
+        generated_at="2026-07-08T22:00:00Z",
+        artifact_root_path=str(tmp_path),
+    )
+    refresh_plan = build_public_docs_seed_refresh_plan(refresh_conf)
+    write_public_docs_seed_refresh_plan_artifact(refresh_plan.to_canonical_json())
+    seed_refresh_result = Path(
+        refresh_plan.payload["artifact_paths"]["public_docs_seed_refresh_result"]
+    )
+    _write_public_docs_seed_refresh_result(seed_refresh_result)
+    conf = _public_docs_publish_activation_conf(str(seed_refresh_result))
+    conf["artifact_root_path"] = str(tmp_path)
+    conf["public_docs_seed_refresh_plan_path"] = refresh_plan.payload["artifact_paths"][
+        "public_docs_seed_refresh_plan"
+    ]
+    plan = build_public_docs_publish_activation_plan(conf)
+    receipt_path = Path(plan.payload["artifact_paths"]["public_docs_publish_activation_receipt"])
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "active_pack_version_id": PACK_VERSION_ID,
+                "artifact_type": "public_docs_publish_activation_receipt",
+                "pack_id": PACK_ID,
+                "status": "activated",
+                "tenant_id": TENANT_ID,
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[dict[str, Any]] = []
+
+    def fake_post_json(_url: str, request: Mapping[str, Any], **_kwargs: object) -> dict[str, Any]:
+        calls.append(dict(request))
+        source_uri = str(request["metadata"]["golden_case_expected_source_uri"])
+        return {
+            "citations": [
+                {
+                    "chunk_id": "chunk-" + sha256(source_uri.encode()).hexdigest()[:12],
+                    "evidence_ref": "retrieval:golden",
+                    "pack_version_id": PACK_VERSION_ID,
+                    "source_uri": source_uri,
+                }
+            ],
+            "result_cards": [
+                {
+                    "chunk_id": "chunk-" + sha256(source_uri.encode()).hexdigest()[:12],
+                    "provenance": {
+                        "crawl_time": "2026-07-08T22:00:00Z",
+                        "freshness_state": "fresh",
+                        "source_url": source_uri,
+                    },
+                }
+            ],
+            "result_chunk_ids": ["chunk-" + sha256(source_uri.encode()).hexdigest()[:12]],
+            "result_count": 1,
+            "selected_pack_version_ids": [PACK_VERSION_ID],
+        }
+
+    monkeypatch.setattr("dags.serp_eval_contracts._post_json", fake_post_json)
+
+    artifact = write_public_docs_retrieval_golden_artifact(plan.to_canonical_json())
+
+    assert artifact["artifactType"] == "public_docs_retrieval_golden"
+    assert artifact["payload"]["status"] == "passed"
+    assert artifact["payload"]["case_count"] == 30
+    assert len(calls) == 60
+    assert artifact["payload"]["latency_seconds"]["p95"] <= 2.0
 
 
 def test_public_docs_publish_activation_plan_accepts_s3_d20_result(
@@ -2950,6 +3405,11 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
                 "dispatch_publish_activation_submit",
                 "submit_publish_activation_to_bc21",
                 "verify_public_docs_search_serve",
+                "run_public_docs_retrieval_golden",
+                "write_public_docs_coverage_proof",
+                "commit_public_docs_crawl_state",
+                "build_retired_public_docs_pack_cleanup",
+                "cleanup_retired_public_docs_pack_versions",
                 "notify_governance_eval_surfaces",
             ],
         ),
@@ -3086,7 +3546,7 @@ def test_serp_public_docs_dag_overlays_partial_run_conf_on_default_seed_registry
     _install_airflow_import_stubs(monkeypatch)
     module = importlib.import_module("dags.serp_web_seed_crawl_refresh")
     module = importlib.reload(module)
-    monkeypatch.setattr(module, "discover_public_docs_sitemap_frontier", lambda *_args: [])
+    monkeypatch.setattr(module, "discover_public_docs_crawler_frontier", lambda *_args: [])
 
     class DagRun:
         def __init__(self) -> None:
@@ -3410,11 +3870,19 @@ def _public_docs_publish_activation_conf(seed_refresh_result_path: str) -> dict[
         "policy_source_type": "website",
         "policy_trust_state": "trusted",
         "policy_version": "source-approval@2026.07.1",
+        "public_docs_seed_refresh_plan_path": _seed_refresh_plan_path(seed_refresh_result_path),
         "public_docs_seed_refresh_result_path": seed_refresh_result_path,
         "registry_resource_id": REGISTRY_RESOURCE_ID,
         "registry_resource_type": "pack",
         "tenant_id": TENANT_ID,
     }
+
+
+def _seed_refresh_plan_path(seed_refresh_result_path: str) -> str:
+    filename = "public-docs-seed-refresh-plan.json"
+    if seed_refresh_result_path.startswith("s3://"):
+        return seed_refresh_result_path.rsplit("/", 1)[0] + "/" + filename
+    return str(Path(seed_refresh_result_path).with_name(filename))
 
 
 def _write_public_docs_seed_refresh_result(

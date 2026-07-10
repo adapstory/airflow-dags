@@ -10,9 +10,13 @@ from dags.serp_eval_contracts import (
     build_public_docs_publish_activation_cli_spec,
     build_public_docs_publish_activation_plan,
     build_public_docs_publish_activation_submit_cli_spec,
+    build_public_docs_retired_pack_cleanup_cli_spec,
     execute_pipeline_cli_spec,
     governance_notification_pending,
     write_airflow_plan_artifact,
+    write_public_docs_coverage_proof_artifact,
+    write_public_docs_crawl_state_artifact,
+    write_public_docs_retrieval_golden_artifact,
     write_public_docs_search_serve_smoke_artifact,
 )
 
@@ -35,6 +39,7 @@ dag = DAG(
     description="SERP D5 governed publish activation handoff contract",
     schedule=None,
     catchup=False,
+    max_active_runs=1,
     render_template_as_native_obj=True,
     tags=["serp", "public-docs", "publish", "bc21"],
 )
@@ -80,6 +85,42 @@ verify_search_serve = PythonOperator(
     dag=dag,
 )
 
+run_retrieval_golden = PythonOperator(
+    task_id="run_public_docs_retrieval_golden",
+    python_callable=write_public_docs_retrieval_golden_artifact,
+    op_args=["{{ ti.xcom_pull(task_ids='validate_publish_signed_pack_plan') }}"],
+    dag=dag,
+)
+
+write_coverage_proof = PythonOperator(
+    task_id="write_public_docs_coverage_proof",
+    python_callable=write_public_docs_coverage_proof_artifact,
+    op_args=["{{ ti.xcom_pull(task_ids='validate_publish_signed_pack_plan') }}"],
+    dag=dag,
+)
+
+commit_crawl_state = PythonOperator(
+    task_id="commit_public_docs_crawl_state",
+    python_callable=write_public_docs_crawl_state_artifact,
+    op_args=["{{ ti.xcom_pull(task_ids='validate_publish_signed_pack_plan') }}"],
+    dag=dag,
+)
+
+build_retired_pack_cleanup = PythonOperator(
+    task_id="build_retired_public_docs_pack_cleanup",
+    python_callable=build_public_docs_retired_pack_cleanup_cli_spec,
+    op_args=["{{ ti.xcom_pull(task_ids='validate_publish_signed_pack_plan') }}"],
+    dag=dag,
+)
+
+cleanup_retired_pack_versions = PythonOperator(
+    task_id="cleanup_retired_public_docs_pack_versions",
+    python_callable=execute_pipeline_cli_spec,
+    op_args=["{{ ti.xcom_pull(task_ids='build_retired_public_docs_pack_cleanup') }}"],
+    retries=1,
+    dag=dag,
+)
+
 notify_governance = PythonOperator(
     task_id="notify_governance_eval_surfaces",
     python_callable=governance_notification_pending,
@@ -94,5 +135,10 @@ notify_governance = PythonOperator(
     >> dispatch_submit
     >> submit_activation
     >> verify_search_serve
+    >> run_retrieval_golden
+    >> write_coverage_proof
+    >> commit_crawl_state
+    >> build_retired_pack_cleanup
+    >> cleanup_retired_pack_versions
     >> notify_governance
 )
