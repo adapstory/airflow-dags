@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from airflow.exceptions import AirflowSkipException
 from airflow.providers.standard.operators.python import PythonOperator
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sdk import DAG
 
 from dags.serp_eval_contracts import (
@@ -47,6 +50,33 @@ def _public_docs_seed_refresh_conf_with_defaults(conf: dict[str, Any]) -> dict[s
         artifact_root_path=str(artifact_root_path) if artifact_root_path else None,
     )
     return {**defaults, **conf, "generated_at": generated_at}
+
+
+def prepare_public_docs_d5_dispatch(**context: Any) -> dict[str, Any]:
+    """Return the only D5 configuration D20 is permitted to dispatch."""
+
+    task_instance = context.get("ti")
+    if task_instance is None:
+        raise ValueError("Airflow task instance is required for D5 dispatch")
+    trigger_artifact = task_instance.xcom_pull(
+        task_ids="write_public_docs_publish_activation_trigger_conf"
+    )
+    if not isinstance(trigger_artifact, Mapping):
+        raise ValueError("D20 publish trigger artifact must be an object")
+    payload = trigger_artifact.get("payload")
+    if not isinstance(payload, Mapping):
+        raise ValueError("D20 publish trigger artifact payload must be an object")
+    status = payload.get("status")
+    if status == "no_change_active_pack_retained":
+        raise AirflowSkipException("public docs no-op: D5 activation is not dispatched")
+    if status != "ready_for_d5_publish_activation":
+        raise ValueError(f"D20 publish trigger artifact is not dispatchable: status={status!r}")
+    if payload.get("target_dag_id") != "serp_publish_signed_pack":
+        raise ValueError("D20 publish trigger target DAG is invalid")
+    target_conf = payload.get("target_dag_run_conf")
+    if not isinstance(target_conf, Mapping) or not target_conf:
+        raise ValueError("D20 publish trigger target configuration must be a non-empty object")
+    return dict(target_conf)
 
 
 default_args = {
@@ -116,6 +146,25 @@ write_publish_trigger_conf = PythonOperator(
     dag=dag,
 )
 
+prepare_d5_dispatch = PythonOperator(
+    task_id="prepare_public_docs_d5_dispatch",
+    python_callable=prepare_public_docs_d5_dispatch,
+    dag=dag,
+)
+
+trigger_d5_publish_activation = TriggerDagRunOperator(
+    task_id="trigger_public_docs_d5_publish_activation",
+    trigger_dag_id="serp_publish_signed_pack",
+    trigger_run_id="d5-from-{{ dag_run.run_id }}",
+    conf="{{ ti.xcom_pull(task_ids='prepare_public_docs_d5_dispatch') }}",
+    wait_for_completion=True,
+    allowed_states=["success"],
+    failed_states=["failed"],
+    skip_when_already_exists=True,
+    fail_when_dag_is_paused=True,
+    dag=dag,
+)
+
 notify_governance = PythonOperator(
     task_id="notify_governance_eval_surfaces",
     python_callable=governance_notification_pending,
@@ -131,5 +180,7 @@ notify_governance = PythonOperator(
     >> run_pipeline
     >> submit_bc21_pipeline_state
     >> write_publish_trigger_conf
+    >> prepare_d5_dispatch
+    >> trigger_d5_publish_activation
     >> notify_governance
 )

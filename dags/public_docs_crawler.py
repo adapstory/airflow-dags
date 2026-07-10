@@ -39,13 +39,20 @@ def crawl_public_docs(
     _require_allowed_url(seed_uri, policy)
     robots_url = _canonical_url(urljoin(seed_uri, "/robots.txt"))
     robots_response = fetcher(robots_url, {"User-Agent": str(policy["user_agent"])})
-    if robots_response.status_code != 200:
+    if robots_response.status_code in {404, 410}:
+        robot_parser = RobotFileParser(robots_url)
+        robot_parser.parse(())
+        robots_policy = "implicit_allow"
+    elif robots_response.status_code != 200:
         return _blocked_evidence("ROBOTS_FETCH_FAILED", f"status={robots_response.status_code}")
-    if len(robots_response.body) > _MAX_DISCOVERY_BYTES:
-        return _blocked_evidence("ROBOTS_PAYLOAD_TOO_LARGE", "robots.txt exceeds discovery limit")
-
-    robot_parser = RobotFileParser(robots_url)
-    robot_parser.parse(robots_response.body.decode("utf-8", errors="replace").splitlines())
+    else:
+        if len(robots_response.body) > _MAX_DISCOVERY_BYTES:
+            return _blocked_evidence(
+                "ROBOTS_PAYLOAD_TOO_LARGE", "robots.txt exceeds discovery limit"
+            )
+        robot_parser = RobotFileParser(robots_url)
+        robot_parser.parse(robots_response.body.decode("utf-8", errors="replace").splitlines())
+        robots_policy = "parsed"
     if not robot_parser.can_fetch(str(policy["user_agent"]), seed_uri):
         return _blocked_evidence("ROBOTS_DENIED", seed_uri)
 
@@ -149,6 +156,11 @@ def crawl_public_docs(
         "contract_version": CRAWLER_CONTRACT_VERSION,
         "status": "quarantined" if quarantined else "completed",
         "seed_uri": seed_uri,
+        "robots": {
+            "http_status": robots_response.status_code,
+            "policy": robots_policy,
+            "url": robots_url,
+        },
         "discovery_complete": discovery_complete,
         "authoritative_discovery": authoritative_discovery,
         "changed_urls": sorted(set(changed_urls)),

@@ -95,14 +95,10 @@ P0_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
     ),
     _source(
         component="Kustomize",
-        docs_url=(
-            "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/"
-            "site/content/en/docs/Getting%20started/installation.md"
-        ),
+        docs_url="https://kustomize.io/",
         repo_url="https://github.com/kubernetes-sigs/kustomize",
         releases_url="https://github.com/kubernetes-sigs/kustomize/releases",
         seed_id="kustomize-docs",
-        catalog_docs_url="https://kustomize.io/",
     ),
     _source(
         component="Argo CD",
@@ -127,22 +123,17 @@ P0_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
     ),
     _source(
         component="Qdrant",
-        docs_url=(
-            "https://raw.githubusercontent.com/qdrant/landing_page/master/"
-            "qdrant-landing/content/documentation/_index.md"
-        ),
+        docs_url="https://qdrant.tech/documentation/",
         repo_url="https://github.com/qdrant/qdrant",
         releases_url="https://github.com/qdrant/qdrant/releases",
         seed_id="qdrant-docs",
-        catalog_docs_url="https://qdrant.tech/documentation/",
     ),
     _source(
         component="Neo4j",
-        docs_url="https://raw.githubusercontent.com/neo4j/docs-operations/dev/README.adoc",
+        docs_url="https://neo4j.com/docs/",
         repo_url="https://github.com/neo4j/neo4j",
         releases_url="https://github.com/neo4j/neo4j/releases",
         seed_id="neo4j-docs",
-        catalog_docs_url="https://neo4j.com/docs/",
     ),
     _source(
         component="PostgreSQL",
@@ -160,11 +151,10 @@ P0_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
     ),
     _source(
         component="Redis",
-        docs_url="https://raw.githubusercontent.com/redis/redis/unstable/README.md",
+        docs_url="https://redis.io/docs/latest/",
         repo_url="https://github.com/redis/redis",
         releases_url="https://github.com/redis/redis/releases",
         seed_id="redis-docs",
-        catalog_docs_url="https://redis.io/docs/latest/",
     ),
     _source(
         component="Apache Kafka",
@@ -175,11 +165,10 @@ P0_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
     ),
     _source(
         component="MinIO",
-        docs_url="https://raw.githubusercontent.com/minio/minio/master/docs/orchestration/kubernetes/README.md",
+        docs_url="https://docs.min.io/",
         repo_url="https://github.com/minio/minio",
         releases_url="https://github.com/minio/minio/releases",
         seed_id="minio-docs",
-        catalog_docs_url="https://docs.min.io/",
     ),
     _source(
         component="Vault",
@@ -197,33 +186,24 @@ P0_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
     ),
     _source(
         component="Jenkins",
-        docs_url=(
-            "https://raw.githubusercontent.com/jenkins-infra/docs.jenkins.io/main/"
-            "docs/user-docs/modules/ROOT/pages/index.adoc"
-        ),
+        docs_url="https://www.jenkins.io/doc/",
         repo_url="https://github.com/jenkinsci/jenkins",
         releases_url="https://github.com/jenkinsci/jenkins/releases",
         seed_id="jenkins-docs",
-        catalog_docs_url="https://www.jenkins.io/doc/",
     ),
     _source(
         component="Harbor",
-        docs_url="https://raw.githubusercontent.com/goharbor/website/main/docs/_index.md",
+        docs_url="https://goharbor.io/docs/",
         repo_url="https://github.com/goharbor/harbor",
         releases_url="https://github.com/goharbor/harbor/releases",
         seed_id="harbor-docs",
-        catalog_docs_url="https://goharbor.io/docs/",
     ),
     _source(
         component="cert-manager",
-        docs_url=(
-            "https://raw.githubusercontent.com/cert-manager/website/master/"
-            "content/docs/installation/README.md"
-        ),
+        docs_url="https://cert-manager.io/docs/",
         repo_url="https://github.com/cert-manager/cert-manager",
         releases_url="https://github.com/cert-manager/cert-manager/releases",
         seed_id="cert-manager-docs",
-        catalog_docs_url="https://cert-manager.io/docs/",
     ),
     _source(
         component="External Secrets Operator",
@@ -234,44 +214,31 @@ P0_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
     ),
     _source(
         component="Cilium",
-        docs_url=(
-            "https://raw.githubusercontent.com/cilium/cilium/master/"
-            "Documentation/gettingstarted/k8s-install-default.rst"
-        ),
+        docs_url="https://docs.cilium.io/en/stable/",
         repo_url="https://github.com/cilium/cilium",
         releases_url="https://github.com/cilium/cilium/releases",
         seed_id="cilium-docs",
-        catalog_docs_url="https://docs.cilium.io/en/stable/",
     ),
     _source(
         component="Kyverno",
-        docs_url=(
-            "https://raw.githubusercontent.com/kyverno/website/main/"
-            "src/content/docs/docs/installation/installation.mdx"
-        ),
+        docs_url="https://kyverno.io/docs/",
         repo_url="https://github.com/kyverno/kyverno",
         releases_url="https://github.com/kyverno/kyverno/releases",
         seed_id="kyverno-docs",
-        catalog_docs_url="https://kyverno.io/docs/",
     ),
     _source(
         component="OpenEBS",
-        docs_url=(
-            "https://raw.githubusercontent.com/openebs/website/main/"
-            "docs/main/quickstart-guide/installation.md"
-        ),
+        docs_url="https://openebs.io/docs/",
         repo_url="https://github.com/openebs/openebs",
         releases_url="https://github.com/openebs/openebs/releases",
         seed_id="openebs-docs",
-        catalog_docs_url="https://openebs.io/docs/",
     ),
     _source(
         component="Traefik Proxy",
-        docs_url="https://raw.githubusercontent.com/traefik/traefik/master/README.md",
+        docs_url="https://doc.traefik.io/traefik/",
         repo_url="https://github.com/traefik/traefik",
         releases_url="https://github.com/traefik/traefik/releases",
         seed_id="traefik-proxy-docs",
-        catalog_docs_url="https://doc.traefik.io/traefik/",
     ),
     _source(
         component="NVIDIA GPU Operator",

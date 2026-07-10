@@ -168,6 +168,43 @@ def test_crawler_does_not_delete_state_when_authoritative_discovery_is_unavailab
     assert evidence["failure"]["code"] == "ROBOTS_FETCH_FAILED"
 
 
+def test_crawler_records_missing_robots_as_implicit_allow() -> None:
+    root = "https://docs.example.com/"
+    fetcher = FakeFetcher(
+        {
+            "https://docs.example.com/robots.txt": CrawlResponse(404, {}, b""),
+            "https://docs.example.com/sitemap.xml": CrawlResponse(404, {}, b""),
+            root: CrawlResponse(
+                200, {"content-type": "text/html"}, b"<html><body>docs</body></html>"
+            ),
+        },
+        [],
+    )
+
+    evidence = crawl_public_docs(
+        seed_uri=root,
+        crawl_policy={
+            "allowed_domains": ["docs.example.com"],
+            "deny_patterns": [],
+            "max_depth": 1,
+            "max_pages": 5,
+            "respect_robots_txt": True,
+            "sitemap_discovery": True,
+            "user_agent": "serp-test/1",
+        },
+        previous_state={},
+        fetcher=fetcher,
+    )
+
+    assert evidence["status"] == "completed"
+    assert evidence["robots"] == {
+        "http_status": 404,
+        "policy": "implicit_allow",
+        "url": "https://docs.example.com/robots.txt",
+    }
+    assert evidence["changed_urls"] == [root]
+
+
 def test_crawler_quarantines_a_recoverable_page_failure_without_tombstoning_state() -> None:
     root = "https://docs.example.com/"
     protected = "https://docs.example.com/protected"

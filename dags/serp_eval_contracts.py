@@ -774,6 +774,8 @@ def build_public_docs_seed_refresh_plan(
                 "run_public_docs_seed_refresh_pipeline",
                 "submit_public_docs_bc21_pipeline_state",
                 "write_public_docs_publish_activation_trigger_conf",
+                "prepare_public_docs_d5_dispatch",
+                "trigger_public_docs_d5_publish_activation",
                 "notify_governance_eval_surfaces",
             )
         ),

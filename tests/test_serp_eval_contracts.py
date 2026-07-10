@@ -1311,6 +1311,8 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
         "run_public_docs_seed_refresh_pipeline",
         "submit_public_docs_bc21_pipeline_state",
         "write_public_docs_publish_activation_trigger_conf",
+        "prepare_public_docs_d5_dispatch",
+        "trigger_public_docs_d5_publish_activation",
         "notify_governance_eval_surfaces",
     ]
 
@@ -3241,24 +3243,26 @@ def test_p0_public_docs_sources_match_nightly_markdown_catalog() -> None:
         assert str(source.get("priority", "P0")) == row["priority"]
 
 
-def test_p0_public_docs_flaky_website_roots_use_raw_executable_docs() -> None:
+def test_p0_public_docs_website_seeds_use_canonical_public_docs_roots() -> None:
     sources_by_seed_id = {str(source["seed_id"]): source for source in P0_PUBLIC_DOCS_SOURCES}
 
-    assert sources_by_seed_id["kustomize-docs"]["docs_url"].startswith(
-        "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/"
-    )
-    assert sources_by_seed_id["kustomize-docs"]["catalog_docs_url"] == "https://kustomize.io/"
-    assert sources_by_seed_id["minio-docs"]["docs_url"].startswith(
-        "https://raw.githubusercontent.com/minio/minio/"
-    )
-    assert sources_by_seed_id["minio-docs"]["catalog_docs_url"] == "https://docs.min.io/"
-    assert sources_by_seed_id["traefik-proxy-docs"]["docs_url"].startswith(
-        "https://raw.githubusercontent.com/traefik/traefik/"
-    )
-    assert (
-        sources_by_seed_id["traefik-proxy-docs"]["catalog_docs_url"]
-        == "https://doc.traefik.io/traefik/"
-    )
+    for seed_id in (
+        "kustomize-docs",
+        "qdrant-docs",
+        "neo4j-docs",
+        "redis-docs",
+        "minio-docs",
+        "jenkins-docs",
+        "harbor-docs",
+        "cert-manager-docs",
+        "cilium-docs",
+        "kyverno-docs",
+        "openebs-docs",
+        "traefik-proxy-docs",
+    ):
+        source = sources_by_seed_id[seed_id]
+        assert not str(source["docs_url"]).startswith("https://raw.githubusercontent.com/")
+        assert source["docs_url"] == source.get("catalog_docs_url", source["docs_url"])
 
 
 def _p0_nightly_catalog_rows(catalog_text: str) -> dict[str, dict[str, str]]:
@@ -3424,6 +3428,7 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
                 "run_public_docs_seed_refresh_pipeline",
                 "submit_public_docs_bc21_pipeline_state",
                 "write_public_docs_publish_activation_trigger_conf",
+                "prepare_public_docs_d5_dispatch",
                 "notify_governance_eval_surfaces",
             ],
         ),
@@ -3539,6 +3544,61 @@ def test_serp_public_docs_dag_serializes_manual_and_nightly_runs() -> None:
     assert max_active_runs == 1
 
 
+def test_serp_public_docs_dag_dispatches_d5_natively_and_waits_for_completion() -> None:
+    source = (REPO_ROOT / "dags" / "serp_web_seed_crawl_refresh.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    trigger_call = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _matches_call(node, "TriggerDagRunOperator")
+    )
+    values = {keyword.arg: keyword.value for keyword in trigger_call.keywords}
+
+    assert values["task_id"].value == "trigger_public_docs_d5_publish_activation"
+    assert values["trigger_dag_id"].value == "serp_publish_signed_pack"
+    assert values["wait_for_completion"].value is True
+    assert values["skip_when_already_exists"].value is True
+    assert values["fail_when_dag_is_paused"].value is True
+
+
+def test_prepare_public_docs_d5_dispatch_returns_only_validated_ready_conf(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    module = importlib.import_module("dags.serp_web_seed_crawl_refresh")
+    module = importlib.reload(module)
+    expected_conf = {"pack_version_id": "018f5e13-2d73-7a77-a052-8d1bcbf96541"}
+
+    class TaskInstance:
+        def xcom_pull(self, *, task_ids: str) -> dict[str, object]:
+            assert task_ids == "write_public_docs_publish_activation_trigger_conf"
+            return {
+                "payload": {
+                    "status": "ready_for_d5_publish_activation",
+                    "target_dag_id": "serp_publish_signed_pack",
+                    "target_dag_run_conf": expected_conf,
+                }
+            }
+
+    assert module.prepare_public_docs_d5_dispatch(ti=TaskInstance()) == expected_conf
+
+
+def test_prepare_public_docs_d5_dispatch_skips_noop_without_triggering_d5(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    module = importlib.import_module("dags.serp_web_seed_crawl_refresh")
+    module = importlib.reload(module)
+
+    class TaskInstance:
+        def xcom_pull(self, *, task_ids: str) -> dict[str, object]:
+            assert task_ids == "write_public_docs_publish_activation_trigger_conf"
+            return {"payload": {"status": "no_change_active_pack_retained"}}
+
+    with pytest.raises(module.AirflowSkipException, match="no-op"):
+        module.prepare_public_docs_d5_dispatch(ti=TaskInstance())
+
+
 def test_serp_public_docs_dag_overlays_partial_run_conf_on_default_seed_registry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3567,6 +3627,9 @@ def test_serp_public_docs_dag_overlays_partial_run_conf_on_default_seed_registry
 
 
 def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeAirflowSkipException(Exception):
+        pass
+
     class FakeDAG:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
@@ -3578,8 +3641,12 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         def __rshift__(self, other: object) -> object:
             return other
 
+    class FakeTriggerDagRunOperator(FakePythonOperator):
+        pass
+
     modules = {
         "airflow": types.ModuleType("airflow"),
+        "airflow.exceptions": types.ModuleType("airflow.exceptions"),
         "airflow.providers": types.ModuleType("airflow.providers"),
         "airflow.providers.standard": types.ModuleType("airflow.providers.standard"),
         "airflow.providers.standard.operators": types.ModuleType(
@@ -3588,11 +3655,18 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         "airflow.providers.standard.operators.python": types.ModuleType(
             "airflow.providers.standard.operators.python"
         ),
+        "airflow.providers.standard.operators.trigger_dagrun": types.ModuleType(
+            "airflow.providers.standard.operators.trigger_dagrun"
+        ),
         "airflow.sdk": types.ModuleType("airflow.sdk"),
     }
     cast(
         Any, modules["airflow.providers.standard.operators.python"]
     ).PythonOperator = FakePythonOperator
+    cast(Any, modules["airflow.exceptions"]).AirflowSkipException = FakeAirflowSkipException
+    cast(
+        Any, modules["airflow.providers.standard.operators.trigger_dagrun"]
+    ).TriggerDagRunOperator = FakeTriggerDagRunOperator
     cast(Any, modules["airflow.sdk"]).DAG = FakeDAG
     for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)
