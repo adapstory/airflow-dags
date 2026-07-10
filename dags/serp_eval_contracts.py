@@ -990,6 +990,69 @@ def write_airflow_plan_artifact(plan: SerpDagPlan) -> str:
     return plan_json
 
 
+def build_evidence_artifact_paths(
+    artifact_root_path: str,
+    operation_id: str,
+    filenames: Sequence[tuple[str, str]],
+) -> dict[str, str]:
+    """Build validated, immutable evidence paths for a single operation."""
+    return _artifact_paths(artifact_root_path, operation_id, filenames)
+
+
+def write_evidence_artifact(
+    artifact_path: str,
+    *,
+    artifact_type: str,
+    operation_id: str,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Persist a secret-free evidence payload to local storage or the configured S3 store."""
+    _reject_raw_secrets(payload)
+    normalized_path = _artifact_path("artifact_path", artifact_path)
+    _write_json_artifact(normalized_path, payload)
+    return _artifact_result(
+        normalized_path,
+        artifact_type=artifact_type,
+        operation_id=operation_id,
+        payload=payload,
+    )
+
+
+def read_evidence_artifact(artifact_path: str, field_name: str) -> dict[str, Any]:
+    """Read a JSON evidence object through the canonical local/S3 artifact transport."""
+    return dict(_read_json_file(_artifact_path(field_name, artifact_path), field_name))
+
+
+def validate_internal_service_base_url(value: str, field_name: str) -> str:
+    """Accept only HTTPS, localhost HTTP, or Kubernetes Service DNS HTTP endpoints."""
+    return _required_internal_or_https_base_url({field_name: value}, field_name).rstrip("/")
+
+
+def post_bc21_json(
+    base_url: str,
+    path: str,
+    *,
+    body: Mapping[str, Any],
+    headers: Mapping[str, str],
+    error_label: str,
+) -> dict[str, Any]:
+    """Submit one authenticated BC-21 JSON mutation without exposing transport internals."""
+    normalized_base = validate_internal_service_base_url(base_url, "bc21_base_url")
+    if not path.startswith("/api/") or "?" in path or "#" in path:
+        raise ValueError("BC-21 path must be an absolute API path without parameters")
+    _reject_raw_secrets(body)
+    return dict(
+        _bc21_json_request(
+            normalized_base + path,
+            method="POST",
+            body=body,
+            headers=headers,
+            error_label=error_label,
+        )
+        or {}
+    )
+
+
 def write_public_docs_seed_registry_artifact(
     plan_json: Mapping[str, Any] | str,
 ) -> dict[str, Any]:
