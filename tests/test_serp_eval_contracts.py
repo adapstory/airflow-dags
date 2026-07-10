@@ -86,7 +86,7 @@ def test_public_docs_crawler_preserves_http_status_when_error_body_times_out(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class TimedOutErrorBody(io.BytesIO):
-        def read(self, _size: int = -1) -> bytes:
+        def read(self, _size: int | None = -1) -> bytes:
             raise TimeoutError("error body timed out")
 
     def fake_urlopen(_request: object, *, timeout: int) -> object:
