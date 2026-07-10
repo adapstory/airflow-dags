@@ -700,6 +700,10 @@ def build_public_docs_seed_refresh_plan(
     artifact_root_path = _required_artifact_root_path(payload)
     crawl_state_path = _public_docs_crawl_state_path(payload, artifact_root_path)
     active_pack_version_id = _optional_public_docs_active_pack_version_id(payload)
+    crawl_state_recovery = _optional_public_docs_crawl_state_recovery(
+        payload,
+        active_pack_version_id=active_pack_version_id,
+    )
     index_mode = _public_docs_index_mode(payload)
     embedding_mode = _public_docs_embedding_mode(payload, index_mode)
     qdrant_collection = _public_docs_store_name(
@@ -744,6 +748,8 @@ def build_public_docs_seed_refresh_plan(
         pack_version_id,
         generated_at,
         seed_registry_sha256,
+        active_pack_version_id or "",
+        _canonical_json(crawl_state_recovery) if crawl_state_recovery is not None else "",
         index_mode,
         embedding_mode,
         bc21_base_url or "",
@@ -755,6 +761,11 @@ def build_public_docs_seed_refresh_plan(
         **(
             {"previous_active_pack_version_id": active_pack_version_id}
             if active_pack_version_id is not None
+            else {}
+        ),
+        **(
+            {"public_docs_crawl_state_recovery": crawl_state_recovery}
+            if crawl_state_recovery is not None
             else {}
         ),
         "artifact_root_path": artifact_root_path,
@@ -837,7 +848,7 @@ def load_public_docs_crawl_state_conf(conf: Mapping[str, Any]) -> dict[str, Any]
     state_path = _public_docs_crawl_state_path(payload, artifact_root_path)
     raw_state = _read_optional_json_file(state_path, "public_docs_crawl_state")
     if raw_state is None:
-        return {**payload, "public_docs_crawl_state_path": state_path}
+        return _recover_public_docs_active_pack_from_bc21(payload, state_path)
     _validate_public_docs_crawl_state_identity(raw_state, payload)
     active_pack_version_id = str(_required_uuid(raw_state, "active_pack_version_id"))
     persisted_seeds = _required_mapping(raw_state, "seeds")
@@ -860,6 +871,64 @@ def load_public_docs_crawl_state_conf(conf: Mapping[str, Any]) -> dict[str, Any]
         "active_pack_version_id": active_pack_version_id,
         "public_docs_crawl_state_path": state_path,
         "seed_registry": hydrated_registry,
+    }
+
+
+def _recover_public_docs_active_pack_from_bc21(
+    payload: Mapping[str, Any],
+    state_path: str,
+) -> dict[str, Any]:
+    """Recover only the active predecessor when the durable crawl snapshot is absent.
+
+    The snapshot owns crawler freshness state and is never synthesized from the
+    registry.  BC-21 is consulted solely to preserve a known active pack as the
+    rollback target during a one-time recovery or after artifact loss.
+    """
+
+    if payload.get("active_pack_version_id") is not None:
+        return {**payload, "public_docs_crawl_state_path": state_path}
+    bc21_base_url = _optional_bc21_base_url(payload)
+    if bc21_base_url is None:
+        return {**payload, "public_docs_crawl_state_path": state_path}
+
+    tenant_id = str(_required_uuid(payload, "tenant_id"))
+    pack_id = str(_required_uuid(payload, "pack_id"))
+    actor_id = _required_str(payload, "actor_id")
+    endpoint = bc21_base_url.rstrip("/") + f"/api/bc-21/serp/v1/packs/{pack_id}/active-version"
+    response = _bc21_json_request(
+        endpoint,
+        method="GET",
+        body=None,
+        headers={
+            "X-Adapstory-Tenant-Id": tenant_id,
+            "X-Adapstory-Trusted-Actor-Id": actor_id,
+            "X-Adapstory-Trusted-Tenant-Id": tenant_id,
+        },
+        error_label="public docs active pack resolution",
+        allow_conflict=True,
+    )
+    if response is None:
+        return {**payload, "public_docs_crawl_state_path": state_path}
+    if _required_str(response, "tenantId") != tenant_id:
+        raise ValueError("public docs active pack resolution tenantId does not match plan")
+    if _required_str(response, "packId") != pack_id:
+        raise ValueError("public docs active pack resolution packId does not match plan")
+    if _required_str(response, "activationState") != "active":
+        raise ValueError("public docs active pack resolution activationState must be active")
+    if _required_str(response, "versionState") != "active":
+        raise ValueError("public docs active pack resolution versionState must be active")
+    active_pack_version_id = str(_required_uuid(response, "packVersionId"))
+    activation_run_id = str(_required_uuid(response, "activationRunId"))
+    recovery = {
+        "active_pack_version_id": active_pack_version_id,
+        "activation_run_id": activation_run_id,
+        "method": "bc21_active_pack_resolution",
+    }
+    return {
+        **payload,
+        "active_pack_version_id": active_pack_version_id,
+        "public_docs_crawl_state_path": state_path,
+        "public_docs_crawl_state_recovery": recovery,
     }
 
 
@@ -6083,6 +6152,31 @@ def _optional_public_docs_active_pack_version_id(payload: Mapping[str, Any]) -> 
     if value is None:
         return None
     return str(_required_uuid(payload, "active_pack_version_id"))
+
+
+def _optional_public_docs_crawl_state_recovery(
+    payload: Mapping[str, Any],
+    *,
+    active_pack_version_id: str | None,
+) -> dict[str, str] | None:
+    value = payload.get("public_docs_crawl_state_recovery")
+    if value is None:
+        return None
+    if active_pack_version_id is None:
+        raise ValueError("public_docs_crawl_state_recovery requires active_pack_version_id")
+    recovery = _required_mapping(payload, "public_docs_crawl_state_recovery")
+    if _required_str(recovery, "method") != "bc21_active_pack_resolution":
+        raise ValueError("public_docs_crawl_state_recovery method is unsupported")
+    recovered_pack_version_id = str(_required_uuid(recovery, "active_pack_version_id"))
+    if recovered_pack_version_id != active_pack_version_id:
+        raise ValueError(
+            "public_docs_crawl_state_recovery active_pack_version_id must match active pack"
+        )
+    return {
+        "active_pack_version_id": recovered_pack_version_id,
+        "activation_run_id": str(_required_uuid(recovery, "activation_run_id")),
+        "method": "bc21_active_pack_resolution",
+    }
 
 
 def _optional_previous_active_pack_version_id(payload: Mapping[str, Any]) -> str | None:

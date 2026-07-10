@@ -1800,6 +1800,113 @@ def test_public_docs_crawl_state_conf_overlays_persisted_state(tmp_path: Path) -
     )
 
 
+def test_public_docs_crawl_state_conf_recovers_active_version_from_bc21_when_snapshot_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    conf["bc21_base_url"] = "http://serp-context-platform.env-dev.svc.cluster.local"
+    recovered_pack_version_id = "018f5e13-2d73-7a77-a052-8d1bcbf96542"
+
+    class Response:
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(
+                {
+                    "activationRunId": "018f5e13-2d73-7a77-a052-8d1bcbf96543",
+                    "activationState": "active",
+                    "activatedAt": "2026-07-09T21:00:00Z",
+                    "approvalRunId": "018f5e13-2d73-7a77-a052-8d1bcbf96544",
+                    "evidenceBundleId": "018f5e13-2d73-7a77-a052-8d1bcbf96545",
+                    "evidenceSealHash": "sha256:" + "a" * 64,
+                    "indexedRunId": "018f5e13-2d73-7a77-a052-8d1bcbf96546",
+                    "packId": PACK_ID,
+                    "packVersionId": recovered_pack_version_id,
+                    "tenantId": TENANT_ID,
+                    "versionState": "active",
+                }
+            ).encode("utf-8")
+
+    def fake_urlopen(request: Any, *, timeout: float) -> Response:
+        assert timeout == 5.0
+        assert request.get_method() == "GET"
+        assert request.full_url == (
+            "http://serp-context-platform.env-dev.svc.cluster.local"
+            f"/api/bc-21/serp/v1/packs/{PACK_ID}/active-version"
+        )
+        assert request.get_header("X-adapstory-tenant-id") == TENANT_ID
+        assert request.get_header("X-adapstory-trusted-tenant-id") == TENANT_ID
+        assert request.get_header("X-adapstory-trusted-actor-id") == conf["actor_id"]
+        return Response()
+
+    monkeypatch.setattr("dags.serp_eval_contracts.urlopen", fake_urlopen)
+
+    hydrated = load_public_docs_crawl_state_conf(conf)
+    plan = build_public_docs_seed_refresh_plan(hydrated)
+
+    assert hydrated["active_pack_version_id"] == recovered_pack_version_id
+    assert hydrated["public_docs_crawl_state_recovery"] == {
+        "active_pack_version_id": recovered_pack_version_id,
+        "activation_run_id": "018f5e13-2d73-7a77-a052-8d1bcbf96543",
+        "method": "bc21_active_pack_resolution",
+    }
+    assert plan.payload["previous_active_pack_version_id"] == recovered_pack_version_id
+    assert (
+        plan.payload["public_docs_crawl_state_recovery"]
+        == (hydrated["public_docs_crawl_state_recovery"])
+    )
+
+
+def test_public_docs_crawl_state_conf_fails_closed_when_bc21_active_version_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    conf["bc21_base_url"] = "http://serp-context-platform.env-dev.svc.cluster.local"
+
+    def unavailable(_request: object, *, timeout: float) -> object:
+        raise TimeoutError("registry unavailable")
+
+    monkeypatch.setattr("dags.serp_eval_contracts.urlopen", unavailable)
+
+    with pytest.raises(ValueError, match="public docs active pack resolution failed"):
+        load_public_docs_crawl_state_conf(conf)
+
+
+def test_public_docs_crawl_state_conf_allows_true_first_activation_when_bc21_has_no_active_pack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    conf["bc21_base_url"] = "http://serp-context-platform.env-dev.svc.cluster.local"
+
+    def no_active_pack(_request: object, *, timeout: float) -> object:
+        raise HTTPError(
+            "http://serp-context-platform.env-dev.svc.cluster.local/active-version",
+            409,
+            "Conflict",
+            Message(),
+            io.BytesIO(),
+        )
+
+    monkeypatch.setattr("dags.serp_eval_contracts.urlopen", no_active_pack)
+
+    hydrated = load_public_docs_crawl_state_conf(conf)
+    plan = build_public_docs_seed_refresh_plan(hydrated)
+
+    assert "active_pack_version_id" not in hydrated
+    assert "public_docs_crawl_state_recovery" not in hydrated
+    assert "previous_active_pack_version_id" not in plan.payload
+
+
 def test_public_docs_crawl_state_commits_only_after_complete_d5_coverage(
     tmp_path: Path,
 ) -> None:
