@@ -19,7 +19,7 @@ from tempfile import TemporaryDirectory
 from time import perf_counter, sleep
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 from urllib.request import ProxyHandler, Request, build_opener, urlopen
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -5972,10 +5972,7 @@ def _reject_raw_secrets(value: Any) -> None:
 def _contains_raw_secret(value: Any) -> bool:
     if isinstance(value, Mapping):
         for key, nested in value.items():
-            normalized_key = str(key).lower().replace("-", "_")
-            if normalized_key in _RAW_SECRET_KEYS or any(
-                normalized_key.endswith(f"_{secret_key}") for secret_key in _RAW_SECRET_KEYS
-            ):
+            if _contains_raw_secret_mapping_key(key):
                 return True
             if _contains_raw_secret(nested):
                 return True
@@ -5987,6 +5984,28 @@ def _contains_raw_secret(value: Any) -> bool:
     ):
         return True
     return False
+
+
+def _contains_raw_secret_mapping_key(key: Any) -> bool:
+    """Treat URL-indexed crawler evidence as data while still rejecting secret URLs."""
+
+    raw_key = str(key)
+    parsed = urlparse(raw_key)
+    if parsed.scheme in {"http", "https"} and parsed.hostname:
+        if parsed.username or parsed.password:
+            return True
+        return any(
+            _is_raw_secret_field_name(parameter)
+            for parameter, _ in parse_qsl(parsed.query, keep_blank_values=True)
+        )
+    return _is_raw_secret_field_name(raw_key)
+
+
+def _is_raw_secret_field_name(value: Any) -> bool:
+    normalized_key = str(value).lower().replace("-", "_")
+    return normalized_key in _RAW_SECRET_KEYS or any(
+        normalized_key.endswith(f"_{secret_key}") for secret_key in _RAW_SECRET_KEYS
+    )
 
 
 def _artifact_ref(field_name: str, value: str) -> _ArtifactRef:

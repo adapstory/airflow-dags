@@ -1587,6 +1587,42 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
     ]
 
 
+def test_public_docs_seed_registry_allows_url_keys_but_rejects_secret_fields(
+    tmp_path: Path,
+) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    page_url = "https://neo4j.com/docs/operations-manual/current/" "authentication-authorization"
+
+    plan = build_public_docs_seed_refresh_plan(conf)
+    crawl_evidence = {
+        "pages": {page_url: {"http_status": 200, "status": "new"}},
+        "state": {},
+        "status": "completed",
+    }
+    plan.payload["seed_registry"][0]["crawl_policy"]["crawl_evidence"] = crawl_evidence
+
+    artifact = write_public_docs_seed_registry_artifact(plan.to_canonical_json())
+
+    assert artifact["payload"]["status"] == "validated"
+
+    plan.payload["seed_registry"][0]["crawl_policy"]["crawl_evidence"] = {
+        "pages": {page_url: {"authorization": "Bearer test-token"}},
+        "state": {},
+        "status": "completed",
+    }
+    with pytest.raises(ValueError, match="dag run config must not contain raw secret material"):
+        write_public_docs_seed_registry_artifact(plan.to_canonical_json())
+
+    plan.payload["seed_registry"][0]["crawl_policy"]["crawl_evidence"] = {
+        "pages": {f"{page_url}?token=test-token": {"http_status": 200}},
+        "state": {},
+        "status": "completed",
+    }
+    with pytest.raises(ValueError, match="dag run config must not contain raw secret material"):
+        write_public_docs_seed_registry_artifact(plan.to_canonical_json())
+
+
 def test_public_docs_crawl_state_conf_overlays_persisted_state(tmp_path: Path) -> None:
     conf = _public_docs_seed_refresh_conf()
     conf["artifact_root_path"] = str(tmp_path)
