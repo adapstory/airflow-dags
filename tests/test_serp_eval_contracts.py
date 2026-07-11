@@ -3678,6 +3678,80 @@ def test_public_docs_retrieval_golden_cases_use_indexed_coverage_not_planned_fro
     assert cases[2]["query"] == "K3s documentation quick start"
 
 
+def test_public_docs_retrieval_golden_cases_keep_every_indexed_root_when_budget_is_smaller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        serp_eval_contracts_module,
+        "_PUBLIC_DOCS_RETRIEVAL_GOLDEN_MIN_CASES",
+        3,
+    )
+    refresh_plan = {
+        "seed_registry": [
+            {
+                "inventory_evidence": {"component": "Alpha"},
+                "seed_id": "alpha-docs",
+            },
+            {
+                "inventory_evidence": {"component": "Bravo"},
+                "seed_id": "bravo-docs",
+            },
+            {
+                "inventory_evidence": {"component": "Charlie"},
+                "seed_id": "charlie-docs",
+            },
+            {
+                "inventory_evidence": {"component": "Delta"},
+                "seed_id": "delta-docs",
+            },
+        ]
+    }
+    refresh_result = {
+        "artifact_type": "public_docs_seed_refresh_batch_evidence",
+        "coverage_proof": {
+            "coverage_status": "indexed_pending_publish",
+            "seeds": [
+                {
+                    "index_status": "passed",
+                    "seed_id": "alpha-docs",
+                    "source_uri": "https://docs.example.com/alpha/",
+                    "status": "indexed",
+                },
+                {
+                    "index_status": "passed",
+                    "seed_id": "bravo-docs",
+                    "source_uri": "https://docs.example.com/bravo/",
+                    "status": "indexed",
+                },
+                {
+                    "index_status": "passed",
+                    "seed_id": "charlie-docs",
+                    "source_uri": "https://docs.example.com/charlie/",
+                    "status": "indexed",
+                },
+                {
+                    "index_status": "passed",
+                    "seed_id": "delta-docs",
+                    "source_uri": "https://docs.example.com/delta/",
+                    "status": "indexed",
+                },
+            ],
+        },
+    }
+
+    cases = serp_eval_contracts_module._public_docs_retrieval_golden_cases(
+        refresh_plan,
+        refresh_result=refresh_result,
+    )
+
+    assert [case["seed_id"] for case in cases] == [
+        "alpha-docs",
+        "bravo-docs",
+        "charlie-docs",
+        "delta-docs",
+    ]
+
+
 def test_public_docs_publish_activation_plan_accepts_s3_d20_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

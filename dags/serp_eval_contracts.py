@@ -2978,7 +2978,8 @@ def _public_docs_retrieval_golden_cases(
     if _required_str(coverage_proof, "coverage_status") != "indexed_pending_publish":
         raise ValueError("public docs retrieval golden requires indexed pending-publish coverage")
     indexed_seeds = _required_object_list(coverage_proof, "seeds")
-    cases: list[dict[str, Any]] = []
+    required_cases: list[dict[str, Any]] = []
+    optional_cases: list[dict[str, Any]] = []
     for seed in sorted(indexed_seeds, key=lambda item: _required_str(item, "seed_id")):
         if _required_str(seed, "status") != "indexed":
             continue
@@ -2989,7 +2990,7 @@ def _public_docs_retrieval_golden_cases(
         if component is None:
             raise ValueError("public docs coverage proof seed_id is missing from seed registry")
         source_uri = _required_str(seed, "source_uri")
-        cases.append(
+        required_cases.append(
             _public_docs_retrieval_golden_case(
                 seed_id=seed_id,
                 component=component,
@@ -3008,7 +3009,7 @@ def _public_docs_retrieval_golden_cases(
             if frontier.get("status") != "indexed" or frontier.get("index_status") != "passed":
                 raise ValueError("public docs retrieval golden requires every curated frontier")
             frontier_url = _required_str(frontier, "source_uri")
-            cases.append(
+            required_cases.append(
                 _public_docs_retrieval_golden_case(
                     seed_id=seed_id,
                     component=component,
@@ -3028,7 +3029,7 @@ def _public_docs_retrieval_golden_cases(
             indexed_frontier, key=lambda item: _required_str(item, "source_uri")
         ):
             frontier_url = _required_str(frontier, "source_uri")
-            cases.append(
+            optional_cases.append(
                 _public_docs_retrieval_golden_case(
                     seed_id=seed_id,
                     component=component,
@@ -3036,19 +3037,28 @@ def _public_docs_retrieval_golden_cases(
                     query=_public_docs_retrieval_golden_query(component, frontier_url),
                 )
             )
-    unique_cases: dict[str, dict[str, Any]] = {}
-    for case in cases:
+    unique_required_cases: dict[str, dict[str, Any]] = {}
+    for case in required_cases:
         case_id = _required_str(case, "case_id")
-        if case_id in unique_cases:
+        if case_id in unique_required_cases:
             raise ValueError("public docs retrieval golden contains duplicate case_id")
-        unique_cases[case_id] = case
-    selected = list(unique_cases.values())
+        unique_required_cases[case_id] = case
+    selected = list(unique_required_cases.values())
+    unique_optional_cases: dict[str, dict[str, Any]] = {}
+    for case in optional_cases:
+        case_id = _required_str(case, "case_id")
+        if case_id in unique_required_cases or case_id in unique_optional_cases:
+            raise ValueError("public docs retrieval golden contains duplicate case_id")
+        unique_optional_cases[case_id] = case
+    if len(selected) < _PUBLIC_DOCS_RETRIEVAL_GOLDEN_MIN_CASES:
+        optional_case_budget = _PUBLIC_DOCS_RETRIEVAL_GOLDEN_MIN_CASES - len(selected)
+        selected.extend(list(unique_optional_cases.values())[:optional_case_budget])
     if len(selected) < _PUBLIC_DOCS_RETRIEVAL_GOLDEN_MIN_CASES:
         raise ValueError(
             "public docs retrieval golden requires at least "
             f"{_PUBLIC_DOCS_RETRIEVAL_GOLDEN_MIN_CASES} governed cases"
         )
-    return selected[:_PUBLIC_DOCS_RETRIEVAL_GOLDEN_MIN_CASES]
+    return selected
 
 
 def _public_docs_retrieval_golden_query(component: str, source_uri: str) -> str:
