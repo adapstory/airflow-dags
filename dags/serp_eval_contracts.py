@@ -257,12 +257,80 @@ def _cli_submit_registry_submissions(args: argparse.Namespace) -> Mapping[str, A
     )
 
 
+def _required_nightly_benchmark_suite_inputs(
+    payload: Mapping[str, Any], *, selected_suite_ids: Sequence[str]
+) -> list[dict[str, Any]]:
+    """Accept only adapter-produced suites with immutable execution provenance.
+
+    D6 is a production benchmark gate. It must consume actual adapter output,
+    never manufacture ranked chunks, aggregate observations, or reference
+    scores. The immutable dataset and run-evidence locations make every score
+    independently replayable from MinIO/BC-21 evidence.
+    """
+
+    suites = _required_object_list(payload, "benchmark_suite_inputs")
+    observed_suite_ids = tuple(_required_str(suite, "suite_id") for suite in suites)
+    if observed_suite_ids != tuple(selected_suite_ids):
+        raise ValueError("benchmark_suite_inputs must match selected_suite_ids in canonical order")
+    materialized: list[dict[str, Any]] = []
+    for suite in suites:
+        _reject_raw_secrets(suite)
+        if _required_str(suite, "suite_contract_version") != _EVAL_CONTRACT_VERSION:
+            raise ValueError("benchmark_suite_inputs has unsupported suite_contract_version")
+        if not _required_object_list(suite, "cases"):
+            raise ValueError("benchmark_suite_inputs suite cases must not be empty")
+        if not _required_object_list(suite, "references"):
+            raise ValueError("benchmark_suite_inputs suite references must not be empty")
+        _validate_nightly_benchmark_suite_provenance(
+            _required_mapping(suite, "metadata"),
+        )
+        materialized.append(dict(suite))
+    return materialized
+
+
+def _validate_nightly_benchmark_suite_provenance(metadata: Mapping[str, Any]) -> None:
+    for field_name in (
+        "adapter_id",
+        "adapter_version",
+        "adapter_source_uri",
+        "adapter_source_revision",
+        "adapter_image_digest",
+        "dataset_license_id",
+        "dataset_manifest_uri",
+        "dataset_manifest_sha256",
+        "execution_evidence_uri",
+        "execution_evidence_sha256",
+        "reference_source_uri",
+    ):
+        _required_str(metadata, field_name)
+    for field_name in ("adapter_source_uri", "reference_source_uri"):
+        parsed = urlparse(_required_str(metadata, field_name))
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise ValueError(f"benchmark suite {field_name} must be an https URL")
+    if not re.fullmatch(r"[0-9a-f]{40}", _required_str(metadata, "adapter_source_revision")):
+        raise ValueError("benchmark suite adapter_source_revision must be a 40-character SHA")
+    for field_name in (
+        "adapter_image_digest",
+        "dataset_manifest_sha256",
+        "execution_evidence_sha256",
+    ):
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", _required_str(metadata, field_name)):
+            raise ValueError(f"benchmark suite {field_name} must be a sha256 digest")
+    for field_name in ("dataset_manifest_uri", "execution_evidence_uri"):
+        if _artifact_ref(field_name, _required_str(metadata, field_name)).kind != "s3":
+            raise ValueError(f"benchmark suite {field_name} must be an s3:// immutable artifact")
+
+
 def build_nightly_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
     payload = _payload(conf)
     _reject_raw_secrets(payload)
     selected_suite_ids = tuple(_required_str_list(payload, "selected_suite_ids"))
     if selected_suite_ids != MANDATORY_SERP_BENCHMARK_SUITES:
         raise ValueError("selected_suite_ids must include every mandatory suite")
+    benchmark_suite_inputs = _required_nightly_benchmark_suite_inputs(
+        payload,
+        selected_suite_ids=selected_suite_ids,
+    )
     tenant_id = _required_uuid(payload, "tenant_id")
     pack_version_ids = tuple(_required_uuid_list(payload, "pack_version_ids"))
     generated_at = _required_datetime_string(payload, "generated_at")
@@ -275,6 +343,9 @@ def build_nightly_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
         generated_at,
         ",".join(str(value) for value in pack_version_ids),
         ",".join(selected_suite_ids),
+        sha256(
+            _canonical_json({"benchmark_suite_inputs": benchmark_suite_inputs}).encode("utf-8")
+        ).hexdigest(),
     )
     plan_payload = {
         "actor_id": _required_str(payload, "actor_id"),
@@ -295,6 +366,7 @@ def build_nightly_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
             ),
         ),
         "bc21_base_url": _required_bc21_base_url(payload),
+        "benchmark_suite_inputs": benchmark_suite_inputs,
         "dag_id": "serp_nightly_regression_suite",
         "generated_at": generated_at,
         "normalized_gate_floor": SERP_NORMALIZED_GATE_FLOOR,
@@ -3995,96 +4067,10 @@ def _nightly_suite_plan_payload(plan: Mapping[str, Any]) -> dict[str, Any]:
         "retrieval_profile_version": retrieval_profile_version,
         "schedule_id": _required_str(plan, "dag_id"),
         "selected_suite_ids": selected_suite_ids,
-        "suites": [
-            _nightly_suite_plan_suite(
-                suite_id,
-                generated_at=generated_at,
-                pack_version_ids=pack_version_ids,
-                reranker_profile_version=reranker_profile_version,
-                retrieval_profile_version=retrieval_profile_version,
-                tenant_id=tenant_id,
-            )
-            for suite_id in selected_suite_ids
-        ],
-        "tenant_id": tenant_id,
-    }
-
-
-def _nightly_suite_plan_suite(
-    suite_id: str,
-    *,
-    generated_at: str,
-    pack_version_ids: Sequence[str],
-    reranker_profile_version: str,
-    retrieval_profile_version: str,
-    tenant_id: str,
-) -> dict[str, Any]:
-    return {
-        "cases": [
-            {
-                "query_id": f"{suite_id}:c1-live-query-001",
-                "ranked_chunk_ids": [f"{suite_id}:chunk-a", f"{suite_id}:chunk-b"],
-                "relevant_chunk_ids": [f"{suite_id}:chunk-a"],
-            }
-        ],
-        "generated_at": generated_at,
-        "metadata": {
-            "suite_contract_version": _EVAL_CONTRACT_VERSION,
-            "trigger": "airflow-nightly",
-        },
-        "metric_observations": [
-            {
-                "metric": "Faithfulness",
-                "metric_family": "answer-quality",
-                "score": 0.96,
-            },
-            {
-                "metric": "Citation Accuracy",
-                "metric_family": "citation",
-                "score": 0.97,
-            },
-            {
-                "metric": "Policy Compliance Rate",
-                "metric_family": "policy",
-                "score": 1.0,
-            },
-        ],
-        "pack_version_ids": list(pack_version_ids),
-        "references": [
-            {
-                "metric": "MRR@10",
-                "metric_family": "retrieval",
-                "reference_id": f"{suite_id}:mrr10-baseline",
-                "reference_score": 1.0,
-                "threshold": SERP_NORMALIZED_GATE_FLOOR,
-            },
-            {
-                "metric": "Faithfulness",
-                "metric_family": "answer-quality",
-                "reference_id": f"{suite_id}:answer-quality-baseline",
-                "reference_score": 1.0,
-                "threshold": SERP_NORMALIZED_GATE_FLOOR,
-            },
-            {
-                "metric": "Citation Accuracy",
-                "metric_family": "citation",
-                "reference_id": f"{suite_id}:citation-baseline",
-                "reference_score": 1.0,
-                "threshold": SERP_NORMALIZED_GATE_FLOOR,
-            },
-            {
-                "metric": "Policy Compliance Rate",
-                "metric_family": "policy",
-                "reference_id": f"{suite_id}:policy-baseline",
-                "reference_score": 1.0,
-                "threshold": 1.0,
-            },
-        ],
-        "reranker_profile_version": reranker_profile_version,
-        "retrieval_profile_version": retrieval_profile_version,
-        "suite_contract_version": _EVAL_CONTRACT_VERSION,
-        "suite_id": suite_id,
-        "suite_version": "golden@2026.07.2",
+        "suites": _required_nightly_benchmark_suite_inputs(
+            plan,
+            selected_suite_ids=tuple(selected_suite_ids),
+        ),
         "tenant_id": tenant_id,
     }
 

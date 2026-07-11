@@ -330,6 +330,14 @@ def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:
         build_nightly_regression_plan(unsafe_bc21_base_url)
 
 
+def test_nightly_regression_plan_requires_executable_suite_inputs() -> None:
+    conf = _nightly_conf()
+    conf.pop("benchmark_suite_inputs")
+
+    with pytest.raises(ValueError, match="benchmark_suite_inputs"):
+        build_nightly_regression_plan(conf)
+
+
 def test_build_nightly_regression_plan_accepts_s3_artifact_root_from_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -481,6 +489,7 @@ def test_nightly_d6_airflow_path_writes_suite_plan_for_gateway_runner(
     assert [suite["suite_id"] for suite in suite_plan["suites"]] == list(
         MANDATORY_SERP_BENCHMARK_SUITES
     )
+    assert suite_plan["suites"] == conf["benchmark_suite_inputs"]
     assert all(len(suite["references"]) == 4 for suite in suite_plan["suites"])
     assert all(len(suite["metric_observations"]) == 3 for suite in suite_plan["suites"])
 
@@ -5004,7 +5013,97 @@ def _nightly_conf() -> dict[str, object]:
         "registry_resource_type": "workflow",
         "reranker_profile_version": "reranker@2026.07.1",
         "retrieval_profile_version": "hybrid@2026.07.1",
+        "benchmark_suite_inputs": [
+            _nightly_benchmark_suite_input(suite_id) for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+        ],
         "selected_suite_ids": list(MANDATORY_SERP_BENCHMARK_SUITES),
+        "tenant_id": TENANT_ID,
+    }
+
+
+def _nightly_benchmark_suite_input(suite_id: str) -> dict[str, object]:
+    return {
+        "cases": [
+            {
+                "query_id": f"{suite_id}:fixture-query-001",
+                "ranked_chunk_ids": [f"{suite_id}:chunk-a", f"{suite_id}:chunk-b"],
+                "relevant_chunk_ids": [f"{suite_id}:chunk-a"],
+            }
+        ],
+        "generated_at": "2026-07-05T21:00:00Z",
+        "metadata": {
+            "adapter_id": f"fixture-{suite_id.casefold().replace(' ', '-')}",
+            "adapter_version": "fixture@2026.07.1",
+            "adapter_source_revision": "a" * 40,
+            "adapter_source_uri": "https://example.com/adapter",
+            "adapter_image_digest": "sha256:" + "b" * 64,
+            "dataset_license_id": "Apache-2.0",
+            "dataset_manifest_sha256": "sha256:" + "c" * 64,
+            "dataset_manifest_uri": (
+                "s3://airflow-serp-artifacts/benchmark-fixtures/"
+                f"{suite_id.casefold().replace(' ', '-')}/dataset-manifest.json"
+            ),
+            "execution_evidence_sha256": "sha256:" + "d" * 64,
+            "execution_evidence_uri": (
+                "s3://airflow-serp-artifacts/benchmark-fixtures/"
+                f"{suite_id.casefold().replace(' ', '-')}/execution-evidence.json"
+            ),
+            "reference_source_uri": "https://example.com/reference",
+            "suite_contract_version": "2026.07.2",
+        },
+        "metric_observations": [
+            {
+                "metric": "Faithfulness",
+                "metric_family": "answer-quality",
+                "score": 0.96,
+            },
+            {
+                "metric": "Citation Accuracy",
+                "metric_family": "citation",
+                "score": 0.97,
+            },
+            {
+                "metric": "Policy Compliance Rate",
+                "metric_family": "policy",
+                "score": 1.0,
+            },
+        ],
+        "pack_version_ids": [PACK_VERSION_ID],
+        "references": [
+            {
+                "metric": "MRR@10",
+                "metric_family": "retrieval",
+                "reference_id": f"{suite_id}:mrr10-fixture",
+                "reference_score": 1.0,
+                "threshold": SERP_NORMALIZED_GATE_FLOOR,
+            },
+            {
+                "metric": "Faithfulness",
+                "metric_family": "answer-quality",
+                "reference_id": f"{suite_id}:answer-quality-fixture",
+                "reference_score": 1.0,
+                "threshold": SERP_NORMALIZED_GATE_FLOOR,
+            },
+            {
+                "metric": "Citation Accuracy",
+                "metric_family": "citation",
+                "reference_id": f"{suite_id}:citation-fixture",
+                "reference_score": 1.0,
+                "threshold": SERP_NORMALIZED_GATE_FLOOR,
+            },
+            {
+                "metric": "Policy Compliance Rate",
+                "metric_family": "policy",
+                "reference_id": f"{suite_id}:policy-fixture",
+                "reference_score": 1.0,
+                "threshold": 1.0,
+            },
+        ],
+        "reranker_profile_version": "reranker@2026.07.1",
+        "retrieval_profile_version": "hybrid@2026.07.1",
+        "suite_contract_version": "2026.07.2",
+        "suite_id": suite_id,
+        "suite_version": "fixture@2026.07.1",
         "tenant_id": TENANT_ID,
     }
 

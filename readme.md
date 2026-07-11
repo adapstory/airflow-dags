@@ -23,7 +23,7 @@ SERP eval DAG contracts:
   | D3 `serp_reparse_pack_version` | Planned gap | Pack-version reparse DAG is not implemented yet. |
   | D4 `serp_scan_parse_index` | Planned gap | Scan/parse/enrich/index child DAG or task group is not implemented yet. |
   | D5 `serp_publish_signed_pack` | Implemented live-submit contract in current source | Builds the governed public-docs BC-21 publish activation request from indexed D20 batch evidence, submits it to configured BC-21, and records an active receipt after approval, evidence bundle, evidence seal, and benchmark gate inputs are supplied. BC-21 remains the authority for approval/seal validation, idempotency, and active-version mutation. |
-  | D6 `serp_nightly_regression_suite` | Implemented, runtime-backed in current source | Production GitOps image/DAG refs must be refreshed before claiming deployed-current runtime. |
+  | D6 `serp_nightly_regression_suite` | Fail-closed adapter contract in current source | It accepts only externally executed, immutable suite inputs with dataset, adapter, reference, and run-evidence provenance. It must not be described as a passing production benchmark until every mandatory upstream adapter/dataset is provisioned and a live run has produced evidence. |
   | D7 `serp_online_eval_rollup` | Implemented, runtime-backed in current source | DAG is manual/event-triggered today; backlog frequent scheduling remains planned. Production GitOps refs must be refreshed before claiming deployed-current runtime. |
   | D8 `serp_expire_revoke_packs` | Planned gap | Freshness expiration/revocation DAG is not implemented yet. |
   | D9 `serp_usage_cost_rollup` | Planned gap | CostOps usage rollup DAG is not implemented yet. |
@@ -42,7 +42,12 @@ SERP eval DAG contracts:
 - `serp_nightly_regression_suite` is the D6 contract DAG. Its `dag_run.conf`
   must provide tenant id, pack version ids, retrieval/reranker profile versions,
   registry resource identity, approved actor id, generated timestamp, and every
-  mandatory SERP benchmark suite id. It must also provide `bc21_base_url` plus
+  mandatory SERP benchmark suite id and a `benchmark_suite_inputs` entry for
+  every suite. Each input is adapter-produced and must carry immutable MinIO
+  dataset-manifest and execution-evidence URIs/digests, pinned adapter source
+  revision and image digest, license id, and reference provenance. The DAG
+  never manufactures ranked chunks, aggregate observations, or reference
+  scores. It must also provide `bc21_base_url` plus
   either `artifact_root_path` or the runtime default
   `ADAPSTORY_AIRFLOW_ARTIFACT_ROOT`; artifact locations may be absolute local
   paths or `s3://bucket/prefix` URIs. The DAG derives
