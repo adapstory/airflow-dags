@@ -36,7 +36,7 @@ SERP eval DAG contracts:
   | D16 `serp_policy_rollout_canary` | Planned gap | Policy rollout canary DAG is not implemented yet. |
   | D17 `serp_model_catalog_promotion` | Planned gap | Model promotion/deprecation DAG is not implemented yet. |
   | D18 `serp_chaos_restore_game_day` | Planned gap | Restore/game-day DAG is not implemented yet. |
-  | D19 `serp_benchmark_improvement_wave` | Scaffolded deterministic contract | Writes deterministic improvement artifacts in-task; live improvement runner wiring is still planned. |
+  | D19 `serp_benchmark_improvement_wave` | Fail-closed executable-evaluation contract in current source | It accepts only externally executed candidate evidence with immutable dataset, baseline/candidate, per-suite, and auxiliary evidence provenance; Airflow delegates evaluation, keep/discard, and scoreboard assembly to the gateway CLI. It must not be described as a validated improvement until a provisioned adapter has produced live evidence. |
   | D20 `serp_web_seed_crawl_refresh` | Implemented scheduled pipeline CLI bridge in current source | Uses a default stack-inventory anchored seed registry when no `dag_run.conf` is supplied, expands approved website `frontier_urls` into deterministic per-page fetch requests, selects due seeds from `refresh_policy` and optional `freshness_state`, writes deterministic seed/refresh artifacts, runs the packaged SERP pipeline CLI bridge only when sources are due, and emits a governed D5 trigger-conf artifact once indexed D20 evidence exists. The D5 trigger-conf carries `ADAPSTORY_SERP_BC21_BASE_URL` when the runtime env provides it, but approvals, evidence seal, benchmark gate, and idempotency remain required. Live robots/sitemap discovery, D4 child dispatch, and deployed GitOps image refresh remain planned; publish activation is handled by D5. |
 
 - `serp_nightly_regression_suite` is the D6 contract DAG. Its `dag_run.conf`
@@ -86,28 +86,31 @@ SERP eval DAG contracts:
   runner without shell expansion, persists stdout, then builds BC-21 registry
   submissions for the same rollup. Its plan state is
   `ready_for_po_capacity_approval`; it is not a 1M production approval.
-- `serp_benchmark_improvement_wave` is the D19 scaffolded deterministic
-  contract DAG, not a live runtime-backed improvement runner yet. Its
+- `serp_benchmark_improvement_wave` is the D19 fail-closed improvement
+  contract DAG. Its
   `dag_run.conf` must provide tenant id, improvement spec id, baseline run id,
   candidate id, registry resource identity, approved actor id, generated
   timestamp, rollback policy ref, positive max benchmark run budget, every
   mandatory SERP benchmark suite id, replay profile versions, judge
   model/template versions, feature flags, policy/guardrail bundle versions, and
-  provider/model-catalog route ids. It must also provide `artifact_root_path`
+  provider/model-catalog route ids, plus `candidate_evaluation`. The candidate
+  evaluation is produced by a versioned external adapter and includes its
+  immutable dataset manifest, baseline/candidate execution evidence, per-suite
+  execution evidence, reference provenance, and immutable benchmark/diff/
+  regression/cost artifacts. It must also provide `artifact_root_path`
   or rely on the runtime default `ADAPSTORY_AIRFLOW_ARTIFACT_ROOT`; artifact
   locations may be absolute local paths or `s3://bucket/prefix` URIs. The DAG
   derives `airflow-plan.json`,
   `improvement-spec.json`, `candidate-eval-report.json`,
   `keep-discard-decision.json`, and `improvement-scoreboard.json` under a
-  deterministic operation directory. D19 writes deterministic dry-run
-  improvement artifacts in-task and passes the same payloads through XCom:
-  `improvement-spec.json`, `candidate-eval-report.json`,
-  `keep-discard-decision.json`, and `improvement-scoreboard.json`. Each
-  downstream artifact consumer verifies the upstream wrapper contract version
-  and recomputes `artifactSha256` over the nested payload before accepting XCom
-  input. Missing suites, unbounded benchmark budgets, missing replay/model
-  governance metadata, raw secrets, malformed or tampered artifacts, or
-  below-floor candidate scores fail closed.
+  deterministic operation directory. D19 writes `improvement-spec.json`, then
+  invokes the packaged `adapstory_serp_mcp_gateway.airflow_eval_cli` for the
+  candidate-eval, keep/discard, and scoreboard stages. Every stage validates
+  the external evidence contract and digest-addressed MinIO references.
+  Missing suites, unbounded budgets, missing replay/model-governance metadata,
+  raw secrets, malformed provenance, or non-passing candidate metrics result
+  in a fail-closed discard decision; only evidence-backed improvements can be
+  retained.
 - `serp_web_seed_crawl_refresh` is the D20 scheduled public-docs seed refresh
   DAG. When `dag_run.conf` is empty, it builds the default public-docs seed
   registry from the stack-inventory anchored source set. Override
@@ -192,8 +195,9 @@ SERP eval DAG contracts:
   must be added through GitOps before replacing those file-based handoff tasks
   with native networked operators. D6 now executes the same CLI bridge in the
   DAG default path and fails closed when BC-21 submission is not configured.
-  D19 still keeps native deterministic artifact writers until its live
-  improvement runner is wired through GitOps.
+  D19 uses the same packaged gateway CLI bridge as D6; production claims still
+  require a signed runtime image, pinned GitOps refs, provisioned suite
+  adapters, and live MinIO evidence.
 - `serp_publish_signed_pack` is the D5 public-docs publish activation handoff
   DAG. Its `dag_run.conf` must provide tenant id, pack id/version, registry
   resource identity, approved actor id, generated timestamp,

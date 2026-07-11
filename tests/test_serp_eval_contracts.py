@@ -53,14 +53,7 @@ from dags.serp_eval_contracts import (
     load_public_docs_crawl_state_conf,
     submit_public_docs_bc21_pipeline_state_artifact,
     write_airflow_plan_artifact,
-    write_benchmark_improvement_decision_artifact,
-    write_benchmark_improvement_scoreboard_artifact,
-    write_improvement_candidate_eval_artifact,
     write_improvement_spec_artifact,
-    write_nightly_benchmark_export_artifact,
-    write_nightly_registry_receipts_artifact,
-    write_nightly_registry_submissions_artifact,
-    write_nightly_report_artifact,
     write_nightly_suite_plan_artifact,
     write_online_eval_rollup_plan_artifact,
     write_public_docs_coverage_proof_artifact,
@@ -1197,22 +1190,6 @@ def test_execute_gateway_cli_spec_materializes_s3_inputs_and_uploads_stdout(
     )
 
 
-def test_explicit_nightly_dry_run_fallback_still_writes_marked_receipts(
-    tmp_path: Path,
-) -> None:
-    conf = _nightly_conf()
-    conf["artifact_root_path"] = str(tmp_path)
-    plan_json = write_airflow_plan_artifact(build_nightly_regression_plan(conf))
-    report_artifact = write_nightly_report_artifact(json.loads(plan_json))
-    export_artifact = write_nightly_benchmark_export_artifact(report_artifact)
-    submissions_artifact = write_nightly_registry_submissions_artifact(export_artifact)
-    receipts_artifact = write_nightly_registry_receipts_artifact(submissions_artifact)
-
-    receipts_payload = receipts_artifact["payload"]
-    assert receipts_payload["status"] == "dry_run_accepted"
-    assert receipts_payload["dryRun"] is True
-
-
 def test_evaluate_nightly_regression_gate_blocks_below_normalized_floor() -> None:
     gate = evaluate_nightly_regression_gate(
         {
@@ -1408,6 +1385,14 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
         build_benchmark_improvement_wave_plan(unbounded_budget_conf)
 
 
+def test_build_benchmark_improvement_wave_plan_requires_executable_candidate_evidence() -> None:
+    conf = _improvement_wave_conf()
+    conf.pop("candidate_evaluation")
+
+    with pytest.raises(ValueError, match="candidate_evaluation"):
+        build_benchmark_improvement_wave_plan(conf)
+
+
 def test_build_benchmark_improvement_gateway_cli_specs_are_file_based_and_deterministic() -> None:
     plan = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
     candidate_eval = build_improvement_candidate_eval_cli_spec(plan.to_canonical_json())
@@ -1461,7 +1446,7 @@ def test_build_benchmark_improvement_gateway_cli_specs_are_file_based_and_determ
     assert scoreboard["stdout_path"] == plan.payload["artifact_paths"]["improvement_scoreboard"]
 
 
-def test_write_benchmark_improvement_wave_artifacts_persist_keep_decision(
+def test_write_benchmark_improvement_spec_persists_external_candidate_evaluation(
     tmp_path: Path,
 ) -> None:
     conf = _improvement_wave_conf()
@@ -1470,24 +1455,15 @@ def test_write_benchmark_improvement_wave_artifacts_persist_keep_decision(
 
     plan_json = write_airflow_plan_artifact(plan)
     spec_artifact = write_improvement_spec_artifact(json.loads(plan_json))
-    candidate_artifact = write_improvement_candidate_eval_artifact(spec_artifact)
-    decision_artifact = write_benchmark_improvement_decision_artifact(candidate_artifact)
-    scoreboard_artifact = write_benchmark_improvement_scoreboard_artifact(decision_artifact)
 
     spec_path = Path(str(spec_artifact["artifactPath"]))
-    candidate_path = Path(str(candidate_artifact["artifactPath"]))
-    decision_path = Path(str(decision_artifact["artifactPath"]))
-    scoreboard_path = Path(str(scoreboard_artifact["artifactPath"]))
 
     assert spec_path.exists()
-    assert candidate_path.exists()
-    assert decision_path.exists()
-    assert scoreboard_path.exists()
-    assert spec_artifact["payload"]["status"] == "ready"
-    assert spec_artifact["payload"]["dryRun"] is True
+    assert spec_artifact["payload"]["status"] == "ready-for-executable-evaluation"
+    assert spec_artifact["payload"]["dryRun"] is False
     assert spec_artifact["payload"]["replay"] == {
         "baselineRunId": conf["baseline_run_id"],
-        "candidateRunId": f"{conf['candidate_id']}-dry-run",
+        "candidateRunId": "candidate-reranker-v2-run-001",
         "featureFlags": conf["feature_flags"],
         "guardrailBundleVersion": conf["guardrail_bundle_version"],
         "judgeModelId": conf["judge_model_id"],
@@ -1508,64 +1484,7 @@ def test_write_benchmark_improvement_wave_artifacts_persist_keep_decision(
         "providerRouteId": conf["provider_route_id"],
         "status": "approved-for-eval-dry-run",
     }
-    assert candidate_artifact["payload"]["dryRun"] is True
-    assert candidate_artifact["payload"]["replay"] == spec_artifact["payload"]["replay"]
-    assert (
-        candidate_artifact["payload"]["modelGovernance"]
-        == spec_artifact["payload"]["modelGovernance"]
-    )
-    assert candidate_artifact["payload"]["status"] == "passed"
-    assert candidate_artifact["payload"]["mandatorySuiteCount"] == len(
-        MANDATORY_SERP_BENCHMARK_SUITES
-    )
-    assert candidate_artifact["payload"]["normalizedGateFloor"] == "0.7500"
-    assert decision_artifact["payload"]["decision"] == "keep"
-    assert decision_artifact["payload"]["dryRun"] is True
-    assert decision_artifact["payload"]["replay"] == spec_artifact["payload"]["replay"]
-    assert (
-        decision_artifact["payload"]["modelGovernance"]
-        == spec_artifact["payload"]["modelGovernance"]
-    )
-    assert decision_artifact["payload"]["status"] == "accepted"
-    assert scoreboard_artifact["payload"]["status"] == "published"
-    assert scoreboard_artifact["payload"]["dryRun"] is True
-    assert scoreboard_artifact["payload"]["replay"] == spec_artifact["payload"]["replay"]
-    assert (
-        scoreboard_artifact["payload"]["modelGovernance"]
-        == spec_artifact["payload"]["modelGovernance"]
-    )
-    assert scoreboard_artifact["payload"]["latestDecision"] == "keep"
-    assert scoreboard_artifact["payload"]["artifact_paths"] == plan.payload["artifact_paths"]
-
-
-def test_write_benchmark_improvement_wave_decision_fails_below_floor(
-    tmp_path: Path,
-) -> None:
-    conf = _improvement_wave_conf()
-    conf["artifact_root_path"] = str(tmp_path)
-    plan_json = write_airflow_plan_artifact(build_benchmark_improvement_wave_plan(conf))
-    spec_artifact = write_improvement_spec_artifact(json.loads(plan_json))
-    candidate_artifact = write_improvement_candidate_eval_artifact(spec_artifact)
-    candidate_artifact["payload"]["candidateScore"] = "0.7400"
-    candidate_artifact["payload"]["suiteResults"][0]["normalizedScore"] = "0.7400"
-    _refresh_artifact_sha256(candidate_artifact)
-
-    with pytest.raises(ValueError, match="improvement candidate score is below gate floor"):
-        write_benchmark_improvement_decision_artifact(candidate_artifact)
-
-
-def test_write_benchmark_improvement_wave_rejects_tampered_artifact_payload(
-    tmp_path: Path,
-) -> None:
-    conf = _improvement_wave_conf()
-    conf["artifact_root_path"] = str(tmp_path)
-    plan_json = write_airflow_plan_artifact(build_benchmark_improvement_wave_plan(conf))
-    spec_artifact = write_improvement_spec_artifact(json.loads(plan_json))
-    candidate_artifact = write_improvement_candidate_eval_artifact(spec_artifact)
-    candidate_artifact["payload"]["candidateScore"] = "0.9900"
-
-    with pytest.raises(ValueError, match="artifact payload sha256 does not match artifactSha256"):
-        write_benchmark_improvement_decision_artifact(candidate_artifact)
+    assert spec_artifact["payload"]["candidateEvaluation"] == conf["candidate_evaluation"]
 
 
 def test_build_benchmark_improvement_wave_plan_requires_replay_metadata() -> None:
@@ -4909,16 +4828,16 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setitem(sys.modules, name, module)
 
 
-def test_serp_improvement_dag_uses_native_artifact_writers_for_d19_path() -> None:
+def test_serp_improvement_dag_uses_gateway_runner_for_d19_path() -> None:
     source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(encoding="utf-8")
 
     assert "write_improvement_spec_artifact" in source
-    assert "write_improvement_candidate_eval_artifact" in source
-    assert "write_benchmark_improvement_decision_artifact" in source
-    assert "write_benchmark_improvement_scoreboard_artifact" in source
-    assert "build_improvement_candidate_eval_cli_spec" not in source
-    assert "build_benchmark_improvement_decision_cli_spec" not in source
-    assert "build_benchmark_improvement_scoreboard_cli_spec" not in source
+    assert "write_improvement_candidate_eval_artifact" not in source
+    assert "write_benchmark_improvement_decision_artifact" not in source
+    assert "write_benchmark_improvement_scoreboard_artifact" not in source
+    assert "build_improvement_candidate_eval_cli_spec" in source
+    assert "build_benchmark_improvement_decision_cli_spec" in source
+    assert "build_benchmark_improvement_scoreboard_cli_spec" in source
 
 
 def test_airflowignore_excludes_non_dag_test_modules() -> None:
@@ -5187,6 +5106,7 @@ def _improvement_wave_conf() -> dict[str, object]:
         "artifact_root_path": "/var/opt/adapstory/serp-evals",
         "baseline_run_id": "evalrun_public_reranker_baseline_001",
         "candidate_id": "candidate-reranker-v2",
+        "candidate_evaluation": _improvement_candidate_evaluation(),
         "feature_flags": ["serp.reranker.v2", "serp.d19.dry_run"],
         "generated_at": "2026-07-05T21:00:00Z",
         "guardrail_bundle_version": "guardrails@2026.07.1",
@@ -5205,6 +5125,92 @@ def _improvement_wave_conf() -> dict[str, object]:
         "rollback_policy_ref": "policy://rollback/last-validated-baseline@v1",
         "selected_suite_ids": list(MANDATORY_SERP_BENCHMARK_SUITES),
         "tenant_id": TENANT_ID,
+    }
+
+
+def _improvement_candidate_evaluation() -> dict[str, object]:
+    candidate_run_id = "candidate-reranker-v2-run-001"
+    return {
+        "baselineRunId": "evalrun_public_reranker_baseline_001",
+        "candidateId": "candidate-reranker-v2",
+        "candidateRunId": candidate_run_id,
+        "constraintResults": [
+            {"name": "Policy Compliance Rate", "status": "passed"},
+            {"name": "Citation Accuracy", "status": "passed"},
+            {"name": "Evidence Completeness", "status": "passed"},
+        ],
+        "evidence": {
+            "candidateDiffSummaryUri": "s3://airflow-serp-artifacts/fixtures/diff.json",
+            "candidateDiffSummarySha256": "sha256:" + "1" * 64,
+            "benchmarkReportUri": "s3://airflow-serp-artifacts/fixtures/benchmark.json",
+            "benchmarkReportSha256": "sha256:" + "2" * 64,
+            "regressionReportUri": "s3://airflow-serp-artifacts/fixtures/regression.json",
+            "regressionReportSha256": "sha256:" + "3" * 64,
+            "costReportUri": "s3://airflow-serp-artifacts/fixtures/cost.json",
+            "costReportSha256": "sha256:" + "4" * 64,
+        },
+        "provenance": {
+            "adapterId": "fixture-serp-benchmark-adapter",
+            "adapterVersion": "fixture@2026.07.2",
+            "adapterSourceUri": "https://github.com/adapstory/serp-benchmark-adapters",
+            "adapterSourceRevision": "a" * 40,
+            "adapterImageDigest": "sha256:" + "b" * 64,
+            "datasetLicenseId": "Apache-2.0",
+            "datasetManifestUri": "s3://airflow-serp-artifacts/fixtures/dataset.json",
+            "datasetManifestSha256": "sha256:" + "c" * 64,
+            "baselineEvidenceUri": "s3://airflow-serp-artifacts/fixtures/baseline.json",
+            "baselineEvidenceSha256": "sha256:" + "d" * 64,
+            "candidateEvidenceUri": "s3://airflow-serp-artifacts/fixtures/candidate.json",
+            "candidateEvidenceSha256": "sha256:" + "e" * 64,
+            "referenceSourceUri": "https://example.com/benchmark-reference",
+        },
+        "scope": {"changedComponents": ["reranker-profile-public-docs"]},
+        "suiteResults": [
+            _improvement_suite_evidence(suite_id, metric_family)
+            for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+            for metric_family in ("retrieval", "answer-quality", "citation", "policy")
+        ],
+    }
+
+
+def _improvement_suite_evidence(suite_id: str, metric_family: str) -> dict[str, object]:
+    metric_results: list[dict[str, str]]
+    if metric_family == "retrieval":
+        metric_results = [
+            {
+                "baselineScore": "0.7800",
+                "candidateScore": "0.8000",
+                "metric": "nDCG@10",
+                "metricFamily": metric_family,
+                "normalizedScore": "0.8000",
+            },
+            {
+                "baselineScore": "0.7700",
+                "candidateScore": "0.7900",
+                "metric": "MRR@10",
+                "metricFamily": metric_family,
+                "normalizedScore": "0.7900",
+            },
+        ]
+    else:
+        metric_results = [
+            {
+                "baselineScore": "0.9600",
+                "candidateScore": "0.9600",
+                "metric": f"{metric_family}:golden",
+                "metricFamily": metric_family,
+                "normalizedScore": "0.9600",
+            }
+        ]
+    return {
+        "executionEvidenceSha256": "sha256:" + "f" * 64,
+        "executionEvidenceUri": f"s3://airflow-serp-artifacts/fixtures/{suite_id}/{metric_family}.json",
+        "gateStatus": "passed",
+        "metricFamily": metric_family,
+        "metricResults": metric_results,
+        "suiteCode": suite_id,
+        "suiteContractVersion": "2026.07.2",
+        "suiteVersion": "fixture@2026.07.2",
     }
 
 
