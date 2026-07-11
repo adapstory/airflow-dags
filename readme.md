@@ -45,7 +45,10 @@ SERP eval DAG contracts:
   mandatory SERP benchmark suite id and a `benchmark_suite_inputs` entry for
   every suite. Each input is adapter-produced and must carry immutable MinIO
   dataset-manifest and execution-evidence URIs/digests, pinned adapter source
-  revision and image digest, license id, and reference provenance. The DAG
+  revision and image digest, attested license/distribution rule, and reference
+  provenance. Every input carries the same immutable, SHA-256-pinned
+  `metric_compatibility` matrix; D6 gates exactly the policy-required rows for
+  that suite rather than manufacturing unrelated metric families. The DAG
   never manufactures ranked chunks, aggregate observations, or reference
   scores. It must also provide `bc21_base_url` plus
   either `artifact_root_path` or the runtime default
@@ -95,9 +98,10 @@ SERP eval DAG contracts:
   model/template versions, feature flags, policy/guardrail bundle versions, and
   provider/model-catalog route ids, plus `candidate_evaluation`. The candidate
   evaluation is produced by a versioned external adapter and includes its
-  immutable dataset manifest, baseline/candidate execution evidence, per-suite
-  execution evidence, reference provenance, and immutable benchmark/diff/
-  regression/cost artifacts. It must also provide `artifact_root_path`
+  immutable metric-compatibility matrix, per-suite dataset manifest,
+  baseline/candidate execution evidence, adapter/source/license/distribution
+  provenance, reference provenance, and immutable benchmark/diff/regression/
+  cost artifacts. It must also provide `artifact_root_path`
   or rely on the runtime default `ADAPSTORY_AIRFLOW_ARTIFACT_ROOT`; artifact
   locations may be absolute local paths or `s3://bucket/prefix` URIs. The DAG
   derives `airflow-plan.json`,

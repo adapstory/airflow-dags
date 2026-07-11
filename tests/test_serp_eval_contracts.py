@@ -331,6 +331,43 @@ def test_nightly_regression_plan_requires_executable_suite_inputs() -> None:
         build_nightly_regression_plan(conf)
 
 
+def test_nightly_regression_plan_uses_policy_declared_metric_families() -> None:
+    conf = _nightly_conf()
+    beir = _nightly_benchmark_suite_input("BEIR", metric_families=("retrieval",))
+    metric_compatibility = _nightly_metric_compatibility(beir_metric_families=("retrieval",))
+    suite_inputs = [
+        beir if suite_id == "BEIR" else _nightly_benchmark_suite_input(suite_id)
+        for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+    ]
+    for suite in suite_inputs:
+        suite["metric_compatibility"] = metric_compatibility
+    conf["benchmark_suite_inputs"] = suite_inputs
+
+    plan = build_nightly_regression_plan(conf)
+    suite_plan = serp_eval_contracts_module._nightly_suite_plan_payload(plan.payload)
+    report = serp_eval_contracts_module._nightly_report_from_suite_plan_payload(suite_plan)
+
+    beir_result = next(item for item in report["suite_results"] if item["suite_id"] == "BEIR")
+    assert beir_result["metric_count"] == 1
+    assert {item["metric_family"] for item in beir_result["metric_results"]} == {"retrieval"}
+
+
+def test_nightly_regression_plan_rejects_metric_family_policy_mismatch() -> None:
+    conf = _nightly_conf()
+    beir = _nightly_benchmark_suite_input("BEIR")
+    metric_compatibility = _nightly_metric_compatibility(beir_metric_families=("retrieval",))
+    suite_inputs = [
+        beir if suite_id == "BEIR" else _nightly_benchmark_suite_input(suite_id)
+        for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+    ]
+    for suite in suite_inputs:
+        suite["metric_compatibility"] = metric_compatibility
+    conf["benchmark_suite_inputs"] = suite_inputs
+
+    with pytest.raises(ValueError, match="references must exactly match metric_compatibility"):
+        build_nightly_regression_plan(conf)
+
+
 def test_build_nightly_regression_plan_accepts_s3_artifact_root_from_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1391,6 +1428,26 @@ def test_build_benchmark_improvement_wave_plan_requires_executable_candidate_evi
 
     with pytest.raises(ValueError, match="candidate_evaluation"):
         build_benchmark_improvement_wave_plan(conf)
+
+
+def test_improvement_plan_uses_policy_declared_metric_families() -> None:
+    conf = _improvement_wave_conf()
+    candidate = cast(dict[str, Any], conf["candidate_evaluation"])
+    candidate["metricCompatibility"] = _improvement_metric_compatibility(
+        metric_families=("retrieval",)
+    )
+    candidate["suiteResults"] = [
+        item
+        for item in cast(list[dict[str, Any]], candidate["suiteResults"])
+        if item["metricFamily"] == "retrieval"
+    ]
+
+    plan = build_benchmark_improvement_wave_plan(conf)
+
+    assert [
+        (item["suiteCode"], item["metricFamily"])
+        for item in plan.payload["candidate_evaluation"]["suiteResults"]
+    ] == [(suite_id, "retrieval") for suite_id in MANDATORY_SERP_BENCHMARK_SUITES]
 
 
 def test_build_benchmark_improvement_gateway_cli_specs_are_file_based_and_deterministic() -> None:
@@ -4940,7 +4997,50 @@ def _nightly_conf() -> dict[str, object]:
     }
 
 
-def _nightly_benchmark_suite_input(suite_id: str) -> dict[str, object]:
+def _nightly_benchmark_suite_input(
+    suite_id: str,
+    *,
+    metric_families: tuple[str, ...] = ("retrieval", "answer-quality", "citation", "policy"),
+) -> dict[str, object]:
+    references_by_family = {
+        "retrieval": {
+            "metric": "MRR@10",
+            "metric_family": "retrieval",
+            "reference_id": f"{suite_id}:mrr10-fixture",
+            "reference_score": 1.0,
+            "threshold": SERP_NORMALIZED_GATE_FLOOR,
+        },
+        "answer-quality": {
+            "metric": "Faithfulness",
+            "metric_family": "answer-quality",
+            "reference_id": f"{suite_id}:answer-quality-fixture",
+            "reference_score": 1.0,
+            "threshold": SERP_NORMALIZED_GATE_FLOOR,
+        },
+        "citation": {
+            "metric": "Citation Accuracy",
+            "metric_family": "citation",
+            "reference_id": f"{suite_id}:citation-fixture",
+            "reference_score": 1.0,
+            "threshold": SERP_NORMALIZED_GATE_FLOOR,
+        },
+        "policy": {
+            "metric": "Policy Compliance Rate",
+            "metric_family": "policy",
+            "reference_id": f"{suite_id}:policy-fixture",
+            "reference_score": 1.0,
+            "threshold": 1.0,
+        },
+    }
+    observations_by_family = {
+        "answer-quality": {
+            "metric": "Faithfulness",
+            "metric_family": "answer-quality",
+            "score": 0.96,
+        },
+        "citation": {"metric": "Citation Accuracy", "metric_family": "citation", "score": 0.97},
+        "policy": {"metric": "Policy Compliance Rate", "metric_family": "policy", "score": 1.0},
+    }
     return {
         "cases": [
             {
@@ -4957,6 +5057,7 @@ def _nightly_benchmark_suite_input(suite_id: str) -> dict[str, object]:
             "adapter_source_uri": "https://example.com/adapter",
             "adapter_image_digest": "sha256:" + "b" * 64,
             "dataset_license_id": "Apache-2.0",
+            "dataset_distribution_rule": "snippets-only",
             "dataset_manifest_sha256": "sha256:" + "c" * 64,
             "dataset_manifest_uri": (
                 "s3://airflow-serp-artifacts/benchmark-fixtures/"
@@ -4968,62 +5069,45 @@ def _nightly_benchmark_suite_input(suite_id: str) -> dict[str, object]:
                 f"{suite_id.casefold().replace(' ', '-')}/execution-evidence.json"
             ),
             "reference_source_uri": "https://example.com/reference",
-            "suite_contract_version": "2026.07.2",
+            "suite_contract_version": "2026.07.3",
         },
+        "metric_compatibility": _nightly_metric_compatibility(
+            beir_metric_families=metric_families if suite_id == "BEIR" else None
+        ),
         "metric_observations": [
-            {
-                "metric": "Faithfulness",
-                "metric_family": "answer-quality",
-                "score": 0.96,
-            },
-            {
-                "metric": "Citation Accuracy",
-                "metric_family": "citation",
-                "score": 0.97,
-            },
-            {
-                "metric": "Policy Compliance Rate",
-                "metric_family": "policy",
-                "score": 1.0,
-            },
+            observations_by_family[metric_family]
+            for metric_family in metric_families
+            if metric_family != "retrieval"
         ],
         "pack_version_ids": [PACK_VERSION_ID],
-        "references": [
-            {
-                "metric": "MRR@10",
-                "metric_family": "retrieval",
-                "reference_id": f"{suite_id}:mrr10-fixture",
-                "reference_score": 1.0,
-                "threshold": SERP_NORMALIZED_GATE_FLOOR,
-            },
-            {
-                "metric": "Faithfulness",
-                "metric_family": "answer-quality",
-                "reference_id": f"{suite_id}:answer-quality-fixture",
-                "reference_score": 1.0,
-                "threshold": SERP_NORMALIZED_GATE_FLOOR,
-            },
-            {
-                "metric": "Citation Accuracy",
-                "metric_family": "citation",
-                "reference_id": f"{suite_id}:citation-fixture",
-                "reference_score": 1.0,
-                "threshold": SERP_NORMALIZED_GATE_FLOOR,
-            },
-            {
-                "metric": "Policy Compliance Rate",
-                "metric_family": "policy",
-                "reference_id": f"{suite_id}:policy-fixture",
-                "reference_score": 1.0,
-                "threshold": 1.0,
-            },
-        ],
+        "references": [references_by_family[metric_family] for metric_family in metric_families],
         "reranker_profile_version": "reranker@2026.07.1",
         "retrieval_profile_version": "hybrid@2026.07.1",
-        "suite_contract_version": "2026.07.2",
+        "suite_contract_version": "2026.07.3",
         "suite_id": suite_id,
         "suite_version": "fixture@2026.07.1",
         "tenant_id": TENANT_ID,
+    }
+
+
+def _nightly_metric_compatibility(
+    *, beir_metric_families: tuple[str, ...] | None = None
+) -> dict[str, object]:
+    return {
+        "contract_version": "serp-suite-metric-compatibility/v1",
+        "matrix_sha256": "sha256:" + "e" * 64,
+        "matrix_uri": "s3://airflow-serp-artifacts/benchmark-fixtures/metric-compatibility.json",
+        "requirements": [
+            {
+                "metric_families": (
+                    list(beir_metric_families)
+                    if suite_id == "BEIR" and beir_metric_families is not None
+                    else ["retrieval", "answer-quality", "citation", "policy"]
+                ),
+                "suite_id": suite_id,
+            }
+            for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+        ],
     }
 
 
@@ -5149,21 +5233,7 @@ def _improvement_candidate_evaluation() -> dict[str, object]:
             "costReportUri": "s3://airflow-serp-artifacts/fixtures/cost.json",
             "costReportSha256": "sha256:" + "4" * 64,
         },
-        "provenance": {
-            "adapterId": "fixture-serp-benchmark-adapter",
-            "adapterVersion": "fixture@2026.07.2",
-            "adapterSourceUri": "https://github.com/adapstory/serp-benchmark-adapters",
-            "adapterSourceRevision": "a" * 40,
-            "adapterImageDigest": "sha256:" + "b" * 64,
-            "datasetLicenseId": "Apache-2.0",
-            "datasetManifestUri": "s3://airflow-serp-artifacts/fixtures/dataset.json",
-            "datasetManifestSha256": "sha256:" + "c" * 64,
-            "baselineEvidenceUri": "s3://airflow-serp-artifacts/fixtures/baseline.json",
-            "baselineEvidenceSha256": "sha256:" + "d" * 64,
-            "candidateEvidenceUri": "s3://airflow-serp-artifacts/fixtures/candidate.json",
-            "candidateEvidenceSha256": "sha256:" + "e" * 64,
-            "referenceSourceUri": "https://example.com/benchmark-reference",
-        },
+        "metricCompatibility": _improvement_metric_compatibility(),
         "scope": {"changedComponents": ["reranker-profile-public-docs"]},
         "suiteResults": [
             _improvement_suite_evidence(suite_id, metric_family)
@@ -5208,9 +5278,39 @@ def _improvement_suite_evidence(suite_id: str, metric_family: str) -> dict[str, 
         "gateStatus": "passed",
         "metricFamily": metric_family,
         "metricResults": metric_results,
+        "provenance": {
+            "adapterId": f"fixture-{suite_id.casefold().replace(' ', '-')}-adapter",
+            "adapterVersion": "fixture@2026.07.3",
+            "adapterSourceUri": "https://github.com/adapstory/serp-benchmark-adapters",
+            "adapterSourceRevision": "a" * 40,
+            "adapterImageDigest": "sha256:" + "b" * 64,
+            "baselineEvidenceUri": f"s3://airflow-serp-artifacts/fixtures/{suite_id}/baseline.json",
+            "baselineEvidenceSha256": "sha256:" + "c" * 64,
+            "candidateEvidenceUri": f"s3://airflow-serp-artifacts/fixtures/{suite_id}/candidate.json",
+            "candidateEvidenceSha256": "sha256:" + "d" * 64,
+            "datasetDistributionRule": "snippets-only",
+            "datasetLicenseId": "Apache-2.0",
+            "datasetManifestUri": f"s3://airflow-serp-artifacts/fixtures/{suite_id}/dataset.json",
+            "datasetManifestSha256": "sha256:" + "e" * 64,
+            "referenceSourceUri": "https://example.com/benchmark-reference",
+        },
         "suiteCode": suite_id,
-        "suiteContractVersion": "2026.07.2",
-        "suiteVersion": "fixture@2026.07.2",
+        "suiteContractVersion": "2026.07.3",
+        "suiteVersion": "fixture@2026.07.3",
+    }
+
+
+def _improvement_metric_compatibility(
+    *, metric_families: tuple[str, ...] = ("retrieval", "answer-quality", "citation", "policy")
+) -> dict[str, object]:
+    return {
+        "contractVersion": "serp-suite-metric-compatibility/v1",
+        "matrixSha256": "sha256:" + "9" * 64,
+        "matrixUri": "s3://airflow-serp-artifacts/fixtures/metric-compatibility.json",
+        "requirements": [
+            {"metricFamilies": list(metric_families), "suiteCode": suite_id}
+            for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+        ],
     }
 
 

@@ -55,6 +55,17 @@ _GATEWAY_CLI_CONTRACT_VERSION = "serp-airflow-gateway-cli-bridge/v1"
 _PIPELINE_CLI_CONTRACT_VERSION = "serp-airflow-pipeline-cli-bridge/v1"
 _AIRFLOW_ARTIFACT_CONTRACT_VERSION = "serp-airflow-artifact-writer/v1"
 _EVAL_CONTRACT_VERSION = "2026.07.2"
+_BENCHMARK_SUITE_CONTRACT_VERSION = "2026.07.3"
+_METRIC_COMPATIBILITY_CONTRACT_VERSION = "serp-suite-metric-compatibility/v1"
+_BENCHMARK_METRIC_FAMILIES = ("retrieval", "answer-quality", "citation", "policy")
+_ALLOWED_DATASET_DISTRIBUTION_RULES = {
+    "internal-only",
+    "no-redistribution",
+    "public-share-allowed",
+    "review-required",
+    "snippets-only",
+}
+_UNATTESTED_LICENSE_MARKERS = ("pending", "unknown", "noassertion", "unlicensed")
 _BENCHMARK_NAMESPACE = UUID("018f5e13-2d73-7a77-a052-8d1bcbf96599")
 _PUBLIC_DOCS_NAMESPACE = UUID("018f5e13-2d73-7a77-a052-8d1bcbf96600")
 _PUBLIC_DOCS_EXECUTABLE_SOURCE_TYPES = frozenset({"git", "openapi", "pdf", "website"})
@@ -272,14 +283,35 @@ def _required_nightly_benchmark_suite_inputs(
     if observed_suite_ids != tuple(selected_suite_ids):
         raise ValueError("benchmark_suite_inputs must match selected_suite_ids in canonical order")
     materialized: list[dict[str, Any]] = []
+    metric_compatibility: dict[str, Any] | None = None
     for suite in suites:
         _reject_raw_secrets(suite)
-        if _required_str(suite, "suite_contract_version") != _EVAL_CONTRACT_VERSION:
+        if _required_str(suite, "suite_contract_version") != _BENCHMARK_SUITE_CONTRACT_VERSION:
             raise ValueError("benchmark_suite_inputs has unsupported suite_contract_version")
         if not _required_object_list(suite, "cases"):
             raise ValueError("benchmark_suite_inputs suite cases must not be empty")
         if not _required_object_list(suite, "references"):
             raise ValueError("benchmark_suite_inputs suite references must not be empty")
+        suite_metric_compatibility = _required_metric_compatibility(
+            _required_mapping(suite, "metric_compatibility"),
+            selected_suite_ids=selected_suite_ids,
+            contract_version_field="contract_version",
+            matrix_uri_field="matrix_uri",
+            matrix_sha256_field="matrix_sha256",
+            suite_id_field="suite_id",
+            metric_families_field="metric_families",
+        )
+        if metric_compatibility is None:
+            metric_compatibility = suite_metric_compatibility
+        elif _canonical_json(metric_compatibility) != _canonical_json(suite_metric_compatibility):
+            raise ValueError("benchmark_suite_inputs must use the same metric_compatibility matrix")
+        _validate_nightly_suite_metric_records(
+            suite,
+            required_metric_families=_metric_families_for_suite(
+                suite_metric_compatibility,
+                _required_str(suite, "suite_id"),
+            ),
+        )
         _validate_nightly_benchmark_suite_provenance(
             _required_mapping(suite, "metadata"),
         )
@@ -295,6 +327,7 @@ def _validate_nightly_benchmark_suite_provenance(metadata: Mapping[str, Any]) ->
         "adapter_source_revision",
         "adapter_image_digest",
         "dataset_license_id",
+        "dataset_distribution_rule",
         "dataset_manifest_uri",
         "dataset_manifest_sha256",
         "execution_evidence_uri",
@@ -318,6 +351,49 @@ def _validate_nightly_benchmark_suite_provenance(metadata: Mapping[str, Any]) ->
     for field_name in ("dataset_manifest_uri", "execution_evidence_uri"):
         if _artifact_ref(field_name, _required_str(metadata, field_name)).kind != "s3":
             raise ValueError(f"benchmark suite {field_name} must be an s3:// immutable artifact")
+    dataset_license_id = _required_str(metadata, "dataset_license_id")
+    if any(marker in dataset_license_id.casefold() for marker in _UNATTESTED_LICENSE_MARKERS):
+        raise ValueError("benchmark suite dataset_license_id is not attested")
+    if (
+        _required_str(metadata, "dataset_distribution_rule")
+        not in _ALLOWED_DATASET_DISTRIBUTION_RULES
+    ):
+        raise ValueError("benchmark suite dataset_distribution_rule is unsupported")
+
+
+def _validate_nightly_suite_metric_records(
+    suite: Mapping[str, Any],
+    *,
+    required_metric_families: Sequence[str],
+) -> None:
+    references = _required_object_list(suite, "references")
+    reference_keys: set[tuple[str, str]] = set()
+    reference_families: set[str] = set()
+    for reference in references:
+        metric_family = _required_str(reference, "metric_family")
+        metric = _required_str(reference, "metric")
+        key = (metric_family, metric)
+        if key in reference_keys:
+            raise ValueError(f"duplicate suite reference {metric_family}/{metric}")
+        reference_keys.add(key)
+        reference_families.add(metric_family)
+    if reference_families != set(required_metric_families):
+        raise ValueError(
+            "references must exactly match metric_compatibility required metric families"
+        )
+    observations = _required_object_list_allow_empty(suite, "metric_observations")
+    observation_keys: set[tuple[str, str]] = set()
+    for observation in observations:
+        metric_family = _required_str(observation, "metric_family")
+        metric = _required_str(observation, "metric")
+        key = (metric_family, metric)
+        if key in observation_keys:
+            raise ValueError(f"duplicate suite metric_observation {metric_family}/{metric}")
+        observation_keys.add(key)
+        _required_number(observation, "score")
+    required_observation_keys = {key for key in reference_keys if key[0] != "retrieval"}
+    if observation_keys != required_observation_keys:
+        raise ValueError("metric_observations must exactly match non-retrieval metric references")
 
 
 def build_nightly_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
@@ -4015,15 +4091,34 @@ def _nightly_report_from_suite_plan_payload(
 
 
 def _suite_result_from_suite_plan(suite: Mapping[str, Any]) -> dict[str, Any]:
-    if _required_str(suite, "suite_contract_version") != _EVAL_CONTRACT_VERSION:
+    if _required_str(suite, "suite_contract_version") != _BENCHMARK_SUITE_CONTRACT_VERSION:
         raise ValueError("unsupported suite_contract_version")
+    metric_compatibility = _required_metric_compatibility(
+        _required_mapping(suite, "metric_compatibility"),
+        selected_suite_ids=MANDATORY_SERP_BENCHMARK_SUITES,
+        contract_version_field="contract_version",
+        matrix_uri_field="matrix_uri",
+        matrix_sha256_field="matrix_sha256",
+        suite_id_field="suite_id",
+        metric_families_field="metric_families",
+    )
+    required_metric_families = _metric_families_for_suite(
+        metric_compatibility,
+        _required_str(suite, "suite_id"),
+    )
+    _validate_nightly_suite_metric_records(
+        suite,
+        required_metric_families=required_metric_families,
+    )
     query_ids = [_required_str(case, "query_id") for case in _required_object_list(suite, "cases")]
     metric_results = [
         _metric_result_from_reference(suite, reference)
         for reference in _required_object_list(suite, "references")
     ]
-    if {metric["metric_family"] for metric in metric_results} != set(_mandatory_metric_families()):
-        raise ValueError("suite references must include every mandatory metric family")
+    if {metric["metric_family"] for metric in metric_results} != set(required_metric_families):
+        raise ValueError(
+            "suite results must exactly match metric_compatibility required metric families"
+        )
     status = (
         "blocked" if any(metric["status"] == "blocked" for metric in metric_results) else "passed"
     )
@@ -4047,7 +4142,10 @@ def _suite_result_from_suite_plan(suite: Mapping[str, Any]) -> dict[str, Any]:
         ).encode("utf-8")
     ).hexdigest()
     return {
-        "metadata": dict(_required_mapping(suite, "metadata")),
+        "metadata": {
+            **dict(_required_mapping(suite, "metadata")),
+            "metric_compatibility": metric_compatibility,
+        },
         "metric_count": len(metric_results),
         "metric_results": metric_results,
         "operation_id": operation_id,
@@ -4127,7 +4225,7 @@ def _live_registry_submissions_payload(
     submissions = [
         _live_registry_submission(report, suite, metric_family, actor_id)
         for suite in _required_object_list(report, "suite_results")
-        for metric_family in _mandatory_metric_families()
+        for metric_family in _suite_result_metric_families(suite)
     ]
     return {
         "contract_version": _EVAL_CONTRACT_VERSION,
@@ -4495,43 +4593,15 @@ def _required_improvement_candidate_evaluation(
         raise ValueError("candidate_evaluation candidateId does not match candidate_id")
     _required_str(candidate, "candidateRunId")
     _required_mapping(candidate, "scope")
-
-    provenance = _required_mapping(candidate, "provenance")
-    for field_name in (
-        "adapterId",
-        "adapterVersion",
-        "adapterSourceUri",
-        "adapterSourceRevision",
-        "adapterImageDigest",
-        "datasetLicenseId",
-        "datasetManifestUri",
-        "datasetManifestSha256",
-        "baselineEvidenceUri",
-        "baselineEvidenceSha256",
-        "candidateEvidenceUri",
-        "candidateEvidenceSha256",
-        "referenceSourceUri",
-    ):
-        _required_str(provenance, field_name)
-    for field_name in ("adapterSourceUri", "referenceSourceUri"):
-        parsed = urlparse(_required_str(provenance, field_name))
-        if parsed.scheme != "https" or not parsed.hostname:
-            raise ValueError(f"candidate_evaluation {field_name} must be an https URL")
-    if not re.fullmatch(r"[0-9a-f]{40}", _required_str(provenance, "adapterSourceRevision")):
-        raise ValueError("candidate_evaluation adapterSourceRevision must be a 40-character SHA")
-    for field_name in (
-        "adapterImageDigest",
-        "datasetManifestSha256",
-        "baselineEvidenceSha256",
-        "candidateEvidenceSha256",
-    ):
-        if not re.fullmatch(r"sha256:[0-9a-f]{64}", _required_str(provenance, field_name)):
-            raise ValueError(f"candidate_evaluation {field_name} must be a sha256 digest")
-    for field_name in ("datasetManifestUri", "baselineEvidenceUri", "candidateEvidenceUri"):
-        if _artifact_ref(field_name, _required_str(provenance, field_name)).kind != "s3":
-            raise ValueError(
-                f"candidate_evaluation {field_name} must be an s3:// immutable artifact"
-            )
+    metric_compatibility = _required_metric_compatibility(
+        _required_mapping(candidate, "metricCompatibility"),
+        selected_suite_ids=selected_suite_ids,
+        contract_version_field="contractVersion",
+        matrix_uri_field="matrixUri",
+        matrix_sha256_field="matrixSha256",
+        suite_id_field="suiteCode",
+        metric_families_field="metricFamilies",
+    )
 
     _required_object_list(candidate, "constraintResults")
     evidence = _required_mapping(candidate, "evidence")
@@ -4551,8 +4621,10 @@ def _required_improvement_candidate_evaluation(
             raise ValueError(f"candidate_evaluation.evidence {sha_field} must be a sha256 digest")
     expected_cells = {
         (suite_id, metric_family)
-        for suite_id in selected_suite_ids
-        for metric_family in _mandatory_metric_families()
+        for suite_id, metric_families in _metric_compatibility_requirement_pairs(
+            metric_compatibility
+        )
+        for metric_family in metric_families
     }
     observed_cells: set[tuple[str, str]] = set()
     for suite in _required_object_list(candidate, "suiteResults"):
@@ -4564,10 +4636,15 @@ def _required_improvement_candidate_evaluation(
                 f"candidate_evaluation duplicate suite result {suite_id}/{metric_family}"
             )
         observed_cells.add(cell)
-        if _required_str(suite, "suiteContractVersion") != _EVAL_CONTRACT_VERSION:
+        if _required_str(suite, "suiteContractVersion") != _BENCHMARK_SUITE_CONTRACT_VERSION:
             raise ValueError("candidate_evaluation has unsupported suiteContractVersion")
         _required_str(suite, "suiteVersion")
-        _required_str(suite, "gateStatus")
+        if _required_str(suite, "gateStatus") not in {"passed", "blocked"}:
+            raise ValueError("candidate_evaluation gateStatus must be passed or blocked")
+        _validate_improvement_suite_provenance(
+            _required_mapping(suite, "provenance"),
+            suite_id=suite_id,
+        )
         if (
             _artifact_ref("executionEvidenceUri", _required_str(suite, "executionEvidenceUri")).kind
             != "s3"
@@ -4588,9 +4665,58 @@ def _required_improvement_candidate_evaluation(
             _required_number_from_string(metric, "normalizedScore")
     if observed_cells != expected_cells:
         raise ValueError(
-            "candidate_evaluation must include every mandatory suite and metric family"
+            "candidate_evaluation must include every metric_compatibility suite and metric family"
         )
     return candidate
+
+
+def _validate_improvement_suite_provenance(
+    provenance: Mapping[str, Any],
+    *,
+    suite_id: str,
+) -> None:
+    for field_name in (
+        "adapterId",
+        "adapterVersion",
+        "adapterSourceUri",
+        "adapterSourceRevision",
+        "adapterImageDigest",
+        "datasetLicenseId",
+        "datasetDistributionRule",
+        "datasetManifestUri",
+        "datasetManifestSha256",
+        "baselineEvidenceUri",
+        "baselineEvidenceSha256",
+        "candidateEvidenceUri",
+        "candidateEvidenceSha256",
+        "referenceSourceUri",
+    ):
+        _required_str(provenance, field_name)
+    for field_name in ("adapterSourceUri", "referenceSourceUri"):
+        parsed = urlparse(_required_str(provenance, field_name))
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise ValueError(f"{suite_id} {field_name} must be an https URL")
+    if not re.fullmatch(r"[0-9a-f]{40}", _required_str(provenance, "adapterSourceRevision")):
+        raise ValueError(f"{suite_id} adapterSourceRevision must be a 40-character SHA")
+    for field_name in (
+        "adapterImageDigest",
+        "datasetManifestSha256",
+        "baselineEvidenceSha256",
+        "candidateEvidenceSha256",
+    ):
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", _required_str(provenance, field_name)):
+            raise ValueError(f"{suite_id} {field_name} must be a sha256 digest")
+    for field_name in ("datasetManifestUri", "baselineEvidenceUri", "candidateEvidenceUri"):
+        if _artifact_ref(field_name, _required_str(provenance, field_name)).kind != "s3":
+            raise ValueError(f"{suite_id} {field_name} must be an s3:// immutable artifact")
+    dataset_license_id = _required_str(provenance, "datasetLicenseId")
+    if any(marker in dataset_license_id.casefold() for marker in _UNATTESTED_LICENSE_MARKERS):
+        raise ValueError(f"{suite_id} datasetLicenseId is not attested")
+    if (
+        _required_str(provenance, "datasetDistributionRule")
+        not in _ALLOWED_DATASET_DISTRIBUTION_RULES
+    ):
+        raise ValueError(f"{suite_id} datasetDistributionRule is unsupported")
 
 
 def _improvement_replay_context(
@@ -4756,8 +4882,94 @@ def _improvement_spec_payload(
     }
 
 
+def _required_metric_compatibility(
+    payload: Mapping[str, Any],
+    *,
+    selected_suite_ids: Sequence[str],
+    contract_version_field: str,
+    matrix_uri_field: str,
+    matrix_sha256_field: str,
+    suite_id_field: str,
+    metric_families_field: str,
+) -> dict[str, Any]:
+    if _required_str(payload, contract_version_field) != _METRIC_COMPATIBILITY_CONTRACT_VERSION:
+        raise ValueError("unsupported metric_compatibility contract version")
+    matrix_uri = _required_str(payload, matrix_uri_field)
+    matrix_sha256 = _required_str(payload, matrix_sha256_field)
+    if _artifact_ref(matrix_uri_field, matrix_uri).kind != "s3":
+        raise ValueError("metric_compatibility matrix URI must be an immutable s3:// artifact")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", matrix_sha256):
+        raise ValueError("metric_compatibility matrix SHA-256 is invalid")
+    requirements_by_suite: dict[str, dict[str, Any]] = {}
+    for raw_requirement in _required_object_list(payload, "requirements"):
+        suite_id = _required_str(raw_requirement, suite_id_field)
+        if suite_id in requirements_by_suite:
+            raise ValueError(f"metric_compatibility has duplicate suite {suite_id!r}")
+        metric_families = _required_str_list(raw_requirement, metric_families_field)
+        unsupported_metric_families = sorted(
+            set(metric_families).difference(_BENCHMARK_METRIC_FAMILIES)
+        )
+        if unsupported_metric_families:
+            raise ValueError(
+                "metric_compatibility has unsupported metric families: "
+                + ", ".join(unsupported_metric_families)
+            )
+        canonical_metric_families = tuple(
+            metric_family
+            for metric_family in _BENCHMARK_METRIC_FAMILIES
+            if metric_family in metric_families
+        )
+        if tuple(metric_families) != canonical_metric_families:
+            raise ValueError("metric_compatibility metric families must be canonical and unique")
+        requirements_by_suite[suite_id] = {
+            "metric_families": list(canonical_metric_families),
+            "suite_id": suite_id,
+        }
+    if tuple(requirements_by_suite) != tuple(selected_suite_ids):
+        raise ValueError("metric_compatibility must include selected suites in canonical order")
+    return {
+        "contract_version": _METRIC_COMPATIBILITY_CONTRACT_VERSION,
+        "matrix_sha256": matrix_sha256,
+        "matrix_uri": matrix_uri,
+        "requirements": [requirements_by_suite[suite_id] for suite_id in selected_suite_ids],
+    }
+
+
+def _metric_families_for_suite(metric_compatibility: Mapping[str, Any], suite_id: str) -> list[str]:
+    for requirement in _required_object_list(metric_compatibility, "requirements"):
+        if _required_str(requirement, "suite_id") == suite_id:
+            return _required_str_list(requirement, "metric_families")
+    raise ValueError(f"metric_compatibility does not include suite {suite_id!r}")
+
+
+def _metric_compatibility_requirement_pairs(
+    metric_compatibility: Mapping[str, Any],
+) -> list[tuple[str, list[str]]]:
+    return [
+        (
+            _required_str(requirement, "suite_id"),
+            _required_str_list(requirement, "metric_families"),
+        )
+        for requirement in _required_object_list(metric_compatibility, "requirements")
+    ]
+
+
+def _suite_result_metric_families(suite_result: Mapping[str, Any]) -> list[str]:
+    suite_id = _required_str(suite_result, "suite_id")
+    metric_compatibility = _required_metric_compatibility(
+        _required_mapping(_required_mapping(suite_result, "metadata"), "metric_compatibility"),
+        selected_suite_ids=MANDATORY_SERP_BENCHMARK_SUITES,
+        contract_version_field="contract_version",
+        matrix_uri_field="matrix_uri",
+        matrix_sha256_field="matrix_sha256",
+        suite_id_field="suite_id",
+        metric_families_field="metric_families",
+    )
+    return _metric_families_for_suite(metric_compatibility, suite_id)
+
+
 def _mandatory_metric_families() -> tuple[str, str, str, str]:
-    return ("retrieval", "answer-quality", "citation", "policy")
+    return _BENCHMARK_METRIC_FAMILIES
 
 
 def _public_docs_seed_registry(
@@ -5830,6 +6042,20 @@ def _required_object_list(payload: Mapping[str, Any], field_name: str) -> list[M
     value = payload.get(field_name)
     if not isinstance(value, list) or not value:
         raise ValueError(f"{field_name} must be a non-empty list")
+    objects: list[Mapping[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise ValueError(f"{field_name} entries must be objects")
+        objects.append(item)
+    return objects
+
+
+def _required_object_list_allow_empty(
+    payload: Mapping[str, Any], field_name: str
+) -> list[Mapping[str, Any]]:
+    value = payload.get(field_name)
+    if not isinstance(value, list):
+        raise ValueError(f"{field_name} must be a list")
     objects: list[Mapping[str, Any]] = []
     for item in value:
         if not isinstance(item, Mapping):
