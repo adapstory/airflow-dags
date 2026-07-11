@@ -725,6 +725,7 @@ def build_public_docs_seed_refresh_plan(
         default=_PUBLIC_DOCS_DEFAULT_NEO4J_DATABASE,
     )
     bc21_base_url = _optional_bc21_base_url(payload)
+    refresh_mode, refresh_reason = _public_docs_refresh_mode(payload)
     frontier_budget = _public_docs_frontier_budget(payload, generated_at=generated_at)
     crawler_discovery_workers = _public_docs_crawler_discovery_workers(
         payload,
@@ -753,6 +754,8 @@ def build_public_docs_seed_refresh_plan(
         index_mode,
         embedding_mode,
         bc21_base_url or "",
+        refresh_mode,
+        refresh_reason or "",
         _canonical_json({"frontier_budget": frontier_budget}),
         crawler_discovery_workers,
     )
@@ -808,6 +811,8 @@ def build_public_docs_seed_refresh_plan(
         "pack_version_id": str(pack_version_id),
         "public_docs_crawl_state_path": crawl_state_path,
         "qdrant_collection": qdrant_collection,
+        "refresh_mode": refresh_mode,
+        **({"refresh_reason": refresh_reason} if refresh_reason is not None else {}),
         "registry_resource_id": str(registry_resource_id),
         "registry_resource_type": registry_resource_type,
         "seed_count": len(seeds),
@@ -3516,9 +3521,16 @@ def _public_docs_seed_refresh_payload(plan: Mapping[str, Any]) -> dict[str, Any]
         ),
     )
     generated_at = _required_datetime_string(plan, "generated_at")
+    refresh_mode = _required_str(plan, "refresh_mode")
+    refresh_reason = plan.get("refresh_reason")
+    if refresh_reason is not None and not isinstance(refresh_reason, str):
+        raise ValueError("refresh_reason must be a string")
+    force_full_refresh = refresh_mode == "force_full"
     due_seeds, skipped_seed_refreshes = _public_docs_due_seed_selection(
         _required_object_list(plan, "seed_registry"),
         generated_at,
+        force_full_refresh=force_full_refresh,
+        refresh_reason=refresh_reason,
     )
     # A D5 activation selects exactly one pack version.  Therefore a delta may
     # not contain only the due subset: that would silently remove fresh sources
@@ -3532,6 +3544,8 @@ def _public_docs_seed_refresh_payload(plan: Mapping[str, Any]) -> dict[str, Any]
                     **_public_docs_seed_refresh_decision(
                         seed,
                         _datetime_value(generated_at, "generated_at"),
+                        force_full_refresh=force_full_refresh,
+                        refresh_reason=refresh_reason,
                     ),
                     "candidate_rebuild_mode": "full_pack",
                 },
@@ -3576,6 +3590,8 @@ def _public_docs_seed_refresh_payload(plan: Mapping[str, Any]) -> dict[str, Any]
         "pack_version_id": _required_str(plan, "pack_version_id"),
         "index_mode": _required_str(plan, "index_mode"),
         "qdrant_collection": _required_str(plan, "qdrant_collection"),
+        "refresh_mode": refresh_mode,
+        **({"refresh_reason": refresh_reason} if refresh_reason is not None else {}),
         "opensearch_index": _required_str(plan, "opensearch_index"),
         "neo4j_database": _required_str(plan, "neo4j_database"),
         "optional_frontier_selected_count": optional_frontier_selected_count,
@@ -5655,12 +5671,20 @@ def _validated_public_docs_page_state(page_state: Mapping[str, Any]) -> dict[str
 def _public_docs_due_seed_selection(
     seeds: Sequence[Mapping[str, Any]],
     generated_at: str,
+    *,
+    force_full_refresh: bool = False,
+    refresh_reason: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     generated_at_dt = _datetime_value(generated_at, "generated_at")
     due_seeds: list[dict[str, Any]] = []
     skipped_seed_refreshes: list[dict[str, Any]] = []
     for seed in seeds:
-        decision = _public_docs_seed_refresh_decision(seed, generated_at_dt)
+        decision = _public_docs_seed_refresh_decision(
+            seed,
+            generated_at_dt,
+            force_full_refresh=force_full_refresh,
+            refresh_reason=refresh_reason,
+        )
         if decision["status"] == "due":
             selected_seed = dict(seed)
             selected_seed["refresh_selection"] = decision
@@ -5683,6 +5707,9 @@ def _public_docs_due_seed_selection(
 def _public_docs_seed_refresh_decision(
     seed: Mapping[str, Any],
     generated_at: datetime,
+    *,
+    force_full_refresh: bool = False,
+    refresh_reason: str | None = None,
 ) -> dict[str, str]:
     freshness_state = _required_mapping(seed, "freshness_state")
     last_success_at = freshness_state.get("last_success_at")
@@ -5692,6 +5719,15 @@ def _public_docs_seed_refresh_decision(
         "generated_at": generated_at.isoformat().replace("+00:00", "Z"),
         "max_age_hours": str(max_age_hours),
     }
+    if force_full_refresh:
+        if refresh_reason is None:
+            raise ValueError("force_full refresh requires refresh_reason")
+        return {
+            **base,
+            "reason": "forced_revalidation",
+            "refresh_reason": refresh_reason,
+            "status": "due",
+        }
     if not isinstance(last_success_at, str) or not last_success_at.strip():
         return {**base, "reason": "never_indexed", "status": "due"}
     last_success_dt = _datetime_value(last_success_at, "freshness_state.last_success_at")
@@ -5711,6 +5747,22 @@ def _public_docs_seed_refresh_decision(
         "reason": "within_max_age",
         "status": "skipped",
     }
+
+
+def _public_docs_refresh_mode(payload: Mapping[str, Any]) -> tuple[str, str | None]:
+    value = payload.get("refresh_mode", "scheduled")
+    if not isinstance(value, str) or value not in {"scheduled", "force_full"}:
+        raise ValueError("refresh_mode must be scheduled or force_full")
+    raw_reason = payload.get("refresh_reason")
+    if value == "scheduled":
+        if raw_reason is not None:
+            raise ValueError("scheduled refresh must not include refresh_reason")
+        return value, None
+    if not isinstance(raw_reason, str) or not raw_reason.strip():
+        raise ValueError("force_full refresh requires refresh_reason")
+    if len(raw_reason.strip()) > 512:
+        raise ValueError("refresh_reason must be at most 512 characters")
+    return value, raw_reason.strip()
 
 
 def _public_docs_source_uri_hash(seed: Mapping[str, Any]) -> str:

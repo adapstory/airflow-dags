@@ -2884,6 +2884,44 @@ def test_public_docs_seed_refresh_noops_when_no_seed_is_due(tmp_path: Path) -> N
     assert result["payload"]["skipped_seed_count"] == 4
 
 
+def test_force_full_revalidation_requires_reason_and_rebuilds_fresh_public_docs(
+    tmp_path: Path,
+) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+    for seed in conf["seed_registry"]:
+        seed["freshness_state"] = {
+            "last_success_at": "2026-07-08T20:30:00Z",
+            "status": "indexed",
+        }
+    conf["refresh_mode"] = "scheduled"
+    conf["refresh_reason"] = "unexpected scheduled override"
+
+    with pytest.raises(ValueError, match="scheduled refresh must not include refresh_reason"):
+        build_public_docs_seed_refresh_plan(conf)
+
+    conf["refresh_mode"] = "force_full"
+    conf.pop("refresh_reason")
+
+    with pytest.raises(ValueError, match="force_full refresh requires refresh_reason"):
+        build_public_docs_seed_refresh_plan(conf)
+
+    conf["refresh_reason"] = "post-rollback D5 contract revalidation"
+    plan = build_public_docs_seed_refresh_plan(conf)
+    artifact = write_public_docs_seed_refresh_plan_artifact(plan.to_canonical_json())
+
+    assert plan.payload["refresh_mode"] == "force_full"
+    assert plan.payload["refresh_reason"] == "post-rollback D5 contract revalidation"
+    assert artifact["payload"]["status"] == "ready_for_pipeline_dispatch"
+    assert artifact["payload"]["candidate_rebuild_mode"] == "full_pack"
+    assert artifact["payload"]["refresh_mode"] == "force_full"
+    assert artifact["payload"]["refresh_reason"] == "post-rollback D5 contract revalidation"
+    assert {
+        request["source_metadata"]["refresh_selection"]["reason"]
+        for request in artifact["payload"]["source_fetch_requests"]
+    } == {"forced_revalidation"}
+
+
 def test_public_docs_noop_retains_active_pack_without_bc21_or_d5_publish(
     tmp_path: Path,
 ) -> None:
