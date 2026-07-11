@@ -4258,13 +4258,14 @@ def test_p0_public_docs_website_seeds_use_canonical_public_docs_roots() -> None:
         assert source["docs_url"] == source.get("catalog_docs_url", source["docs_url"])
 
 
-def test_apache_kafka_seed_uses_contentful_canonical_root() -> None:
+def test_apache_kafka_seed_uses_version_pinned_canonical_docs_root() -> None:
     kafka = next(
         source for source in P0_PUBLIC_DOCS_SOURCES if source["seed_id"] == "apache-kafka-docs"
     )
 
-    assert kafka["docs_url"] == "https://kafka.apache.org/uses"
-    assert kafka.get("catalog_docs_url", kafka["docs_url"]) == "https://kafka.apache.org/uses"
+    assert kafka["docs_url"] == "https://kafka.apache.org/43/"
+    assert kafka.get("catalog_docs_url", kafka["docs_url"]) == "https://kafka.apache.org/43/"
+    assert kafka["version"] == "4.3"
 
 
 def _p0_nightly_catalog_rows(catalog_text: str) -> dict[str, dict[str, str]]:

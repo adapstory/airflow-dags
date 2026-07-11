@@ -158,10 +158,11 @@ P0_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
     ),
     _source(
         component="Apache Kafka",
-        docs_url="https://kafka.apache.org/uses",
+        docs_url="https://kafka.apache.org/43/",
         repo_url="https://github.com/apache/kafka",
         releases_url="https://github.com/apache/kafka/releases",
         seed_id="apache-kafka-docs",
+        version="4.3",
     ),
     _source(
         component="MinIO",
