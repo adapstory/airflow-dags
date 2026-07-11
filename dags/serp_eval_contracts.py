@@ -3092,7 +3092,6 @@ def _public_docs_search_request_for_golden_case(
         **_required_mapping(request, "metadata"),
         "golden_case_expected_source_uri": _required_str(expected, "source_uri_prefix"),
         "golden_case_id": case_id,
-        "source_uri_filter": _required_str(expected, "source_uri_prefix"),
         "surface": "airflow-public-docs-retrieval-golden",
     }
     request["policy_rule_ids_applied"] = ["serp-public-docs-active-pack-retrieval-golden"]

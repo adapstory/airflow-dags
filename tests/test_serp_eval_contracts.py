@@ -3503,6 +3503,7 @@ def test_public_docs_retrieval_golden_runs_thirty_live_contract_cases_with_repla
     assert artifact["payload"]["status"] == "passed"
     assert artifact["payload"]["case_count"] == 30
     assert len(calls) == 60
+    assert all("source_uri_filter" not in call["metadata"] for call in calls)
     assert artifact["payload"]["latency_seconds"]["p95"] <= 2.0
 
 
