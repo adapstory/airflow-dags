@@ -4224,11 +4224,7 @@ def test_serp_public_docs_pipeline_task_survives_scheduler_rollout() -> None:
             assert "pipeline_runner_env_vars" in source
             assert "current_airflow_runtime_image" in source
             assert "ADAPSTORY_SERP_EMBEDDING_DIMENSION" in source
-            labels = next(
-                keyword.value
-                for keyword in node.keywords
-                if keyword.arg == "labels"
-            )
+            labels = next(keyword.value for keyword in node.keywords if keyword.arg == "labels")
             assert isinstance(labels, ast.Dict)
             assert {
                 key.value: value.value
@@ -4472,10 +4468,7 @@ def test_public_docs_pipeline_runner_env_contract_survives_native_template_rende
         "{{ ti.xcom_pull(task_ids='dispatch_pipeline_seed_refresh_handoff')"
         " | tojson | urlencode }}"
     )
-    assert (
-        values["ADAPSTORY_SERP_PIPELINE_CLI_SPEC_URLENCODED"]
-        == expected_cli_spec_template
-    )
+    assert values["ADAPSTORY_SERP_PIPELINE_CLI_SPEC_URLENCODED"] == expected_cli_spec_template
     assert "ADAPSTORY_SERP_PIPELINE_CLI_SPEC_JSON" not in values
 
 
@@ -4519,7 +4512,6 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeKubernetesModel:
         def __init__(self, *_args: object, **kwargs: object) -> None:
             self.kwargs = kwargs
-
 
     for name in (
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT",

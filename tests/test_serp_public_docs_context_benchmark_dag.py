@@ -7,8 +7,9 @@ ROOT = Path(__file__).resolve().parents[1]
 DAG_FILE = ROOT / "dags" / "serp_public_docs_context_benchmark.py"
 
 
-def test_context_benchmark_dag_is_scheduled_in_cluster_and_never_dispatches_to_github_actions(
-) -> None:
+def test_context_benchmark_dag_is_scheduled_in_cluster_and_never_dispatches_to_github_actions() -> (
+    None
+):
     source = DAG_FILE.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(DAG_FILE))
     calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]

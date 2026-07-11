@@ -3740,8 +3740,7 @@ def _expanded_public_docs_seed_frontier(seed: Mapping[str, Any]) -> list[dict[st
     crawl_policy = _required_mapping(seed, "crawl_policy")
     frontier_urls = list(crawl_policy.get("frontier_urls", []))
     curated_frontier_urls = {
-        _canonical_public_docs_url(url)
-        for url in _curated_frontier_urls(crawl_policy)
+        _canonical_public_docs_url(url) for url in _curated_frontier_urls(crawl_policy)
     }
     if source_type != "website" or not frontier_urls:
         singleton = dict(seed)

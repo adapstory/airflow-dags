@@ -109,9 +109,7 @@ def pipeline_runner_env_vars(cli_spec_task_id: str) -> list[k8s.V1EnvVar]:
             k8s.V1EnvVar(
                 name="ADAPSTORY_SERP_PIPELINE_CLI_SPEC_URLENCODED",
                 value=(
-                    "{{ ti.xcom_pull(task_ids='"
-                    + cli_spec_task_id
-                    + "') | tojson | urlencode }}"
+                    "{{ ti.xcom_pull(task_ids='" + cli_spec_task_id + "') | tojson | urlencode }}"
                 ),
             ),
         )

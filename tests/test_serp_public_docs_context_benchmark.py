@@ -112,9 +112,11 @@ def test_bc21_submissions_average_duplicate_metric_observations_per_case(
     assert retrieval["body"]["resourceType"] == "public_corpus"
     assert retrieval["body"]["referenceSourceType"] == "official_baseline"
     assert len(retrieval["body"]["cases"]) == 30
-    assert next(
-        item for item in retrieval["body"]["cases"] if item["caseId"] == "k3s-1"
-    ) == {"caseId": "k3s-1", "expectedScore": 1.0, "observedScore": 0.75}
+    assert next(item for item in retrieval["body"]["cases"] if item["caseId"] == "k3s-1") == {
+        "caseId": "k3s-1",
+        "expectedScore": 1.0,
+        "observedScore": 0.75,
+    }
     assert retrieval["headers"]["X-Fingerprint"].startswith("sha256:")
 
 
@@ -237,9 +239,7 @@ def test_github_status_is_a_final_external_projection_of_in_cluster_evidence(
         captured["timeout"] = timeout
         return Response()
 
-    monkeypatch.setattr(
-        "dags.serp_public_docs_context_benchmark_contracts.urlopen", fake_urlopen
-    )
+    monkeypatch.setattr("dags.serp_public_docs_context_benchmark_contracts.urlopen", fake_urlopen)
 
     receipt = publish_context_benchmark_github_status(
         plan,

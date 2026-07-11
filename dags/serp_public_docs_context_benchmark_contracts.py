@@ -73,15 +73,16 @@ def build_context_benchmark_plan(conf: Mapping[str, Any]) -> dict[str, Any]:
         "bc21_base_url",
     )
     artifact_root = str(
-        conf.get("artifact_root_path")
-        or os.environ.get("ADAPSTORY_AIRFLOW_ARTIFACT_ROOT")
-        or ""
+        conf.get("artifact_root_path") or os.environ.get("ADAPSTORY_AIRFLOW_ARTIFACT_ROOT") or ""
     )
     if not artifact_root:
         raise ValueError("artifact_root_path is required")
-    operation_id = "serp-public-docs-context-benchmark-" + sha256(
-        "|".join((generated_at, benchmark_source_ref, SUITE_ID)).encode("utf-8")
-    ).hexdigest()[:32]
+    operation_id = (
+        "serp-public-docs-context-benchmark-"
+        + sha256(
+            "|".join((generated_at, benchmark_source_ref, SUITE_ID)).encode("utf-8")
+        ).hexdigest()[:32]
+    )
     artifact_paths = build_evidence_artifact_paths(
         artifact_root,
         operation_id,
