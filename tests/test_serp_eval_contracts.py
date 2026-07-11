@@ -4223,6 +4223,24 @@ def test_serp_public_docs_pipeline_task_survives_scheduler_rollout() -> None:
             assert "pipeline_runner_env_vars" in source
             assert "current_airflow_runtime_image" in source
             assert "ADAPSTORY_SERP_EMBEDDING_DIMENSION" in source
+            labels = next(
+                keyword.value
+                for keyword in node.keywords
+                if keyword.arg == "labels"
+            )
+            assert isinstance(labels, ast.Dict)
+            assert {
+                key.value: value.value
+                for key, value in zip(labels.keys, labels.values, strict=True)
+                if isinstance(key, ast.Constant)
+                and isinstance(key.value, str)
+                and isinstance(value, ast.Constant)
+                and isinstance(value.value, str)
+            } == {
+                "component": "worker",
+                "release": "airflow",
+                "tier": "airflow",
+            }
             return
 
     raise AssertionError("public docs pipeline task was not found")

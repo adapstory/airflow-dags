@@ -231,6 +231,11 @@ run_pipeline = KubernetesPodOperator(
     env_vars=pipeline_runner_env_vars("dispatch_pipeline_seed_refresh_handoff"),
     service_account_name="airflow-worker",
     automount_service_account_token=False,
+    labels={
+        "component": "worker",
+        "release": "airflow",
+        "tier": "airflow",
+    },
     container_resources=SERP_PIPELINE_RUNNER_RESOURCES,
     container_security_context=k8s.V1SecurityContext(
         allow_privilege_escalation=False,
