@@ -4423,6 +4423,43 @@ def test_serp_public_docs_dag_overlays_partial_run_conf_on_default_seed_registry
     assert all(path.startswith(str(tmp_path)) for path in plan["artifact_paths"].values())
 
 
+def test_public_docs_pipeline_runner_env_contract_survives_native_template_rendering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    module = importlib.import_module("dags.serp_web_seed_crawl_refresh")
+    module = importlib.reload(module)
+    numeric_values = {
+        "ADAPSTORY_SERP_EMBEDDING_BATCH_SIZE": "16",
+        "ADAPSTORY_SERP_EMBEDDING_DIMENSION": "768",
+        "ADAPSTORY_SERP_EMBEDDING_MAX_ATTEMPTS": "3",
+        "ADAPSTORY_SERP_EMBEDDING_RETRY_DELAY_SECONDS": "0.5",
+    }
+    for name, value in numeric_values.items():
+        monkeypatch.setenv(name, value)
+
+    env_vars = module.pipeline_runner_env_vars("dispatch_pipeline_seed_refresh_handoff")
+    values = {
+        env_var.kwargs["name"]: env_var.kwargs["value"]
+        for env_var in env_vars
+        if "value" in env_var.kwargs
+    }
+
+    for name, value in numeric_values.items():
+        assert values[name] == repr(value)
+        assert isinstance(ast.literal_eval(values[name]), str)
+        assert ast.literal_eval(values[name]) == value
+    expected_cli_spec_template = (
+        "{{ ti.xcom_pull(task_ids='dispatch_pipeline_seed_refresh_handoff')"
+        " | tojson | urlencode }}"
+    )
+    assert (
+        values["ADAPSTORY_SERP_PIPELINE_CLI_SPEC_URLENCODED"]
+        == expected_cli_spec_template
+    )
+    assert "ADAPSTORY_SERP_PIPELINE_CLI_SPEC_JSON" not in values
+
+
 def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeAirflowSkipException(Exception):
         pass
@@ -4461,8 +4498,9 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
             return values[(section, key)]
 
     class FakeKubernetesModel:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
 
     for name in (
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT",

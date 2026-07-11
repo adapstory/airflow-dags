@@ -76,7 +76,7 @@ def pipeline_runner_env_vars(cli_spec_task_id: str) -> list[k8s.V1EnvVar]:
         value = os.environ.get(name)
         if value is None or not value.strip():
             raise ValueError(f"public docs pipeline runner environment is required: {name}")
-        values.append(k8s.V1EnvVar(name=name, value=value))
+        values.append(k8s.V1EnvVar(name=name, value=_native_template_safe_env_value(value)))
     values.extend(
         (
             k8s.V1EnvVar(
@@ -107,12 +107,22 @@ def pipeline_runner_env_vars(cli_spec_task_id: str) -> list[k8s.V1EnvVar]:
                 ),
             ),
             k8s.V1EnvVar(
-                name="ADAPSTORY_SERP_PIPELINE_CLI_SPEC_JSON",
-                value="{{ ti.xcom_pull(task_ids='" + cli_spec_task_id + "') | tojson }}",
+                name="ADAPSTORY_SERP_PIPELINE_CLI_SPEC_URLENCODED",
+                value=(
+                    "{{ ti.xcom_pull(task_ids='"
+                    + cli_spec_task_id
+                    + "') | tojson | urlencode }}"
+                ),
             ),
         )
     )
     return values
+
+
+def _native_template_safe_env_value(value: str) -> str:
+    """Return a NativeEnvironment literal that renders to an exact Kubernetes string."""
+
+    return repr(value)
 
 
 def validate_public_docs_seed_registry(**context: Any) -> str:
