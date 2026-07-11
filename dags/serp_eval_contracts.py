@@ -2997,6 +2997,25 @@ def _public_docs_retrieval_golden_cases(
                 query=f"{component} official documentation overview",
             )
         )
+        raw_required_frontier = seed.get("required_frontier", [])
+        if not isinstance(raw_required_frontier, list) or not all(
+            isinstance(frontier, Mapping) for frontier in raw_required_frontier
+        ):
+            raise ValueError("required_frontier must be a list of objects")
+        for frontier in sorted(
+            raw_required_frontier, key=lambda item: _required_str(item, "source_uri")
+        ):
+            if frontier.get("status") != "indexed" or frontier.get("index_status") != "passed":
+                raise ValueError("public docs retrieval golden requires every curated frontier")
+            frontier_url = _required_str(frontier, "source_uri")
+            cases.append(
+                _public_docs_retrieval_golden_case(
+                    seed_id=seed_id,
+                    component=component,
+                    source_uri=frontier_url,
+                    query=_public_docs_retrieval_golden_query(component, frontier_url),
+                )
+            )
         raw_frontier = seed.get("optional_frontier", [])
         if not isinstance(raw_frontier, list) or not all(
             isinstance(frontier, Mapping) for frontier in raw_frontier

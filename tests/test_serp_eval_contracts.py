@@ -3240,6 +3240,7 @@ def test_public_docs_coverage_proof_artifact_finalizes_d20_after_d5(
                 "failure": {"code": None, "message": None},
                 "index_status": "passed",
                 "optional_frontier": [],
+                "required_frontier": [],
                 "seed_id": "k3s-docs",
                 "source_id": "source-k3s",
                 "source_type": "website",
@@ -3516,7 +3517,7 @@ def test_public_docs_retrieval_golden_cases_use_indexed_coverage_not_planned_fro
     monkeypatch.setattr(
         serp_eval_contracts_module,
         "_PUBLIC_DOCS_RETRIEVAL_GOLDEN_MIN_CASES",
-        2,
+        3,
     )
     refresh_result = {
         "artifact_type": "public_docs_seed_refresh_batch_evidence",
@@ -3535,6 +3536,13 @@ def test_public_docs_retrieval_golden_cases_use_indexed_coverage_not_planned_fro
                             "status": "failed",
                         },
                     ],
+                    "required_frontier": [
+                        {
+                            "index_status": "passed",
+                            "source_uri": "https://docs.k3s.io/installation/requirements",
+                            "status": "indexed",
+                        }
+                    ],
                     "seed_id": "k3s-docs",
                     "source_uri": "https://docs.k3s.io/",
                     "status": "indexed",
@@ -3550,9 +3558,10 @@ def test_public_docs_retrieval_golden_cases_use_indexed_coverage_not_planned_fro
 
     assert [case["expected"]["source_uri_prefix"] for case in cases] == [
         "https://docs.k3s.io/",
+        "https://docs.k3s.io/installation/requirements",
         "https://docs.k3s.io/quick-start",
     ]
-    assert cases[1]["query"] == "K3s documentation quick start"
+    assert cases[2]["query"] == "K3s documentation quick start"
 
 
 def test_public_docs_publish_activation_plan_accepts_s3_d20_result(
