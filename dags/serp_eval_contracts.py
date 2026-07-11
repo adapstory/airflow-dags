@@ -17,7 +17,7 @@ from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from time import perf_counter, sleep
-from typing import Any
+from typing import Any, NoReturn
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlparse
 from urllib.request import ProxyHandler, Request, build_opener, urlopen
@@ -3162,62 +3162,90 @@ def _public_docs_retrieval_golden_response_signature(
     expected_pack_version_id: str,
     generated_at: str,
 ) -> dict[str, Any]:
+    case_id = _required_str(case, "case_id")
+
+    def fail(reason: str) -> NoReturn:
+        raise ValueError(f"public docs retrieval golden case_id={case_id}: {reason}")
+
     selected_pack_version_ids = _required_str_list(response, "selected_pack_version_ids")
     if selected_pack_version_ids != [expected_pack_version_id]:
-        raise ValueError("public docs retrieval golden selected pack must match active pack")
+        fail("selected pack must match candidate pack")
     expected = _required_mapping(case, "expected")
     expected_source_uri_prefix = _required_str(expected, "source_uri_prefix")
     minimum_citations = _required_positive_int(expected, "minimum_citations")
     citations = _required_object_list(response, "citations")
     if len(citations) < minimum_citations:
-        raise ValueError("public docs retrieval golden response has insufficient citations")
+        fail("response has insufficient citations")
+    if not _required_str(citations[0], "source_uri").startswith(expected_source_uri_prefix):
+        fail(
+            "top-ranked expected source is absent from citations: "
+            f"expected_source_uri_prefix={expected_source_uri_prefix} "
+            f"observed_source_uri={_required_str(citations[0], 'source_uri')}"
+        )
     canonical_citations: list[dict[str, str]] = []
+    citation_source_uris: dict[str, str] = {}
     for citation in citations:
         citation_pack_version_id = _required_str(citation, "pack_version_id")
         citation_source_uri = _required_str(citation, "source_uri")
         if citation_pack_version_id != expected_pack_version_id:
-            raise ValueError("public docs retrieval golden citation pack version mismatch")
-        if not citation_source_uri.startswith(expected_source_uri_prefix):
-            raise ValueError("public docs retrieval golden cross-source contamination detected")
+            fail("citation pack version does not match candidate pack")
+        citation_chunk_id = _required_str(citation, "chunk_id")
+        if citation_chunk_id in citation_source_uris:
+            fail(f"response contains duplicate citation chunk_id={citation_chunk_id}")
+        citation_source_uris[citation_chunk_id] = citation_source_uri
         canonical_citations.append(
             {
-                "chunk_id": _required_str(citation, "chunk_id"),
+                "chunk_id": citation_chunk_id,
                 "source_uri": citation_source_uri,
             }
         )
     result_count = _required_positive_int(response, "result_count")
     result_cards = _required_object_list(response, "result_cards")
     if len(result_cards) != result_count:
-        raise ValueError("public docs retrieval golden result cards must match result_count")
+        fail("result cards must match result_count")
+    first_card_provenance = _required_mapping(result_cards[0], "provenance")
+    first_card_source_url = _required_str(first_card_provenance, "source_url")
+    if not first_card_source_url.startswith(expected_source_uri_prefix):
+        fail(
+            "top-ranked expected source is absent from result cards: "
+            f"expected_source_uri_prefix={expected_source_uri_prefix} "
+            f"observed_source_url={first_card_source_url}"
+        )
     generated_at_value = _datetime_value(generated_at, "generated_at")
     max_freshness_hours = _required_positive_int(expected, "max_freshness_hours")
     canonical_cards: list[dict[str, str]] = []
     for card in result_cards:
+        card_chunk_id = _required_str(card, "chunk_id")
         provenance = _required_mapping(card, "provenance")
         source_url = _required_str(provenance, "source_url")
-        if not source_url.startswith(expected_source_uri_prefix):
-            raise ValueError("public docs retrieval golden result source contamination detected")
+        cited_source_uri = citation_source_uris.get(card_chunk_id)
+        if cited_source_uri is None:
+            fail(f"result card lacks candidate-pack citation: chunk_id={card_chunk_id}")
+        if cited_source_uri != source_url:
+            fail(
+                "result card source does not match candidate-pack citation: "
+                f"chunk_id={card_chunk_id} citation_source_uri={cited_source_uri} "
+                f"result_source_url={source_url}"
+            )
         if _required_str(provenance, "freshness_state") != "fresh":
-            raise ValueError("public docs retrieval golden result is not fresh")
+            fail(f"result is not fresh: chunk_id={card_chunk_id}")
         crawled_at = _datetime_value(_required_str(provenance, "crawl_time"), "crawl_time")
         freshness_hours = (generated_at_value - crawled_at).total_seconds() / 3600
         if freshness_hours < 0 or freshness_hours > max_freshness_hours:
-            raise ValueError("public docs retrieval golden result exceeds freshness SLO")
+            fail(
+                "result exceeds freshness SLO: "
+                f"chunk_id={card_chunk_id} freshness_hours={freshness_hours:.6f} "
+                f"max_freshness_hours={max_freshness_hours}"
+            )
         canonical_cards.append(
             {
-                "chunk_id": _required_str(card, "chunk_id"),
+                "chunk_id": card_chunk_id,
                 "source_url": source_url,
             }
         )
     return {
-        "citations": sorted(
-            canonical_citations,
-            key=lambda item: (item["chunk_id"], item["source_uri"]),
-        ),
-        "result_cards": sorted(
-            canonical_cards,
-            key=lambda item: (item["chunk_id"], item["source_url"]),
-        ),
+        "citations": canonical_citations,
+        "result_cards": canonical_cards,
         "result_chunk_ids": _required_str_list(response, "result_chunk_ids"),
         "result_count": result_count,
         "selected_pack_version_ids": selected_pack_version_ids,

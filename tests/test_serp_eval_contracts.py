@@ -3508,6 +3508,120 @@ def test_public_docs_retrieval_golden_runs_thirty_live_contract_cases_with_repla
     assert artifact["payload"]["latency_seconds"]["p95"] <= 2.0
 
 
+def test_public_docs_retrieval_golden_accepts_ranked_multi_source_results_from_active_pack() -> (
+    None
+):
+    expected_source = "https://airflow.apache.org/docs/"
+    secondary_source = "https://kubernetes.io/docs/"
+    case = {
+        "case_id": "public-docs-airflow-ranked-multi-source",
+        "expected": {
+            "max_freshness_hours": 24,
+            "minimum_citations": 1,
+            "source_uri_prefix": expected_source,
+        },
+        "query": "Apache Airflow official documentation overview",
+        "seed_id": "apache-airflow-docs",
+    }
+    response = {
+        "citations": [
+            {
+                "chunk_id": "chunk-expected",
+                "evidence_ref": "retrieval:golden",
+                "pack_version_id": PACK_VERSION_ID,
+                "source_uri": expected_source,
+            },
+            {
+                "chunk_id": "chunk-secondary",
+                "evidence_ref": "retrieval:golden",
+                "pack_version_id": PACK_VERSION_ID,
+                "source_uri": secondary_source,
+            },
+        ],
+        "result_cards": [
+            {
+                "chunk_id": "chunk-expected",
+                "provenance": {
+                    "crawl_time": "2026-07-08T22:00:00Z",
+                    "freshness_state": "fresh",
+                    "source_url": expected_source,
+                },
+            },
+            {
+                "chunk_id": "chunk-secondary",
+                "provenance": {
+                    "crawl_time": "2026-07-08T22:00:00Z",
+                    "freshness_state": "fresh",
+                    "source_url": secondary_source,
+                },
+            },
+        ],
+        "result_chunk_ids": ["chunk-expected", "chunk-secondary"],
+        "result_count": 2,
+        "selected_pack_version_ids": [PACK_VERSION_ID],
+    }
+
+    observed = serp_eval_contracts_module._public_docs_retrieval_golden_response_signature(
+        response=response,
+        case=case,
+        expected_pack_version_id=PACK_VERSION_ID,
+        generated_at="2026-07-08T22:00:00Z",
+    )
+
+    assert [citation["source_uri"] for citation in observed["citations"]] == [
+        expected_source,
+        secondary_source,
+    ]
+
+
+def test_public_docs_retrieval_golden_rejects_missing_expected_top_ranked_source() -> None:
+    expected_source = "https://airflow.apache.org/docs/"
+    case = {
+        "case_id": "public-docs-airflow-missing-top-result",
+        "expected": {
+            "max_freshness_hours": 24,
+            "minimum_citations": 1,
+            "source_uri_prefix": expected_source,
+        },
+        "query": "Apache Airflow official documentation overview",
+        "seed_id": "apache-airflow-docs",
+    }
+    response = {
+        "citations": [
+            {
+                "chunk_id": "chunk-wrong",
+                "evidence_ref": "retrieval:golden",
+                "pack_version_id": PACK_VERSION_ID,
+                "source_uri": "https://kubernetes.io/docs/",
+            }
+        ],
+        "result_cards": [
+            {
+                "chunk_id": "chunk-wrong",
+                "provenance": {
+                    "crawl_time": "2026-07-08T22:00:00Z",
+                    "freshness_state": "fresh",
+                    "source_url": "https://kubernetes.io/docs/",
+                },
+            }
+        ],
+        "result_chunk_ids": ["chunk-wrong"],
+        "result_count": 1,
+        "selected_pack_version_ids": [PACK_VERSION_ID],
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="case_id=public-docs-airflow-missing-top-result.*top-ranked expected source",
+    ):
+        serp_eval_contracts_module._public_docs_retrieval_golden_response_signature(
+            response=response,
+            case=case,
+            expected_pack_version_id=PACK_VERSION_ID,
+            generated_at="2026-07-08T22:00:00Z",
+        )
+
+
 def test_public_docs_retrieval_golden_cases_use_indexed_coverage_not_planned_frontier(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4474,8 +4588,7 @@ def test_public_docs_pipeline_runner_env_contract_survives_native_template_rende
         assert isinstance(ast.literal_eval(values[name]), str)
         assert ast.literal_eval(values[name]) == value
     expected_cli_spec_template = (
-        "{{ ti.xcom_pull(task_ids='dispatch_pipeline_seed_refresh_handoff')"
-        " | tojson | urlencode }}"
+        "{{ ti.xcom_pull(task_ids='dispatch_pipeline_seed_refresh_handoff') | tojson | urlencode }}"
     )
     assert values["ADAPSTORY_SERP_PIPELINE_CLI_SPEC_URLENCODED"] == expected_cli_spec_template
     assert "ADAPSTORY_SERP_PIPELINE_CLI_SPEC_JSON" not in values
