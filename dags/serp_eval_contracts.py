@@ -66,6 +66,7 @@ _PUBLIC_DOCS_FRESHNESS_STATUSES = frozenset(
 )
 _PUBLIC_DOCS_INDEX_MODES = frozenset({"evidence-only", "live"})
 _PUBLIC_DOCS_EMBEDDING_MODES = frozenset({"deterministic-dev", "live-gateway"})
+_PUBLIC_DOCS_LOCALE_PATH_SEGMENT = re.compile(r"^[a-z]{2}(?:-[a-z0-9]{2,8})?$", re.IGNORECASE)
 _PUBLIC_DOCS_DEFAULT_TENANT_ID = "00000000-0000-4000-a000-000000000001"
 _PUBLIC_DOCS_DEFAULT_PACK_ID = "00000000-0000-4000-a000-000000000201"
 _PUBLIC_DOCS_DEFAULT_PACK_VERSION_ID = "018f5e13-2d73-7a77-a052-8d1bcbf96541"
@@ -3132,6 +3133,40 @@ def _public_docs_search_request_for_golden_case(
     return request
 
 
+def _public_docs_source_uri_matches_expected_docs_root(
+    *, expected_source_uri: str, observed_source_uri: str
+) -> bool:
+    """Match the governed docs root while tolerating a presentation locale.
+
+    Public documentation sites commonly redirect a canonical root such as
+    ``/docs/`` to ``/ru/docs/`` or ``/en/docs/``.  A locale is presentation
+    metadata, whereas hostname and every remaining root path segment encode the
+    governed source identity (including a pinned breaking-change version).
+    """
+
+    expected = _public_docs_source_uri_identity(expected_source_uri)
+    observed = _public_docs_source_uri_identity(observed_source_uri)
+    if expected is None or observed is None:
+        return False
+    expected_scheme, expected_host, expected_path = expected
+    observed_scheme, observed_host, observed_path = observed
+    if (expected_scheme, expected_host) != (observed_scheme, observed_host):
+        return False
+    return observed_path[: len(expected_path)] == expected_path
+
+
+def _public_docs_source_uri_identity(source_uri: str) -> tuple[str, str, tuple[str, ...]] | None:
+    parsed = urlparse(source_uri)
+    scheme = parsed.scheme.lower()
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if scheme != "https" or not host:
+        return None
+    path = tuple(segment for segment in parsed.path.split("/") if segment)
+    if path and _PUBLIC_DOCS_LOCALE_PATH_SEGMENT.fullmatch(path[0]):
+        path = path[1:]
+    return scheme, host, path
+
+
 def _validate_public_docs_retrieval_golden_case(
     *,
     case: Mapping[str, Any],
@@ -3191,7 +3226,10 @@ def _public_docs_retrieval_golden_response_signature(
     citations = _required_object_list(response, "citations")
     if len(citations) < minimum_citations:
         fail("response has insufficient citations")
-    if not _required_str(citations[0], "source_uri").startswith(expected_source_uri_prefix):
+    if not _public_docs_source_uri_matches_expected_docs_root(
+        expected_source_uri=expected_source_uri_prefix,
+        observed_source_uri=_required_str(citations[0], "source_uri"),
+    ):
         fail(
             "top-ranked expected source is absent from citations: "
             f"expected_source_uri_prefix={expected_source_uri_prefix} "
@@ -3220,7 +3258,10 @@ def _public_docs_retrieval_golden_response_signature(
         fail("result cards must match result_count")
     first_card_provenance = _required_mapping(result_cards[0], "provenance")
     first_card_source_url = _required_str(first_card_provenance, "source_url")
-    if not first_card_source_url.startswith(expected_source_uri_prefix):
+    if not _public_docs_source_uri_matches_expected_docs_root(
+        expected_source_uri=expected_source_uri_prefix,
+        observed_source_uri=first_card_source_url,
+    ):
         fail(
             "top-ranked expected source is absent from result cards: "
             f"expected_source_uri_prefix={expected_source_uri_prefix} "

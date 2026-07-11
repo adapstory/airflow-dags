@@ -3612,6 +3612,64 @@ def test_public_docs_retrieval_golden_accepts_ranked_multi_source_results_from_a
     ]
 
 
+def test_public_docs_retrieval_golden_accepts_localized_url_for_same_docs_root() -> None:
+    expected_source = "https://helm.sh/docs/"
+    localized_source = "https://helm.sh/ru/docs/"
+    case = {
+        "case_id": "public-docs-helm-localized-docs-root",
+        "expected": {
+            "max_freshness_hours": 24,
+            "minimum_citations": 1,
+            "source_uri_prefix": expected_source,
+        },
+        "query": "Helm official documentation overview",
+        "seed_id": "helm-docs",
+    }
+    response = {
+        "citations": [
+            {
+                "chunk_id": "chunk-helm-ru",
+                "evidence_ref": "retrieval:golden",
+                "pack_version_id": PACK_VERSION_ID,
+                "source_uri": localized_source,
+            }
+        ],
+        "result_cards": [
+            {
+                "chunk_id": "chunk-helm-ru",
+                "provenance": {
+                    "crawl_time": "2026-07-08T22:00:00Z",
+                    "freshness_state": "fresh",
+                    "source_url": localized_source,
+                },
+            }
+        ],
+        "result_chunk_ids": ["chunk-helm-ru"],
+        "result_count": 1,
+        "selected_pack_version_ids": [PACK_VERSION_ID],
+    }
+
+    observed = serp_eval_contracts_module._public_docs_retrieval_golden_response_signature(
+        response=response,
+        case=case,
+        expected_pack_version_id=PACK_VERSION_ID,
+        generated_at="2026-07-08T22:00:00Z",
+    )
+
+    assert observed["citations"][0]["source_uri"] == localized_source
+
+
+def test_public_docs_retrieval_golden_source_identity_preserves_pinned_version() -> None:
+    assert serp_eval_contracts_module._public_docs_source_uri_matches_expected_docs_root(
+        expected_source_uri="https://docs.example.com/docs/v3/",
+        observed_source_uri="https://docs.example.com/ru/docs/v3/install/",
+    )
+    assert not serp_eval_contracts_module._public_docs_source_uri_matches_expected_docs_root(
+        expected_source_uri="https://docs.example.com/docs/v3/",
+        observed_source_uri="https://docs.example.com/ru/docs/v4/install/",
+    )
+
+
 def test_public_docs_retrieval_golden_rejects_missing_expected_top_ranked_source() -> None:
     expected_source = "https://airflow.apache.org/docs/"
     case = {
