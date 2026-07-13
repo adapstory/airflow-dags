@@ -27,6 +27,7 @@ class BenchmarkSuiteCatalogEntry:
     dataset_id: str
     dataset_revision: str
     dataset_source_url: str
+    dataset_artifact_url: str
     license_evidence_url: str
     adapter_source_url: str
     dataset_license_id: str
@@ -49,6 +50,10 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
             "https://huggingface.co/datasets/gorilla-llm/APIBench/raw/"
             "ac21e1892e634dfa25f8ad75f16cbdbfb0a5736d/README.md"
         ),
+        dataset_artifact_url=(
+            "https://huggingface.co/datasets/gorilla-llm/APIBench/resolve/"
+            "ac21e1892e634dfa25f8ad75f16cbdbfb0a5736d/huggingface_eval.json"
+        ),
         license_evidence_url=(
             "https://huggingface.co/api/datasets/gorilla-llm/APIBench/revision/"
             "ac21e1892e634dfa25f8ad75f16cbdbfb0a5736d"
@@ -67,6 +72,10 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         dataset_source_url=(
             "https://raw.githubusercontent.com/stanford-futuredata/ARES/"
             "c7c9018a755faf8347c4da415632bae1593ef104/README.md"
+        ),
+        dataset_artifact_url=(
+            "https://api.github.com/repos/stanford-futuredata/ARES/tarball/"
+            "c7c9018a755faf8347c4da415632bae1593ef104"
         ),
         license_evidence_url=(
             "https://raw.githubusercontent.com/stanford-futuredata/ARES/"
@@ -90,6 +99,9 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
             "https://huggingface.co/datasets/BeIR/scifact/raw/"
             "b3b5335604bf5ee3c4447671af975ea25143d4f5/README.md"
         ),
+        dataset_artifact_url=(
+            "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/scifact.zip"
+        ),
         license_evidence_url=(
             "https://huggingface.co/api/datasets/BeIR/scifact/revision/"
             "b3b5335604bf5ee3c4447671af975ea25143d4f5"
@@ -110,6 +122,10 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         dataset_source_url=(
             "https://raw.githubusercontent.com/code-rag-bench/code-rag-bench/"
             "f9e100ca9ed94b8f1983b356ae81966e30210cf4/README.md"
+        ),
+        dataset_artifact_url=(
+            "https://api.github.com/repos/code-rag-bench/code-rag-bench/tarball/"
+            "f9e100ca9ed94b8f1983b356ae81966e30210cf4"
         ),
         license_evidence_url=(
             "https://api.github.com/repos/code-rag-bench/code-rag-bench/commits/"
@@ -133,6 +149,11 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
             "https://huggingface.co/datasets/galileo-ai/ragbench/raw/"
             "97808f3e5fd16ede40bbff6c2949af8139b2eb7b/README.md"
         ),
+        dataset_artifact_url=(
+            "https://huggingface.co/datasets/galileo-ai/ragbench/resolve/"
+            "97808f3e5fd16ede40bbff6c2949af8139b2eb7b/"
+            "covidqa/test-00000-of-00001.parquet"
+        ),
         license_evidence_url=(
             "https://huggingface.co/api/datasets/galileo-ai/ragbench/revision/"
             "97808f3e5fd16ede40bbff6c2949af8139b2eb7b"
@@ -151,6 +172,10 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         dataset_source_url=(
             "https://raw.githubusercontent.com/evalplus/repoqa/"
             "ae876deb1365dbf5a15b0533723c8ed123eee586/README.md"
+        ),
+        dataset_artifact_url=(
+            "https://api.github.com/repos/evalplus/repoqa/tarball/"
+            "ae876deb1365dbf5a15b0533723c8ed123eee586"
         ),
         license_evidence_url=(
             "https://raw.githubusercontent.com/evalplus/repoqa/"
@@ -174,6 +199,11 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
             "https://huggingface.co/datasets/SWE-bench/SWE-bench_Verified/raw/"
             "91aa3ed51b709be6457e12d00300a6a596d4c6a3/README.md"
         ),
+        dataset_artifact_url=(
+            "https://huggingface.co/datasets/SWE-bench/SWE-bench_Verified/resolve/"
+            "91aa3ed51b709be6457e12d00300a6a596d4c6a3/"
+            "data/test-00000-of-00001.parquet"
+        ),
         license_evidence_url=(
             "https://huggingface.co/api/datasets/SWE-bench/SWE-bench_Verified/revision/"
             "91aa3ed51b709be6457e12d00300a6a596d4c6a3"
@@ -196,6 +226,10 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
             "https://raw.githubusercontent.com/datadotworld/cwd-benchmark-data/"
             "0b75eb62eaf7ea315a863cd7611ebc908149f7e0/README.md"
         ),
+        dataset_artifact_url=(
+            "https://api.github.com/repos/datadotworld/cwd-benchmark-data/tarball/"
+            "0b75eb62eaf7ea315a863cd7611ebc908149f7e0"
+        ),
         license_evidence_url=(
             "https://raw.githubusercontent.com/datadotworld/cwd-benchmark-data/"
             "0b75eb62eaf7ea315a863cd7611ebc908149f7e0/LICENSE.txt"
@@ -216,6 +250,10 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         dataset_source_url=(
             "https://raw.githubusercontent.com/kaengreg/rusBEIR/"
             "06c4607129ab801885f14ee721a4013d23795272/README.md"
+        ),
+        dataset_artifact_url=(
+            "https://api.github.com/repos/kaengreg/rusBEIR/tarball/"
+            "06c4607129ab801885f14ee721a4013d23795272"
         ),
         license_evidence_url=(
             "https://api.github.com/repos/kaengreg/rusBEIR/commits/"
@@ -240,20 +278,28 @@ def build_live_benchmark_catalog_evidence(
     fetch_bytes: Callable[[str], bytes],
     snapshot_bytes: Callable[[str, str, str, bytes], Mapping[str, object]] | None = None,
 ) -> dict[str, object]:
-    """Fetch and content-address the current upstream legal evidence for every suite.
+    """Fetch and content-address dataset bytes plus legal evidence for every suite.
 
-    Network failures are intentionally propagated: a stale or partial catalog cannot
-    be used as legal provenance for a scheduled evaluation.
+    Network failures are intentionally propagated: a stale, partial, or legal-only
+    catalog cannot be used as provenance for a scheduled evaluation.
     """
 
     _validate_observed_at(observed_at)
     suites: list[dict[str, object]] = []
     for entry in MANDATORY_BENCHMARK_SUITE_CATALOG:
         source_payload = _fetch(entry.dataset_source_url, fetch_bytes)
+        dataset_payload = _fetch(entry.dataset_artifact_url, fetch_bytes)
         license_payload = _fetch(entry.license_evidence_url, fetch_bytes)
         suites.append(
             {
                 "adapter_source_url": entry.adapter_source_url,
+                "dataset_snapshot": _snapshot(
+                    entry.suite_id,
+                    "dataset",
+                    entry.dataset_artifact_url,
+                    dataset_payload,
+                    snapshot_bytes,
+                ),
                 "dataset_id": entry.dataset_id,
                 "dataset_license_id": entry.dataset_license_id,
                 "dataset_revision": entry.dataset_revision,

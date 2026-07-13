@@ -457,7 +457,7 @@ def test_nightly_catalog_materialization_writes_all_live_legal_evidence_before_b
     assert result["catalogStatus"] == "ready"
     assert result["blockingSuiteIds"] == []
     assert written[-1]["artifact_path"] == plan.payload["artifact_paths"]["benchmark_catalog"]
-    assert len(written) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 2) + 1
+    assert len(written) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 3) + 1
 
 
 def test_build_nightly_regression_plan_accepts_s3_artifact_root_from_env(

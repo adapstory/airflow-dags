@@ -71,6 +71,10 @@ def test_catalog_covers_every_mandatory_suite_with_explicit_licensing_boundary()
         for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
     )
     assert all(
+        entry.dataset_artifact_url.startswith("https://")
+        for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+    )
+    assert all(
         entry.adapter_source_url.startswith("https://")
         for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
     )
@@ -89,6 +93,9 @@ def test_catalog_pins_each_upstream_dataset_to_an_immutable_revision() -> None:
     assert all(
         "/main/" not in entry.license_evidence_url for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
     )
+    assert all(
+        "/main/" not in entry.dataset_artifact_url for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+    )
 
 
 def test_live_catalog_allows_rights_unverified_internal_runs() -> None:
@@ -101,6 +108,12 @@ def test_live_catalog_allows_rights_unverified_internal_runs() -> None:
             entry.license_evidence_url: (
                 f"license:{entry.suite_id}:{entry.dataset_license_id}"
             ).encode()
+            for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+        }
+    )
+    payload_by_url.update(
+        {
+            entry.dataset_artifact_url: f"dataset-bytes:{entry.suite_id}".encode()
             for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
         }
     )
@@ -122,6 +135,7 @@ def test_live_catalog_allows_rights_unverified_internal_runs() -> None:
     assert [item["suite_id"] for item in suites] == list(MANDATORY_SERP_BENCHMARK_SUITES)
     assert all(item["source_snapshot"]["sha256"].startswith("sha256:") for item in suites)
     assert all(item["license_snapshot"]["sha256"].startswith("sha256:") for item in suites)
+    assert all(item["dataset_snapshot"]["sha256"].startswith("sha256:") for item in suites)
     assert {
         item["suite_id"] for item in suites if item["rights_status"] == "rights-unverified"
     } == {"CodeRAG-Bench", "SWE-bench Verified", "rusBEIR"}
@@ -139,6 +153,12 @@ def test_live_catalog_retains_immutable_source_and_license_snapshots() -> None:
     payload_by_url.update(
         {
             entry.license_evidence_url: f"license:{entry.suite_id}".encode()
+            for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+        }
+    )
+    payload_by_url.update(
+        {
+            entry.dataset_artifact_url: f"dataset-bytes:{entry.suite_id}".encode()
             for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
         }
     )
@@ -165,8 +185,9 @@ def test_live_catalog_retains_immutable_source_and_license_snapshots() -> None:
     )
     suites = cast(list[dict[str, Any]], evidence["suites"])
 
-    assert len(calls) == len(MANDATORY_SERP_BENCHMARK_SUITES) * 2
+    assert len(calls) == len(MANDATORY_SERP_BENCHMARK_SUITES) * 3
     beir = next(item for item in suites if item["suite_id"] == "BEIR")
+    assert beir["dataset_snapshot"]["immutable_artifact"]["objectLockMode"] == "COMPLIANCE"
     assert beir["source_snapshot"]["immutable_artifact"]["objectLockMode"] == "COMPLIANCE"
     assert beir["license_snapshot"]["immutable_artifact"]["artifactVersionId"] == (
         "version-BEIR-license"
