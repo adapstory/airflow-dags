@@ -269,9 +269,7 @@ def test_crawler_ignores_linked_media_assets_for_quarantine() -> None:
             root: CrawlResponse(
                 200,
                 {"content-type": "text/html"},
-                (
-                    f'<a href="{guide}">operations</a>' f'<a href="{missing_image}">diagram</a>'
-                ).encode(),
+                (f'<a href="{guide}">operations</a><a href="{missing_image}">diagram</a>').encode(),
             ),
             guide: CrawlResponse(200, {"content-type": "text/html"}, b"guide"),
         },

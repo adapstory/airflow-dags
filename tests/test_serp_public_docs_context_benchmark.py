@@ -53,8 +53,7 @@ def test_plan_binds_the_vendored_benchmark_to_internal_services_and_immutable_ev
     )
 
     assert plan["serp_url"] == (
-        "http://prod-serp-mcp-gateway-svc.env-prod.svc.cluster.local:8000"
-        "/api/serp/search/v1/query"
+        "http://prod-serp-mcp-gateway-svc.env-prod.svc.cluster.local:8000/api/serp/search/v1/query"
     )
     assert plan["bc21_base_url"] == (
         "http://prod-serp-context-platform-svc.env-prod.svc.cluster.local:8080"
