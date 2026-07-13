@@ -11,7 +11,7 @@ import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache, partial
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
@@ -120,6 +120,7 @@ _ARTIFACT_S3_REGION_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION"
 _ARTIFACT_S3_ACCESS_KEY_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ACCESS_KEY"
 _ARTIFACT_S3_SECRET_KEY_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_S3_SECRET_KEY"
 _ARTIFACT_S3_PATH_STYLE_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_S3_PATH_STYLE"
+_EVIDENCE_RETENTION_DAYS_ENV = "ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS"
 _RAW_SECRET_KEYS = frozenset(
     {
         "access_token",
@@ -330,8 +331,10 @@ def _validate_nightly_benchmark_suite_provenance(metadata: Mapping[str, Any]) ->
         "dataset_distribution_rule",
         "dataset_manifest_uri",
         "dataset_manifest_sha256",
+        "dataset_manifest_version_id",
         "execution_evidence_uri",
         "execution_evidence_sha256",
+        "execution_evidence_version_id",
         "reference_source_uri",
     ):
         _required_str(metadata, field_name)
@@ -399,13 +402,13 @@ def _validate_nightly_suite_metric_records(
 def build_nightly_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
     payload = _payload(conf)
     _reject_raw_secrets(payload)
+    if "benchmark_suite_inputs" in payload:
+        raise ValueError(
+            "benchmark_suite_inputs must be produced by canonical live adapters, not dag_run.conf"
+        )
     selected_suite_ids = tuple(_required_str_list(payload, "selected_suite_ids"))
     if selected_suite_ids != MANDATORY_SERP_BENCHMARK_SUITES:
         raise ValueError("selected_suite_ids must include every mandatory suite")
-    benchmark_suite_inputs = _required_nightly_benchmark_suite_inputs(
-        payload,
-        selected_suite_ids=selected_suite_ids,
-    )
     tenant_id = _required_uuid(payload, "tenant_id")
     pack_version_ids = tuple(_required_uuid_list(payload, "pack_version_ids"))
     generated_at = _required_datetime_string(payload, "generated_at")
@@ -418,9 +421,7 @@ def build_nightly_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
         generated_at,
         ",".join(str(value) for value in pack_version_ids),
         ",".join(selected_suite_ids),
-        sha256(
-            _canonical_json({"benchmark_suite_inputs": benchmark_suite_inputs}).encode("utf-8")
-        ).hexdigest(),
+        "serp-benchmark-catalog/v1",
     )
     plan_payload = {
         "actor_id": _required_str(payload, "actor_id"),
@@ -433,6 +434,7 @@ def build_nightly_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
                 ("suite_plan", "suite-plan.json"),
                 ("nightly_report", "nightly-report.json"),
                 ("benchmark_gate_export", "benchmark-gate-export.json"),
+                ("benchmark_catalog", "benchmark-catalog.json"),
                 (
                     "nightly_registry_submissions",
                     "nightly-registry-submissions.json",
@@ -441,7 +443,6 @@ def build_nightly_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
             ),
         ),
         "bc21_base_url": _required_bc21_base_url(payload),
-        "benchmark_suite_inputs": benchmark_suite_inputs,
         "dag_id": "serp_nightly_regression_suite",
         "generated_at": generated_at,
         "normalized_gate_floor": SERP_NORMALIZED_GATE_FLOOR,
@@ -455,6 +456,7 @@ def build_nightly_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
         "tasks": _tasks(
             (
                 "validate_nightly_regression_plan",
+                "materialize_live_benchmark_catalog",
                 "write_nightly_suite_plan",
                 "run_mandatory_benchmark_suites",
                 "build_c1_benchmark_gate_export",
@@ -1180,6 +1182,180 @@ def write_evidence_artifact(
         operation_id=operation_id,
         payload=payload,
     )
+
+
+def write_immutable_evidence_snapshot(
+    artifact_path: str,
+    *,
+    artifact_type: str,
+    operation_id: str,
+    payload: Mapping[str, Any],
+    s3_client: Any | None = None,
+) -> dict[str, Any]:
+    """Write one version-bound WORM evidence object to the dedicated S3 bucket.
+
+    Plain ``s3://bucket/key`` references are mutable logical names.  A benchmark
+    assertion must bind its content checksum to the specific S3 version created
+    under COMPLIANCE retention, otherwise a later overwrite could rewrite the
+    apparent provenance without changing the report path.
+    """
+
+    _reject_raw_secrets(payload)
+    payload_json = _canonical_json(payload)
+    return write_immutable_evidence_bytes_snapshot(
+        artifact_path,
+        artifact_type=artifact_type,
+        operation_id=operation_id,
+        payload=payload_json.encode("utf-8"),
+        content_type="application/json",
+        s3_client=s3_client,
+    )
+
+
+def write_immutable_evidence_bytes_snapshot(
+    artifact_path: str,
+    *,
+    artifact_type: str,
+    operation_id: str,
+    payload: bytes,
+    content_type: str,
+    s3_client: Any | None = None,
+) -> dict[str, Any]:
+    """Write opaque dataset or evidence bytes as a version-bound WORM object.
+
+    Dataset archives cannot be truthfully represented by a mutable URL or by a
+    digest stored only in a report.  This primitive binds the exact raw bytes to
+    the S3 ``VersionId`` created under COMPLIANCE retention; JSON evidence uses
+    the same path through :func:`write_immutable_evidence_snapshot`.
+    """
+
+    _require_non_empty("artifact_type", artifact_type)
+    _require_non_empty("operation_id", operation_id)
+    if not isinstance(payload, bytes) or not payload:
+        raise ValueError("immutable evidence payload must be non-empty bytes")
+    _require_non_empty("content_type", content_type)
+    artifact = _artifact_ref("artifact_path", artifact_path)
+    if artifact.kind != "s3":
+        raise ValueError("immutable evidence snapshots require an s3:// artifact path")
+    retention_days = _required_positive_int_env(_EVIDENCE_RETENTION_DAYS_ENV)
+    response = (s3_client or _s3_client()).put_object(
+        Bucket=_required_str_ref(artifact.bucket),
+        Key=_required_str_ref(artifact.key),
+        Body=payload,
+        ContentType=content_type,
+        ObjectLockMode="COMPLIANCE",
+        ObjectLockRetainUntilDate=datetime.now(UTC) + timedelta(days=retention_days),
+    )
+    if not isinstance(response, Mapping):
+        raise ValueError("immutable evidence S3 response is invalid")
+    version_id = response.get("VersionId")
+    if not isinstance(version_id, str) or not version_id.strip():
+        raise ValueError("immutable evidence S3 response is missing VersionId")
+    etag = response.get("ETag")
+    if not isinstance(etag, str) or not etag.strip():
+        raise ValueError("immutable evidence S3 response is missing ETag")
+    return {
+        "artifactETag": etag.strip('"'),
+        "artifactPath": artifact.location,
+        "artifactSha256": sha256(payload).hexdigest(),
+        "artifactType": artifact_type,
+        "artifactVersionId": version_id,
+        "contractVersion": _AIRFLOW_ARTIFACT_CONTRACT_VERSION,
+        "objectLockMode": "COMPLIANCE",
+        "operationId": operation_id,
+        "retentionDays": retention_days,
+        "status": "written",
+    }
+
+
+def materialize_live_benchmark_catalog_artifact(
+    plan_json: Mapping[str, Any] | str,
+    *,
+    fetch_bytes: Callable[[str], bytes] | None = None,
+    snapshot_writer: Callable[..., dict[str, Any]] | None = None,
+    snapshot_bytes_writer: Callable[..., dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Capture all upstream benchmark licensing evidence in immutable storage.
+
+    This is deliberately a separate D6 task.  The following suite-materializer
+    may only consume this version-bound snapshot; it must never trust values
+    supplied through ``dag_run.conf`` or a mutable dataset-card URL.
+    """
+
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != "serp_nightly_regression_suite":
+        raise ValueError("plan dag_id does not match nightly catalog materializer")
+    artifact_paths = _required_artifact_paths(plan, ("benchmark_catalog",))
+    from dags.serp_benchmark_catalog import build_live_benchmark_catalog_evidence
+
+    artifact_root_path = _artifact_parent_path(artifact_paths["benchmark_catalog"])
+    bytes_writer = (
+        write_immutable_evidence_bytes_snapshot
+        if snapshot_bytes_writer is None
+        else snapshot_bytes_writer
+    )
+
+    def snapshot_bytes(
+        suite_id: str,
+        evidence_type: str,
+        source_url: str,
+        payload: bytes,
+    ) -> dict[str, Any]:
+        artifact_key = sha256(f"{suite_id}:{evidence_type}:{source_url}".encode()).hexdigest()
+        return bytes_writer(
+            artifact_path=(
+                f"{artifact_root_path}/benchmark-catalog-inputs/{artifact_key}-{evidence_type}.bin"
+            ),
+            artifact_type=f"benchmark_catalog_{evidence_type}",
+            operation_id=_required_str(plan, "operation_id"),
+            payload=payload,
+            content_type="application/octet-stream",
+        )
+
+    evidence = build_live_benchmark_catalog_evidence(
+        observed_at=_required_datetime_string(plan, "generated_at"),
+        fetch_bytes=_fetch_https_bytes if fetch_bytes is None else fetch_bytes,
+        snapshot_bytes=snapshot_bytes,
+    )
+    writer = write_immutable_evidence_snapshot if snapshot_writer is None else snapshot_writer
+    snapshot = writer(
+        artifact_path=artifact_paths["benchmark_catalog"],
+        artifact_type="benchmark_catalog",
+        operation_id=_required_str(plan, "operation_id"),
+        payload=evidence,
+    )
+    if not isinstance(snapshot, Mapping):
+        raise ValueError("benchmark catalog snapshot writer returned an invalid result")
+    result = dict(snapshot)
+    result["catalogStatus"] = _required_str(evidence, "catalog_status")
+    result["blockingSuiteIds"] = [
+        _required_str(suite, "suite_id")
+        for suite in _required_object_list(evidence, "suites")
+        if _required_str(suite, "execution_status") != "ready"
+    ]
+    return result
+
+
+def _fetch_https_bytes(url: str) -> bytes:
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError("benchmark upstream evidence URLs must use https")
+    request = Request(
+        url,
+        headers={
+            "Accept": "application/json, text/plain, text/markdown;q=0.9, */*;q=0.1",
+            "User-Agent": "adapstory-serp-benchmark-catalog/1.0",
+        },
+    )
+    try:
+        with _open_public_docs_crawler_request(request, timeout=30) as response:
+            payload = response.read()
+    except (HTTPError, URLError, OSError) as exc:
+        raise ValueError(f"benchmark upstream evidence fetch failed: {url}") from exc
+    if not isinstance(payload, bytes) or not payload:
+        raise ValueError(f"benchmark upstream evidence fetch returned no bytes: {url}")
+    return payload
 
 
 def read_evidence_artifact(artifact_path: str, field_name: str) -> dict[str, Any]:
@@ -2059,12 +2235,29 @@ def _public_docs_crawl_state_payload(
 
 def write_nightly_suite_plan_artifact(
     plan_json: Mapping[str, Any] | str,
+    benchmark_catalog_snapshot: Mapping[str, Any] | str | None = None,
 ) -> dict[str, Any]:
     plan = _json_object(plan_json, "plan_json")
     _reject_raw_secrets(plan)
     if _required_str(plan, "dag_id") != "serp_nightly_regression_suite":
         raise ValueError("plan dag_id does not match nightly suite-plan writer")
-    artifact_paths = _required_artifact_paths(plan, ("suite_plan",))
+    if benchmark_catalog_snapshot is None:
+        raise ValueError("nightly suite plan requires the live benchmark catalog snapshot")
+    catalog_snapshot = _json_object(benchmark_catalog_snapshot, "benchmark_catalog_snapshot")
+    artifact_paths = _required_artifact_paths(plan, ("suite_plan", "benchmark_catalog"))
+    if _required_str(catalog_snapshot, "artifactPath") != artifact_paths["benchmark_catalog"]:
+        raise ValueError("benchmark catalog snapshot must match the plan artifact path")
+    if _required_str(catalog_snapshot, "objectLockMode") != "COMPLIANCE":
+        raise ValueError("benchmark catalog snapshot must use COMPLIANCE object lock")
+    if not _required_str(catalog_snapshot, "artifactVersionId"):
+        raise ValueError("benchmark catalog snapshot must include an S3 object version")
+    catalog_status = _required_str(catalog_snapshot, "catalogStatus")
+    if catalog_status != "ready":
+        blocking_suite_ids = _required_str_list(catalog_snapshot, "blockingSuiteIds")
+        raise ValueError(
+            "benchmark catalog blocks D6 until dataset licenses are attested: "
+            + ", ".join(blocking_suite_ids)
+        )
     payload = _nightly_suite_plan_payload(plan)
     artifact_path = artifact_paths["suite_plan"]
     _write_json_artifact(artifact_path, payload)
@@ -6559,6 +6752,17 @@ def _required_env(name: str) -> str:
     value = os.environ.get(name)
     if not value or not value.strip():
         raise ValueError(f"{name} is required for s3:// artifact paths")
+    return value
+
+
+def _required_positive_int_env(name: str) -> int:
+    raw_value = _required_env(name)
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer") from exc
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
     return value
 
 

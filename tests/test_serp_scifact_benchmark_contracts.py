@@ -1,0 +1,197 @@
+from __future__ import annotations
+
+from hashlib import sha256
+
+from dags.serp_scifact_benchmark_contracts import (
+    SCIFACT_ARCHIVE_URL,
+    activate_scifact_benchmark_pack,
+    build_scifact_benchmark_plan,
+    materialize_scifact_archive,
+    prepare_scifact_benchmark_registry,
+)
+
+
+def test_scifact_plan_binds_a_dedicated_benchmark_pack_to_versioned_evidence() -> None:
+    plan = build_scifact_benchmark_plan(
+        {
+            "artifact_root_path": "s3://airflow-serp-evidence/serp-evals",
+            "generated_at": "2026-07-13T12:00:00Z",
+        },
+        bc21_base_url="http://prod-serp-context-platform-svc.env-prod.svc.cluster.local:8080",
+    )
+
+    assert plan["dag_id"] == "serp_beir_scifact_live_benchmark"
+    assert plan["archive_source_url"] == SCIFACT_ARCHIVE_URL
+    assert plan["pack_slug"] == "benchmark-beir-scifact"
+    assert plan["workflow_scope"] == {
+        "tenant_mode": "benchmark",
+        "tenant_scope": "private",
+        "workflow_code": "search_context",
+    }
+    assert plan["artifact_paths"]["archive"].endswith("/scifact.zip")
+    assert plan["artifact_paths"]["index_evidence"].endswith("/scifact-indexing.json")
+    assert plan["artifact_paths"]["run_evidence"].endswith("/scifact-live-run.json")
+
+
+def test_scifact_archive_materialization_binds_bytes_and_s3_version_before_indexing() -> None:
+    plan = build_scifact_benchmark_plan(
+        {
+            "artifact_root_path": "s3://airflow-serp-evidence/serp-evals",
+            "generated_at": "2026-07-13T12:00:00Z",
+        },
+        bc21_base_url="http://prod-serp-context-platform-svc.env-prod.svc.cluster.local:8080",
+    )
+    archive = b"PK\\x03\\x04scifact"
+    calls: list[dict[str, object]] = []
+
+    def snapshot_writer(**kwargs: object) -> dict[str, str]:
+        calls.append(kwargs)
+        return {
+            "artifactETag": "archive-etag",
+            "artifactPath": str(kwargs["artifact_path"]),
+            "artifactSha256": sha256(archive).hexdigest(),
+            "artifactType": "beir_scifact_archive",
+            "artifactVersionId": "version-scifact",
+            "objectLockMode": "COMPLIANCE",
+        }
+
+    snapshot = materialize_scifact_archive(
+        plan,
+        fetch_bytes=lambda url: archive if url == SCIFACT_ARCHIVE_URL else b"",
+        snapshot_writer=snapshot_writer,
+    )
+
+    assert snapshot["archiveSha256"] == sha256(archive).hexdigest()
+    assert snapshot["archiveVersionId"] == "version-scifact"
+    assert snapshot["objectLockMode"] == "COMPLIANCE"
+    assert calls[0]["artifact_path"] == plan["artifact_paths"]["archive"]
+    assert calls[0]["content_type"] == "application/zip"
+
+
+def test_scifact_registry_setup_creates_or_reuses_only_a_dedicated_pack_and_source() -> None:
+    plan = build_scifact_benchmark_plan(
+        {
+            "artifact_root_path": "s3://airflow-serp-evidence/serp-evals",
+            "generated_at": "2026-07-13T12:00:00Z",
+        },
+        bc21_base_url="http://prod-serp-context-platform-svc.env-prod.svc.cluster.local:8080",
+    )
+    archive_snapshot = {
+        "archiveETag": "archive-etag",
+        "archivePath": plan["artifact_paths"]["archive"],
+        "archiveSha256": "a" * 64,
+        "archiveVersionId": "version-scifact",
+        "objectLockMode": "COMPLIANCE",
+        "sourceUrl": SCIFACT_ARCHIVE_URL,
+    }
+    submissions: list[dict[str, object]] = []
+
+    def post_json(
+        _base_url: str,
+        endpoint: str,
+        *,
+        body: dict[str, object],
+        headers: dict[str, str],
+        error_label: str,
+    ) -> dict[str, str]:
+        submissions.append(
+            {"body": body, "endpoint": endpoint, "error_label": error_label, "headers": headers}
+        )
+        if endpoint == "/api/bc-21/serp/v1/sources":
+            return {"resourceId": "00000000-0000-4000-a000-000000000111"}
+        return {"resourceId": "00000000-0000-4000-a000-000000000222"}
+
+    registry = prepare_scifact_benchmark_registry(
+        plan,
+        archive_snapshot,
+        list_resources=lambda _kind: [],
+        post_json=post_json,
+    )
+
+    assert registry["source_id"] == "00000000-0000-4000-a000-000000000111"
+    assert registry["pack_id"] == "00000000-0000-4000-a000-000000000222"
+    assert registry["pack_version_id"]
+    assert registry["pipeline_run_id"]
+    assert registry["workflow_scope"] == plan["workflow_scope"]
+    assert [submission["endpoint"] for submission in submissions] == [
+        "/api/bc-21/serp/v1/sources",
+        "/api/bc-21/serp/v1/packs",
+    ]
+    assert submissions[0]["body"]["sourceType"] == "website"
+    assert submissions[0]["body"]["dataClass"] == "PUBLIC"
+    assert submissions[1]["body"]["slug"] == "benchmark-beir-scifact"
+
+
+def test_scifact_pack_activation_requires_index_receipt_and_records_selection() -> None:
+    plan = build_scifact_benchmark_plan(
+        {
+            "artifact_root_path": "s3://airflow-serp-evidence/serp-evals",
+            "generated_at": "2026-07-13T12:00:00Z",
+        },
+        bc21_base_url="http://prod-serp-context-platform-svc.env-prod.svc.cluster.local:8080",
+    )
+    registry = {
+        "archive_sha256": "a" * 64,
+        "pack_id": "00000000-0000-4000-a000-000000000222",
+        "pack_version_id": "00000000-0000-4000-a000-000000000333",
+        "tenant_id": plan["tenant_id"],
+        "workflow_scope": plan["workflow_scope"],
+    }
+    pipeline_receipt = {
+        "response": {
+            "evidenceBundleId": "00000000-0000-4000-a000-000000000444",
+            "evidenceSealHash": "sha256:" + "b" * 64,
+            "resourceId": registry["pack_id"],
+            "runId": "00000000-0000-4000-a000-000000000555",
+            "tenantId": plan["tenant_id"],
+        },
+        "status": "accepted",
+    }
+    endpoints: list[str] = []
+
+    def post_json(
+        _base_url: str,
+        endpoint: str,
+        *,
+        body: dict[str, object],
+        headers: dict[str, str],
+        error_label: str,
+    ) -> dict[str, str]:
+        endpoints.append(endpoint)
+        if endpoint.endswith("autonomous-approval-decisions"):
+            return {
+                "approvalDecision": "approve",
+                "approvalState": "approved",
+                "autonomousRunId": "00000000-0000-4000-a000-000000000666",
+                "packId": registry["pack_id"],
+                "policyDecision": "approved",
+                "tenantId": plan["tenant_id"],
+            }
+        if endpoint.endswith("publish-activations"):
+            return {
+                "evidenceBundleId": "00000000-0000-4000-a000-000000000444",
+                "packId": registry["pack_id"],
+                "packVersionId": registry["pack_version_id"],
+                "tenantId": plan["tenant_id"],
+            }
+        return {
+            "evidenceBundleId": "00000000-0000-4000-a000-000000000444",
+            "packId": registry["pack_id"],
+            "selectionState": "active",
+            "tenantId": plan["tenant_id"],
+        }
+
+    result = activate_scifact_benchmark_pack(
+        plan,
+        registry,
+        pipeline_receipt,
+        post_json=post_json,
+    )
+
+    assert endpoints == [
+        "/api/bc-21/serp/v1/governance/autonomous-approval-decisions",
+        f"/api/bc-21/serp/v1/packs/{registry['pack_id']}/publish-activations",
+        "/api/bc-21/serp/v1/packs/workflow-selections",
+    ]
+    assert result["active_pack_version_id"] == registry["pack_version_id"]
+    assert result["workflow_selection"]["selectionState"] == "active"

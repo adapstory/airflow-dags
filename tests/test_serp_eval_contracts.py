@@ -51,6 +51,7 @@ from dags.serp_eval_contracts import (
     execute_gateway_cli_spec,
     execute_pipeline_cli_spec,
     load_public_docs_crawl_state_conf,
+    materialize_live_benchmark_catalog_artifact,
     submit_public_docs_bc21_pipeline_state_artifact,
     write_airflow_plan_artifact,
     write_improvement_spec_artifact,
@@ -290,6 +291,9 @@ def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:
             "/var/opt/adapstory/serp-evals/"
             f"{plan.payload['operation_id']}/benchmark-gate-export.json"
         ),
+        "benchmark_catalog": (
+            f"/var/opt/adapstory/serp-evals/{plan.payload['operation_id']}/benchmark-catalog.json"
+        ),
         "suite_plan": (
             f"/var/opt/adapstory/serp-evals/{plan.payload['operation_id']}/suite-plan.json"
         ),
@@ -297,6 +301,7 @@ def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:
     assert plan.payload["selected_suite_ids"] == list(MANDATORY_SERP_BENCHMARK_SUITES)
     assert [task["task_id"] for task in plan.payload["tasks"]] == [
         "validate_nightly_regression_plan",
+        "materialize_live_benchmark_catalog",
         "write_nightly_suite_plan",
         "run_mandatory_benchmark_suites",
         "build_c1_benchmark_gate_export",
@@ -323,49 +328,56 @@ def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:
         build_nightly_regression_plan(unsafe_bc21_base_url)
 
 
-def test_nightly_regression_plan_requires_executable_suite_inputs() -> None:
+def test_nightly_regression_plan_rejects_caller_supplied_suite_inputs() -> None:
     conf = _nightly_conf()
-    conf.pop("benchmark_suite_inputs")
+    conf["benchmark_suite_inputs"] = [{"synthetic": "must-not-reach-d6"}]
 
-    with pytest.raises(ValueError, match="benchmark_suite_inputs"):
+    with pytest.raises(ValueError, match="must be produced by canonical live adapters"):
         build_nightly_regression_plan(conf)
 
 
-def test_nightly_regression_plan_uses_policy_declared_metric_families() -> None:
-    conf = _nightly_conf()
-    beir = _nightly_benchmark_suite_input("BEIR", metric_families=("retrieval",))
-    metric_compatibility = _nightly_metric_compatibility(beir_metric_families=("retrieval",))
-    suite_inputs = [
-        beir if suite_id == "BEIR" else _nightly_benchmark_suite_input(suite_id)
-        for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
-    ]
-    for suite in suite_inputs:
-        suite["metric_compatibility"] = metric_compatibility
-    conf["benchmark_suite_inputs"] = suite_inputs
+def test_nightly_catalog_materialization_writes_all_live_legal_evidence_before_blocking() -> None:
+    plan = build_nightly_regression_plan(
+        {**_nightly_conf(), "artifact_root_path": "s3://airflow-serp-evidence/serp-evals"}
+    )
+    written: list[dict[str, object]] = []
 
-    plan = build_nightly_regression_plan(conf)
-    suite_plan = serp_eval_contracts_module._nightly_suite_plan_payload(plan.payload)
-    report = serp_eval_contracts_module._nightly_report_from_suite_plan_payload(suite_plan)
+    def snapshot_writer(**kwargs: object) -> dict[str, object]:
+        written.append(kwargs)
+        return {
+            "artifactPath": kwargs["artifact_path"],
+            "artifactSha256": "f" * 64,
+            "artifactType": kwargs["artifact_type"],
+            "artifactVersionId": "version-20260713",
+            "objectLockMode": "COMPLIANCE",
+            "operationId": kwargs["operation_id"],
+            "status": "written",
+        }
 
-    beir_result = next(item for item in report["suite_results"] if item["suite_id"] == "BEIR")
-    assert beir_result["metric_count"] == 1
-    assert {item["metric_family"] for item in beir_result["metric_results"]} == {"retrieval"}
+    def snapshot_bytes_writer(**kwargs: object) -> dict[str, object]:
+        written.append(kwargs)
+        payload = cast(bytes, kwargs["payload"])
+        return {
+            "artifactPath": kwargs["artifact_path"],
+            "artifactSha256": sha256(payload).hexdigest(),
+            "artifactType": kwargs["artifact_type"],
+            "artifactVersionId": "version-20260713",
+            "objectLockMode": "COMPLIANCE",
+            "operationId": kwargs["operation_id"],
+            "status": "written",
+        }
 
+    result = materialize_live_benchmark_catalog_artifact(
+        plan.to_canonical_json(),
+        fetch_bytes=lambda url: url.encode("utf-8"),
+        snapshot_writer=snapshot_writer,
+        snapshot_bytes_writer=snapshot_bytes_writer,
+    )
 
-def test_nightly_regression_plan_rejects_metric_family_policy_mismatch() -> None:
-    conf = _nightly_conf()
-    beir = _nightly_benchmark_suite_input("BEIR")
-    metric_compatibility = _nightly_metric_compatibility(beir_metric_families=("retrieval",))
-    suite_inputs = [
-        beir if suite_id == "BEIR" else _nightly_benchmark_suite_input(suite_id)
-        for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
-    ]
-    for suite in suite_inputs:
-        suite["metric_compatibility"] = metric_compatibility
-    conf["benchmark_suite_inputs"] = suite_inputs
-
-    with pytest.raises(ValueError, match="references must exactly match metric_compatibility"):
-        build_nightly_regression_plan(conf)
+    assert result["catalogStatus"] == "blocked"
+    assert result["blockingSuiteIds"] == ["CodeRAG-Bench", "SWE-bench Verified", "rusBEIR"]
+    assert written[-1]["artifact_path"] == plan.payload["artifact_paths"]["benchmark_catalog"]
+    assert len(written) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 2) + 1
 
 
 def test_build_nightly_regression_plan_accepts_s3_artifact_root_from_env(
@@ -500,7 +512,7 @@ def test_build_nightly_gateway_cli_specs_are_file_based_and_deterministic() -> N
     assert submit["stdout_path"] == plan.payload["artifact_paths"]["nightly_registry_receipts"]
 
 
-def test_nightly_d6_airflow_path_writes_suite_plan_for_gateway_runner(
+def test_nightly_d6_airflow_path_blocks_before_gateway_runner_when_licenses_are_unattested(
     tmp_path: Path,
 ) -> None:
     conf = _nightly_conf()
@@ -508,20 +520,16 @@ def test_nightly_d6_airflow_path_writes_suite_plan_for_gateway_runner(
     plan = build_nightly_regression_plan(conf)
     plan_json = write_airflow_plan_artifact(plan)
 
-    suite_plan_artifact = write_nightly_suite_plan_artifact(json.loads(plan_json))
+    catalog_snapshot = {
+        "artifactPath": plan.payload["artifact_paths"]["benchmark_catalog"],
+        "artifactVersionId": "version-20260713",
+        "blockingSuiteIds": ["CodeRAG-Bench", "SWE-bench Verified", "rusBEIR"],
+        "catalogStatus": "blocked",
+        "objectLockMode": "COMPLIANCE",
+    }
 
-    suite_plan_path = Path(str(suite_plan_artifact["artifactPath"]))
-    assert suite_plan_path.exists()
-    suite_plan = suite_plan_artifact["payload"]
-    assert suite_plan["contract_version"] == "2026.07.2"
-    assert suite_plan["schedule_id"] == "serp_nightly_regression_suite"
-    assert suite_plan["selected_suite_ids"] == list(MANDATORY_SERP_BENCHMARK_SUITES)
-    assert [suite["suite_id"] for suite in suite_plan["suites"]] == list(
-        MANDATORY_SERP_BENCHMARK_SUITES
-    )
-    assert suite_plan["suites"] == conf["benchmark_suite_inputs"]
-    assert all(len(suite["references"]) == 4 for suite in suite_plan["suites"])
-    assert all(len(suite["metric_observations"]) == 3 for suite in suite_plan["suites"])
+    with pytest.raises(ValueError, match="benchmark catalog blocks D6"):
+        write_nightly_suite_plan_artifact(json.loads(plan_json), catalog_snapshot)
 
 
 def test_build_online_eval_rollup_plan_materializes_d7_contract(tmp_path: Path) -> None:
@@ -4350,6 +4358,7 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
             "serp_nightly_regression_suite",
             [
                 "validate_nightly_regression_plan",
+                "materialize_live_benchmark_catalog",
                 "write_nightly_suite_plan",
                 "run_mandatory_benchmark_suites",
                 "build_c1_benchmark_gate_export",
@@ -4462,6 +4471,7 @@ def test_serp_nightly_dag_uses_live_gateway_cli_for_d6_path() -> None:
     source = (REPO_ROOT / "dags" / "serp_nightly_regression_suite.py").read_text(encoding="utf-8")
 
     assert "write_nightly_suite_plan_artifact" in source
+    assert "materialize_live_benchmark_catalog_artifact" in source
     assert "execute_gateway_cli_spec" in source
     assert "build_nightly_runner_cli_spec" in source
     assert "build_nightly_benchmark_export_cli_spec" in source
@@ -4989,9 +4999,6 @@ def _nightly_conf() -> dict[str, object]:
         "registry_resource_type": "workflow",
         "reranker_profile_version": "reranker@2026.07.1",
         "retrieval_profile_version": "hybrid@2026.07.1",
-        "benchmark_suite_inputs": [
-            _nightly_benchmark_suite_input(suite_id) for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
-        ],
         "selected_suite_ids": list(MANDATORY_SERP_BENCHMARK_SUITES),
         "tenant_id": TENANT_ID,
     }
@@ -5059,11 +5066,13 @@ def _nightly_benchmark_suite_input(
             "dataset_license_id": "Apache-2.0",
             "dataset_distribution_rule": "snippets-only",
             "dataset_manifest_sha256": "sha256:" + "c" * 64,
+            "dataset_manifest_version_id": "fixture-dataset-version",
             "dataset_manifest_uri": (
                 "s3://airflow-serp-artifacts/benchmark-fixtures/"
                 f"{suite_id.casefold().replace(' ', '-')}/dataset-manifest.json"
             ),
             "execution_evidence_sha256": "sha256:" + "d" * 64,
+            "execution_evidence_version_id": "fixture-execution-version",
             "execution_evidence_uri": (
                 "s3://airflow-serp-artifacts/benchmark-fixtures/"
                 f"{suite_id.casefold().replace(' ', '-')}/execution-evidence.json"

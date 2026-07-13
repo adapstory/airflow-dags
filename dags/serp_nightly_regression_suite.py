@@ -14,6 +14,7 @@ from dags.serp_eval_contracts import (
     build_nightly_runner_cli_spec,
     execute_gateway_cli_spec,
     governance_notification_pending,
+    materialize_live_benchmark_catalog_artifact,
     write_airflow_plan_artifact,
     write_nightly_suite_plan_artifact,
 )
@@ -63,10 +64,20 @@ validate_plan = PythonOperator(
     dag=dag,
 )
 
+materialize_catalog = PythonOperator(
+    task_id="materialize_live_benchmark_catalog",
+    python_callable=materialize_live_benchmark_catalog_artifact,
+    op_args=["{{ ti.xcom_pull(task_ids='validate_nightly_regression_plan') }}"],
+    dag=dag,
+)
+
 write_suite_plan = PythonOperator(
     task_id="write_nightly_suite_plan",
     python_callable=write_nightly_suite_plan_artifact,
-    op_args=["{{ ti.xcom_pull(task_ids='validate_nightly_regression_plan') }}"],
+    op_args=[
+        "{{ ti.xcom_pull(task_ids='validate_nightly_regression_plan') }}",
+        "{{ ti.xcom_pull(task_ids='materialize_live_benchmark_catalog') }}",
+    ],
     dag=dag,
 )
 
@@ -107,6 +118,7 @@ notify_governance = PythonOperator(
 
 (
     validate_plan
+    >> materialize_catalog
     >> write_suite_plan
     >> run_suites
     >> build_benchmark_export

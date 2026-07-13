@@ -71,6 +71,19 @@ def current_airflow_runtime_image() -> str:
 
 
 def pipeline_runner_env_vars(cli_spec_task_id: str) -> list[k8s.V1EnvVar]:
+    values = pipeline_runner_runtime_env_vars()
+    values.append(
+        k8s.V1EnvVar(
+            name="ADAPSTORY_SERP_PIPELINE_CLI_SPEC_URLENCODED",
+            value=("{{ ti.xcom_pull(task_ids='" + cli_spec_task_id + "') | tojson | urlencode }}"),
+        )
+    )
+    return values
+
+
+def pipeline_runner_runtime_env_vars() -> list[k8s.V1EnvVar]:
+    """Return the shared non-DAG-specific runtime and secret environment contract."""
+
     values: list[k8s.V1EnvVar] = []
     for name in _PIPELINE_RUNNER_ENV_NAMES:
         value = os.environ.get(name)
@@ -104,12 +117,6 @@ def pipeline_runner_env_vars(cli_spec_task_id: str) -> list[k8s.V1EnvVar]:
                         name="airflow-serp-neo4j",
                         key="neo4j-password",
                     )
-                ),
-            ),
-            k8s.V1EnvVar(
-                name="ADAPSTORY_SERP_PIPELINE_CLI_SPEC_URLENCODED",
-                value=(
-                    "{{ ti.xcom_pull(task_ids='" + cli_spec_task_id + "') | tojson | urlencode }}"
                 ),
             ),
         )
