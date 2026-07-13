@@ -489,8 +489,10 @@ def test_catalog_materializer_accepts_dedicated_dataset_evidence_plan() -> None:
         snapshot_bytes_writer=snapshot_bytes_writer,
     )
 
-    assert result["catalogStatus"] == "ready"
-    assert result["blockingSuiteIds"] == []
+    assert result["catalogStatus"] == "blocked"
+    assert result["blockingSuiteIds"] == [
+        suite_id for suite_id in MANDATORY_SERP_BENCHMARK_SUITES if suite_id != "BEIR"
+    ]
     assert len(written) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 3) + 1
 
 
@@ -540,8 +542,10 @@ def test_nightly_catalog_materialization_writes_all_live_legal_evidence_before_b
         snapshot_bytes_writer=snapshot_bytes_writer,
     )
 
-    assert result["catalogStatus"] == "ready"
-    assert result["blockingSuiteIds"] == []
+    assert result["catalogStatus"] == "blocked"
+    assert result["blockingSuiteIds"] == [
+        suite_id for suite_id in MANDATORY_SERP_BENCHMARK_SUITES if suite_id != "BEIR"
+    ]
     assert written[-1]["artifact_path"] == plan.payload["artifact_paths"]["benchmark_catalog"]
     assert len(written) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 3) + 1
 

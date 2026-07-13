@@ -132,7 +132,7 @@ def test_live_catalog_allows_rights_unverified_internal_runs() -> None:
     suites = cast(list[dict[str, Any]], evidence["suites"])
 
     assert evidence["contract_version"] == BENCHMARK_CATALOG_CONTRACT_VERSION
-    assert evidence["catalog_status"] == "ready"
+    assert evidence["catalog_status"] == "blocked"
     assert [item["suite_id"] for item in suites] == list(MANDATORY_SERP_BENCHMARK_SUITES)
     assert all(item["source_snapshot"]["sha256"].startswith("sha256:") for item in suites)
     assert all(item["license_snapshot"]["sha256"].startswith("sha256:") for item in suites)
@@ -140,10 +140,26 @@ def test_live_catalog_allows_rights_unverified_internal_runs() -> None:
     assert {
         item["suite_id"] for item in suites if item["rights_status"] == "rights-unverified"
     } == {"CodeRAG-Bench", "SWE-bench Verified", "rusBEIR"}
-    assert all(item["execution_status"] == "ready" for item in suites)
+    assert {item["suite_id"] for item in suites if item["execution_status"] == "ready"} == {"BEIR"}
     assert {
         item["distribution_rule"] for item in suites if item["rights_status"] == "rights-unverified"
     } == {"internal-only-no-redistribution"}
+
+
+def test_catalog_does_not_mark_a_dataset_snapshot_as_a_runnable_adapter() -> None:
+    evidence = build_live_benchmark_catalog_evidence(
+        observed_at="2026-07-13T00:00:00Z",
+        fetch_bytes=lambda _url: b"upstream-bytes",
+    )
+    suites = cast(list[dict[str, Any]], evidence["suites"])
+
+    assert evidence["catalog_status"] == "blocked"
+    assert {item["suite_id"] for item in suites if item["execution_status"] == "ready"} == {"BEIR"}
+    assert all(
+        item["execution_status"] == "adapter-unavailable"
+        for item in suites
+        if item["suite_id"] != "BEIR"
+    )
 
 
 def test_live_catalog_retains_immutable_source_and_license_snapshots() -> None:

@@ -17,6 +17,7 @@ from dags.serp_eval_contracts import MANDATORY_SERP_BENCHMARK_SUITES
 
 BENCHMARK_CATALOG_CONTRACT_VERSION = "serp-benchmark-catalog/v2"
 _READY = "ready"
+_ADAPTER_UNAVAILABLE = "adapter-unavailable"
 _RIGHTS_ATTESTED = "attested"
 _RIGHTS_UNVERIFIED = "rights-unverified"
 
@@ -61,7 +62,7 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         adapter_source_url="https://github.com/adapstory/airflow-dags",
         dataset_license_id="Apache-2.0",
         distribution_rule="public-share-allowed",
-        execution_status=_READY,
+        execution_status=_ADAPTER_UNAVAILABLE,
         rights_status=_RIGHTS_ATTESTED,
         legal_boundary="The Apache-2.0 dataset card governs the captured APIBench snapshot.",
     ),
@@ -84,7 +85,7 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         adapter_source_url="https://github.com/adapstory/airflow-dags",
         dataset_license_id="Apache-2.0",
         distribution_rule="internal-only",
-        execution_status=_READY,
+        execution_status=_ADAPTER_UNAVAILABLE,
         rights_status=_RIGHTS_ATTESTED,
         legal_boundary=(
             "ARES is a licensed synthetic-data generator; every generated run must also "
@@ -134,7 +135,7 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         adapter_source_url="https://github.com/adapstory/airflow-dags",
         dataset_license_id="LicenseRef-CodeRAG-Bench-Rights-Unverified",
         distribution_rule="internal-only-no-redistribution",
-        execution_status=_READY,
+        execution_status=_ADAPTER_UNAVAILABLE,
         rights_status=_RIGHTS_UNVERIFIED,
         legal_boundary=(
             "Rights are unverified: execution is internal-only, evidence is retained, and "
@@ -161,7 +162,7 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         adapter_source_url="https://github.com/adapstory/airflow-dags",
         dataset_license_id="CC-BY-4.0",
         distribution_rule="public-share-allowed",
-        execution_status=_READY,
+        execution_status=_ADAPTER_UNAVAILABLE,
         rights_status=_RIGHTS_ATTESTED,
         legal_boundary="RAGBench dataset card's CC-BY-4.0 terms apply to the retained snapshot.",
     ),
@@ -184,7 +185,7 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         adapter_source_url="https://github.com/adapstory/airflow-dags",
         dataset_license_id="Apache-2.0",
         distribution_rule="internal-only",
-        execution_status=_READY,
+        execution_status=_ADAPTER_UNAVAILABLE,
         rights_status=_RIGHTS_ATTESTED,
         legal_boundary=(
             "The RepoQA project is Apache-2.0; source repositories selected by a run must "
@@ -211,7 +212,7 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         adapter_source_url="https://github.com/adapstory/airflow-dags",
         dataset_license_id="LicenseRef-SWE-Bench-Verified-Rights-Unverified",
         distribution_rule="internal-only-no-redistribution",
-        execution_status=_READY,
+        execution_status=_ADAPTER_UNAVAILABLE,
         rights_status=_RIGHTS_UNVERIFIED,
         legal_boundary=(
             "Rights are unverified: the MIT harness license does not license the instances; "
@@ -237,7 +238,7 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         adapter_source_url="https://github.com/adapstory/airflow-dags",
         dataset_license_id="Apache-2.0",
         distribution_rule="public-share-allowed",
-        execution_status=_READY,
+        execution_status=_ADAPTER_UNAVAILABLE,
         rights_status=_RIGHTS_ATTESTED,
         legal_boundary=(
             "The repository's Apache-2.0 license governs the captured CWD dataset snapshot."
@@ -262,7 +263,7 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         adapter_source_url="https://github.com/adapstory/airflow-dags",
         dataset_license_id="LicenseRef-rusBEIR-Rights-Unverified",
         distribution_rule="internal-only-no-redistribution",
-        execution_status=_READY,
+        execution_status=_ADAPTER_UNAVAILABLE,
         rights_status=_RIGHTS_UNVERIFIED,
         legal_boundary=(
             "Rights are unverified: execution is internal-only, evidence is retained, and "
@@ -325,7 +326,11 @@ def build_live_benchmark_catalog_evidence(
             }
         )
     return {
-        "catalog_status": "ready",
+        "catalog_status": (
+            "ready"
+            if all(entry.execution_status == _READY for entry in MANDATORY_BENCHMARK_SUITE_CATALOG)
+            else "blocked"
+        ),
         "contract_version": BENCHMARK_CATALOG_CONTRACT_VERSION,
         "observed_at": observed_at,
         "suites": suites,
