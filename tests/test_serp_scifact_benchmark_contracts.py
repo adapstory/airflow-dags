@@ -85,6 +85,50 @@ def test_scifact_kubernetes_tasks_use_separate_acquisition_and_evaluation_identi
     assert "service_account_name=SCIFACT_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT" in source
 
 
+def test_scifact_workloads_mount_projected_service_account_tokens() -> None:
+    source = (
+        Path(__file__).resolve().parents[1] / "dags" / "serp_beir_scifact_live_benchmark.py"
+    ).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    executor_config = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "V1PodSpec"
+    )
+    executor_automount = next(
+        keyword.value
+        for keyword in executor_config.keywords
+        if keyword.arg == "automount_service_account_token"
+    )
+    assert isinstance(executor_automount, ast.Constant)
+    assert executor_automount.value is True
+
+    kubernetes_tasks = {
+        next(
+            keyword.value.value
+            for keyword in call.keywords
+            if keyword.arg == "task_id"
+            and isinstance(keyword.value, ast.Constant)
+            and isinstance(keyword.value.value, str)
+        ): call
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "KubernetesPodOperator"
+    }
+    for task_id in ("index_scifact_live_dataset", "evaluate_scifact_live_gateway"):
+        automount = next(
+            keyword.value
+            for keyword in kubernetes_tasks[task_id].keywords
+            if keyword.arg == "automount_service_account_token"
+        )
+        assert isinstance(automount, ast.Constant)
+        assert automount.value is True
+
+
 def test_scifact_archive_materialization_binds_bytes_and_s3_version_before_indexing() -> None:
     plan = build_scifact_benchmark_plan(
         {

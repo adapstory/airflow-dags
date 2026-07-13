@@ -48,6 +48,7 @@ SCIFACT_EXECUTOR_CONFIG = {
         spec=k8s.V1PodSpec(
             containers=[k8s.V1Container(name="base")],
             service_account_name=SCIFACT_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT,
+            automount_service_account_token=True,
         )
     )
 }
@@ -164,7 +165,7 @@ index_scifact = KubernetesPodOperator(
     ],
     env_vars=pipeline_runner_runtime_env_vars(),
     service_account_name=SCIFACT_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT,
-    automount_service_account_token=False,
+    automount_service_account_token=True,
     labels=SCIFACT_ACQUISITION_WORKLOAD_LABELS,
     container_resources=SERP_PIPELINE_RUNNER_RESOURCES,
     container_security_context=k8s.V1SecurityContext(
@@ -244,7 +245,7 @@ evaluate_scifact = KubernetesPodOperator(
     ],
     env_vars=pipeline_runner_runtime_env_vars(),
     service_account_name=SCIFACT_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT,
-    automount_service_account_token=False,
+    automount_service_account_token=True,
     labels=SCIFACT_EVALUATOR_WORKLOAD_LABELS,
     container_resources=SERP_PIPELINE_RUNNER_RESOURCES,
     container_security_context=k8s.V1SecurityContext(
