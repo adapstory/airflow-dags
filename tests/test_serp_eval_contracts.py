@@ -4756,6 +4756,7 @@ def test_public_docs_pipeline_runner_env_contract_survives_native_template_rende
         "ADAPSTORY_SERP_EMBEDDING_DIMENSION": "768",
         "ADAPSTORY_SERP_EMBEDDING_MAX_ATTEMPTS": "3",
         "ADAPSTORY_SERP_EMBEDDING_RETRY_DELAY_SECONDS": "0.5",
+        "ADAPSTORY_SERP_QDRANT_UPSERT_BATCH_SIZE": "64",
     }
     for name, value in numeric_values.items():
         monkeypatch.setenv(name, value)
@@ -4841,6 +4842,7 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         "ADAPSTORY_SERP_OPENSEARCH_TIMEOUT_SECONDS",
         "ADAPSTORY_SERP_OPENSEARCH_URL",
         "ADAPSTORY_SERP_QDRANT_TIMEOUT_SECONDS",
+        "ADAPSTORY_SERP_QDRANT_UPSERT_BATCH_SIZE",
         "ADAPSTORY_SERP_QDRANT_URL",
         "ADAPSTORY_SERP_SEARCH_SERVE_BASE_URL",
         "ADAPSTORY_SERP_PUBLIC_DOCS_RETRY_DELAY_SECONDS",
