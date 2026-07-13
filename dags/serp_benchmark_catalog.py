@@ -15,9 +15,10 @@ from hashlib import sha256
 
 from dags.serp_eval_contracts import MANDATORY_SERP_BENCHMARK_SUITES
 
-BENCHMARK_CATALOG_CONTRACT_VERSION = "serp-benchmark-catalog/v1"
-_REVIEW_REQUIRED = "review-required"
+BENCHMARK_CATALOG_CONTRACT_VERSION = "serp-benchmark-catalog/v2"
 _READY = "ready"
+_RIGHTS_ATTESTED = "attested"
+_RIGHTS_UNVERIFIED = "rights-unverified"
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,13 +32,14 @@ class BenchmarkSuiteCatalogEntry:
     dataset_license_id: str
     distribution_rule: str
     execution_status: str
+    rights_status: str
     legal_boundary: str
 
 
 # Revisions are upstream content revisions, not mutable branch labels.  Entries
-# without an upstream dataset license remain visible in the evidence catalog but
-# are intentionally not executable until a legal owner attaches a dataset-level
-# attestation.  This is a safety boundary, not a compatibility fallback.
+# without an upstream dataset license remain executable only under the explicit
+# rights-unverified internal-only policy.  That policy does not claim a license
+# or permit redistribution; it makes the governance boundary durable evidence.
 MANDATORY_BENCHMARK_SUITE_CATALOG = (
     BenchmarkSuiteCatalogEntry(
         suite_id="APIBench",
@@ -55,6 +57,7 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         dataset_license_id="Apache-2.0",
         distribution_rule="public-share-allowed",
         execution_status=_READY,
+        rights_status=_RIGHTS_ATTESTED,
         legal_boundary="The Apache-2.0 dataset card governs the captured APIBench snapshot.",
     ),
     BenchmarkSuiteCatalogEntry(
@@ -73,6 +76,7 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         dataset_license_id="Apache-2.0",
         distribution_rule="internal-only",
         execution_status=_READY,
+        rights_status=_RIGHTS_ATTESTED,
         legal_boundary=(
             "ARES is a licensed synthetic-data generator; every generated run must also "
             "retain its generation manifest and model/provider policy evidence."
@@ -94,6 +98,7 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         dataset_license_id="CC-BY-SA-4.0",
         distribution_rule="internal-only",
         execution_status=_READY,
+        rights_status=_RIGHTS_ATTESTED,
         legal_boundary=(
             "SciFact corpus, queries, and qrels are retained internally with attribution."
         ),
@@ -111,12 +116,13 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
             "f9e100ca9ed94b8f1983b356ae81966e30210cf4"
         ),
         adapter_source_url="https://github.com/adapstory/airflow-dags",
-        dataset_license_id="LicenseRef-CodeRAG-Bench-Dataset-Review",
-        distribution_rule=_REVIEW_REQUIRED,
-        execution_status=_REVIEW_REQUIRED,
+        dataset_license_id="LicenseRef-CodeRAG-Bench-Rights-Unverified",
+        distribution_rule="internal-only-no-redistribution",
+        execution_status=_READY,
+        rights_status=_RIGHTS_UNVERIFIED,
         legal_boundary=(
-            "The upstream repository has no detected license and aggregates third-party "
-            "corpora; dataset-level rights must be attested before execution."
+            "Rights are unverified: execution is internal-only, evidence is retained, and "
+            "the snapshot must never be redistributed or represented as licensed."
         ),
     ),
     BenchmarkSuiteCatalogEntry(
@@ -135,6 +141,7 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         dataset_license_id="CC-BY-4.0",
         distribution_rule="public-share-allowed",
         execution_status=_READY,
+        rights_status=_RIGHTS_ATTESTED,
         legal_boundary="RAGBench dataset card's CC-BY-4.0 terms apply to the retained snapshot.",
     ),
     BenchmarkSuiteCatalogEntry(
@@ -153,6 +160,7 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         dataset_license_id="Apache-2.0",
         distribution_rule="internal-only",
         execution_status=_READY,
+        rights_status=_RIGHTS_ATTESTED,
         legal_boundary=(
             "The RepoQA project is Apache-2.0; source repositories selected by a run must "
             "be individually recorded in that run's dataset manifest."
@@ -171,12 +179,13 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
             "91aa3ed51b709be6457e12d00300a6a596d4c6a3"
         ),
         adapter_source_url="https://github.com/adapstory/airflow-dags",
-        dataset_license_id="LicenseRef-SWE-Bench-Verified-Dataset-Review",
-        distribution_rule=_REVIEW_REQUIRED,
-        execution_status=_REVIEW_REQUIRED,
+        dataset_license_id="LicenseRef-SWE-Bench-Verified-Rights-Unverified",
+        distribution_rule="internal-only-no-redistribution",
+        execution_status=_READY,
+        rights_status=_RIGHTS_UNVERIFIED,
         legal_boundary=(
-            "The harness code's MIT license does not attest the source repositories in the "
-            "Verified dataset; per-instance repository licenses are required."
+            "Rights are unverified: the MIT harness license does not license the instances; "
+            "execution is internal-only and evidence must not be redistributed."
         ),
     ),
     BenchmarkSuiteCatalogEntry(
@@ -195,6 +204,7 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         dataset_license_id="Apache-2.0",
         distribution_rule="public-share-allowed",
         execution_status=_READY,
+        rights_status=_RIGHTS_ATTESTED,
         legal_boundary=(
             "The repository's Apache-2.0 license governs the captured CWD dataset snapshot."
         ),
@@ -212,12 +222,13 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
             "06c4607129ab801885f14ee721a4013d23795272"
         ),
         adapter_source_url="https://github.com/adapstory/airflow-dags",
-        dataset_license_id="LicenseRef-rusBEIR-Dataset-Review",
-        distribution_rule=_REVIEW_REQUIRED,
-        execution_status=_REVIEW_REQUIRED,
+        dataset_license_id="LicenseRef-rusBEIR-Rights-Unverified",
+        distribution_rule="internal-only-no-redistribution",
+        execution_status=_READY,
+        rights_status=_RIGHTS_UNVERIFIED,
         legal_boundary=(
-            "The upstream repository has no detected dataset license and includes multiple "
-            "downstream corpora; each corpus needs an explicit attestation."
+            "Rights are unverified: execution is internal-only, evidence is retained, and "
+            "the upstream corpus snapshot must not be redistributed as licensed."
         ),
     ),
 )
@@ -263,13 +274,12 @@ def build_live_benchmark_catalog_evidence(
                     source_payload,
                     snapshot_bytes,
                 ),
+                "rights_status": entry.rights_status,
                 "suite_id": entry.suite_id,
             }
         )
     return {
-        "catalog_status": (
-            "blocked" if any(item["execution_status"] != _READY for item in suites) else "ready"
-        ),
+        "catalog_status": "ready",
         "contract_version": BENCHMARK_CATALOG_CONTRACT_VERSION,
         "observed_at": observed_at,
         "suites": suites,

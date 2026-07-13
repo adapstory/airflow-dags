@@ -91,7 +91,7 @@ def test_catalog_pins_each_upstream_dataset_to_an_immutable_revision() -> None:
     )
 
 
-def test_live_catalog_evidence_is_content_addressed_and_fails_closed_for_unattested_suite() -> None:
+def test_live_catalog_allows_rights_unverified_internal_runs() -> None:
     payload_by_url = {
         entry.dataset_source_url: f"dataset-source:{entry.suite_id}".encode()
         for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
@@ -118,13 +118,17 @@ def test_live_catalog_evidence_is_content_addressed_and_fails_closed_for_unattes
     suites = cast(list[dict[str, Any]], evidence["suites"])
 
     assert evidence["contract_version"] == BENCHMARK_CATALOG_CONTRACT_VERSION
-    assert evidence["catalog_status"] == "blocked"
+    assert evidence["catalog_status"] == "ready"
     assert [item["suite_id"] for item in suites] == list(MANDATORY_SERP_BENCHMARK_SUITES)
     assert all(item["source_snapshot"]["sha256"].startswith("sha256:") for item in suites)
     assert all(item["license_snapshot"]["sha256"].startswith("sha256:") for item in suites)
     assert {
-        item["suite_id"] for item in suites if item["execution_status"] == "review-required"
+        item["suite_id"] for item in suites if item["rights_status"] == "rights-unverified"
     } == {"CodeRAG-Bench", "SWE-bench Verified", "rusBEIR"}
+    assert all(item["execution_status"] == "ready" for item in suites)
+    assert {
+        item["distribution_rule"] for item in suites if item["rights_status"] == "rights-unverified"
+    } == {"internal-only-no-redistribution"}
 
 
 def test_live_catalog_retains_immutable_source_and_license_snapshots() -> None:

@@ -60,12 +60,15 @@ _METRIC_COMPATIBILITY_CONTRACT_VERSION = "serp-suite-metric-compatibility/v1"
 _BENCHMARK_METRIC_FAMILIES = ("retrieval", "answer-quality", "citation", "policy")
 _ALLOWED_DATASET_DISTRIBUTION_RULES = {
     "internal-only",
+    "internal-only-no-redistribution",
     "no-redistribution",
     "public-share-allowed",
     "review-required",
     "snippets-only",
 }
 _UNATTESTED_LICENSE_MARKERS = ("pending", "unknown", "noassertion", "unlicensed")
+_DATASET_RIGHTS_STATUSES = frozenset({"attested", "rights-unverified"})
+_RIGHTS_UNVERIFIED_DISTRIBUTION_RULE = "internal-only-no-redistribution"
 _BENCHMARK_NAMESPACE = UUID("018f5e13-2d73-7a77-a052-8d1bcbf96599")
 _PUBLIC_DOCS_NAMESPACE = UUID("018f5e13-2d73-7a77-a052-8d1bcbf96600")
 _PUBLIC_DOCS_EXECUTABLE_SOURCE_TYPES = frozenset({"git", "openapi", "pdf", "website"})
@@ -329,6 +332,7 @@ def _validate_nightly_benchmark_suite_provenance(metadata: Mapping[str, Any]) ->
         "adapter_image_digest",
         "dataset_license_id",
         "dataset_distribution_rule",
+        "dataset_rights_status",
         "dataset_manifest_uri",
         "dataset_manifest_sha256",
         "dataset_manifest_version_id",
@@ -354,14 +358,37 @@ def _validate_nightly_benchmark_suite_provenance(metadata: Mapping[str, Any]) ->
     for field_name in ("dataset_manifest_uri", "execution_evidence_uri"):
         if _artifact_ref(field_name, _required_str(metadata, field_name)).kind != "s3":
             raise ValueError(f"benchmark suite {field_name} must be an s3:// immutable artifact")
-    dataset_license_id = _required_str(metadata, "dataset_license_id")
-    if any(marker in dataset_license_id.casefold() for marker in _UNATTESTED_LICENSE_MARKERS):
-        raise ValueError("benchmark suite dataset_license_id is not attested")
-    if (
-        _required_str(metadata, "dataset_distribution_rule")
-        not in _ALLOWED_DATASET_DISTRIBUTION_RULES
-    ):
-        raise ValueError("benchmark suite dataset_distribution_rule is unsupported")
+    _validate_dataset_rights(
+        license_id=_required_str(metadata, "dataset_license_id"),
+        distribution_rule=_required_str(metadata, "dataset_distribution_rule"),
+        rights_status=_required_str(metadata, "dataset_rights_status"),
+        error_prefix="benchmark suite",
+    )
+
+
+def _validate_dataset_rights(
+    *,
+    license_id: str,
+    distribution_rule: str,
+    rights_status: str,
+    error_prefix: str,
+) -> None:
+    """Enforce executable but non-redistributable rights-unverified evidence."""
+
+    if rights_status not in _DATASET_RIGHTS_STATUSES:
+        raise ValueError(f"{error_prefix} dataset rights status is unsupported")
+    if distribution_rule not in _ALLOWED_DATASET_DISTRIBUTION_RULES:
+        raise ValueError(f"{error_prefix} dataset distribution rule is unsupported")
+    if rights_status == "attested":
+        if any(marker in license_id.casefold() for marker in _UNATTESTED_LICENSE_MARKERS):
+            raise ValueError(f"{error_prefix} dataset license is not attested")
+        return
+    if not license_id.startswith("LicenseRef-"):
+        raise ValueError(f"{error_prefix} rights-unverified dataset must use LicenseRef")
+    if distribution_rule != _RIGHTS_UNVERIFIED_DISTRIBUTION_RULE:
+        raise ValueError(
+            f"{error_prefix} rights-unverified dataset must be internal-only-no-redistribution"
+        )
 
 
 def _validate_nightly_suite_metric_records(
@@ -4876,6 +4903,7 @@ def _validate_improvement_suite_provenance(
         "adapterImageDigest",
         "datasetLicenseId",
         "datasetDistributionRule",
+        "datasetRightsStatus",
         "datasetManifestUri",
         "datasetManifestSha256",
         "baselineEvidenceUri",
@@ -4902,14 +4930,12 @@ def _validate_improvement_suite_provenance(
     for field_name in ("datasetManifestUri", "baselineEvidenceUri", "candidateEvidenceUri"):
         if _artifact_ref(field_name, _required_str(provenance, field_name)).kind != "s3":
             raise ValueError(f"{suite_id} {field_name} must be an s3:// immutable artifact")
-    dataset_license_id = _required_str(provenance, "datasetLicenseId")
-    if any(marker in dataset_license_id.casefold() for marker in _UNATTESTED_LICENSE_MARKERS):
-        raise ValueError(f"{suite_id} datasetLicenseId is not attested")
-    if (
-        _required_str(provenance, "datasetDistributionRule")
-        not in _ALLOWED_DATASET_DISTRIBUTION_RULES
-    ):
-        raise ValueError(f"{suite_id} datasetDistributionRule is unsupported")
+    _validate_dataset_rights(
+        license_id=_required_str(provenance, "datasetLicenseId"),
+        distribution_rule=_required_str(provenance, "datasetDistributionRule"),
+        rights_status=_required_str(provenance, "datasetRightsStatus"),
+        error_prefix=suite_id,
+    )
 
 
 def _improvement_replay_context(

@@ -374,8 +374,8 @@ def test_nightly_catalog_materialization_writes_all_live_legal_evidence_before_b
         snapshot_bytes_writer=snapshot_bytes_writer,
     )
 
-    assert result["catalogStatus"] == "blocked"
-    assert result["blockingSuiteIds"] == ["CodeRAG-Bench", "SWE-bench Verified", "rusBEIR"]
+    assert result["catalogStatus"] == "ready"
+    assert result["blockingSuiteIds"] == []
     assert written[-1]["artifact_path"] == plan.payload["artifact_paths"]["benchmark_catalog"]
     assert len(written) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 2) + 1
 
@@ -530,6 +530,15 @@ def test_nightly_d6_airflow_path_blocks_before_gateway_runner_when_licenses_are_
 
     with pytest.raises(ValueError, match="benchmark catalog blocks D6"):
         write_nightly_suite_plan_artifact(json.loads(plan_json), catalog_snapshot)
+
+
+def test_nightly_provenance_requires_internal_only_boundary_for_unverified_rights() -> None:
+    metadata = dict(cast(Mapping[str, Any], _nightly_benchmark_suite_input("BEIR")["metadata"]))
+    metadata["dataset_rights_status"] = "rights-unverified"
+    metadata["dataset_distribution_rule"] = "internal-only"
+
+    with pytest.raises(ValueError, match="rights-unverified"):
+        serp_eval_contracts_module._validate_nightly_benchmark_suite_provenance(metadata)
 
 
 def test_build_online_eval_rollup_plan_materializes_d7_contract(tmp_path: Path) -> None:
@@ -5067,6 +5076,7 @@ def _nightly_benchmark_suite_input(
             "adapter_image_digest": "sha256:" + "b" * 64,
             "dataset_license_id": "Apache-2.0",
             "dataset_distribution_rule": "snippets-only",
+            "dataset_rights_status": "attested",
             "dataset_manifest_sha256": "sha256:" + "c" * 64,
             "dataset_manifest_version_id": "fixture-dataset-version",
             "dataset_manifest_uri": (
@@ -5301,6 +5311,7 @@ def _improvement_suite_evidence(suite_id: str, metric_family: str) -> dict[str, 
             "candidateEvidenceSha256": "sha256:" + "d" * 64,
             "datasetDistributionRule": "snippets-only",
             "datasetLicenseId": "Apache-2.0",
+            "datasetRightsStatus": "attested",
             "datasetManifestUri": f"s3://airflow-serp-artifacts/fixtures/{suite_id}/dataset.json",
             "datasetManifestSha256": "sha256:" + "e" * 64,
             "referenceSourceUri": "https://example.com/benchmark-reference",
