@@ -112,6 +112,8 @@ _PUBLIC_DOCS_OPENSEARCH_INDEX_ENV = "ADAPSTORY_SERP_PUBLIC_DOCS_OPENSEARCH_INDEX
 _PUBLIC_DOCS_NEO4J_DATABASE_ENV = "ADAPSTORY_SERP_PUBLIC_DOCS_NEO4J_DATABASE"
 _PUBLIC_DOCS_SOURCE_PROXY_URL_ENV = "ADAPSTORY_SERP_SOURCE_PROXY_URL"
 _BC21_BASE_URL_ENV = "ADAPSTORY_SERP_BC21_BASE_URL"
+_BC21_SERVICE_ACCOUNT_TOKEN_PATH_ENV = "ADAPSTORY_SERP_SERVICE_ACCOUNT_TOKEN_PATH"
+_DEFAULT_SERVICE_ACCOUNT_TOKEN_PATH = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
 _PUBLIC_DOCS_DEFAULT_QDRANT_COLLECTION = "serp_vectors_dev"
 _PUBLIC_DOCS_DEFAULT_OPENSEARCH_INDEX = "serp_lexical_dev"
 _PUBLIC_DOCS_DEFAULT_NEO4J_DATABASE = "serp_graph_dev"
@@ -1086,7 +1088,6 @@ def _recover_public_docs_active_pack_from_bc21(
 
     tenant_id = str(_required_uuid(payload, "tenant_id"))
     pack_id = str(_required_uuid(payload, "pack_id"))
-    actor_id = _required_str(payload, "actor_id")
     endpoint = bc21_base_url.rstrip("/") + f"/api/bc-21/serp/v1/packs/{pack_id}/active-version"
     response = _bc21_json_request(
         endpoint,
@@ -1094,8 +1095,6 @@ def _recover_public_docs_active_pack_from_bc21(
         body=None,
         headers={
             "X-Adapstory-Tenant-Id": tenant_id,
-            "X-Adapstory-Trusted-Actor-Id": actor_id,
-            "X-Adapstory-Trusted-Tenant-Id": tenant_id,
         },
         error_label="public docs active pack resolution",
         allow_conflict=True,
@@ -4693,6 +4692,10 @@ def _bc21_json_request(
     error_label: str,
     allow_conflict: bool = False,
 ) -> dict[str, Any] | None:
+    if any(str(key).casefold() == "authorization" for key in headers):
+        raise ValueError(
+            "BC-21 authorization must use the projected Kubernetes ServiceAccount token"
+        )
     body_bytes = None if body is None else _canonical_json(body).encode("utf-8")
     request = Request(
         url,
@@ -4701,6 +4704,7 @@ def _bc21_json_request(
             "Accept": "application/json",
             **({"Content-Type": "application/json"} if body is not None else {}),
             **{str(key): str(value) for key, value in headers.items()},
+            **_bc21_workload_authorization_headers(),
         },
         method=method,
     )
@@ -4713,6 +4717,18 @@ def _bc21_json_request(
         raise ValueError(f"{error_label} failed: status={exc.code}") from exc
     except (URLError, TimeoutError, OSError) as exc:
         raise ValueError(f"{error_label} failed") from exc
+
+
+def _bc21_workload_authorization_headers() -> dict[str, str]:
+    raw_token_path = os.environ.get(_BC21_SERVICE_ACCOUNT_TOKEN_PATH_ENV, "").strip()
+    token_path = Path(raw_token_path) if raw_token_path else _DEFAULT_SERVICE_ACCOUNT_TOKEN_PATH
+    try:
+        token = token_path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise ValueError("BC-21 projected Kubernetes ServiceAccount token is unavailable") from exc
+    if not token:
+        raise ValueError("BC-21 projected Kubernetes ServiceAccount token is empty")
+    return {"Authorization": f"Bearer {token}"}
 
 
 def _benchmark_export_payload(report: Mapping[str, Any]) -> dict[str, Any]:

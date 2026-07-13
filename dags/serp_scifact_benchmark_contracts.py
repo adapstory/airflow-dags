@@ -11,6 +11,7 @@ from urllib.request import Request, urlopen
 from uuid import NAMESPACE_URL, uuid5
 
 from dags.serp_eval_contracts import (
+    _bc21_workload_authorization_headers,
     _fetch_https_bytes,
     build_evidence_artifact_paths,
     post_bc21_json,
@@ -565,7 +566,11 @@ def _list_bc21_resources(
         raise ValueError(f"unsupported BC-21 resource list: {kind}") from exc
     request = Request(
         base_url.rstrip("/") + "/api/bc-21/serp/v1" + path,
-        headers={"Accept": "application/json", "X-Adapstory-Tenant-Id": tenant_id},
+        headers={
+            "Accept": "application/json",
+            "X-Adapstory-Tenant-Id": tenant_id,
+            **_bc21_workload_authorization_headers(),
+        },
     )
     try:
         with urlopen(request, timeout=10.0) as response:

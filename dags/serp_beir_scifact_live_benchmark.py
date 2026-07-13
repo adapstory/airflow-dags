@@ -27,6 +27,16 @@ from dags.serp_web_seed_crawl_refresh import (
     pipeline_runner_runtime_env_vars,
 )
 
+SCIFACT_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-beir-scifact"
+SCIFACT_EXECUTOR_CONFIG = {
+    "pod_override": k8s.V1Pod(
+        spec=k8s.V1PodSpec(
+            containers=[k8s.V1Container(name="base")],
+            service_account_name=SCIFACT_WORKLOAD_SERVICE_ACCOUNT,
+        )
+    )
+}
+
 
 def build_scifact_plan_from_dag_run(**context: Any) -> dict[str, Any]:
     dag_run = context.get("dag_run")
@@ -72,6 +82,7 @@ dag = DAG(
 build_plan = PythonOperator(
     task_id="build_scifact_benchmark_plan",
     python_callable=build_scifact_plan_from_dag_run,
+    executor_config=SCIFACT_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -79,6 +90,7 @@ materialize_archive = PythonOperator(
     task_id="materialize_scifact_archive",
     python_callable=materialize_scifact_archive,
     op_args=["{{ ti.xcom_pull(task_ids='build_scifact_benchmark_plan') }}"],
+    executor_config=SCIFACT_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -89,6 +101,7 @@ prepare_registry = PythonOperator(
         "{{ ti.xcom_pull(task_ids='build_scifact_benchmark_plan') }}",
         "{{ ti.xcom_pull(task_ids='materialize_scifact_archive') }}",
     ],
+    executor_config=SCIFACT_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -161,6 +174,7 @@ submit_pipeline_state = PythonOperator(
         "{{ ti.xcom_pull(task_ids='build_scifact_benchmark_plan') }}",
         "{{ ti.xcom_pull(task_ids='prepare_scifact_benchmark_registry') }}",
     ],
+    executor_config=SCIFACT_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -172,6 +186,7 @@ activate_pack = PythonOperator(
         "{{ ti.xcom_pull(task_ids='prepare_scifact_benchmark_registry') }}",
         "{{ ti.xcom_pull(task_ids='submit_scifact_pipeline_state') }}",
     ],
+    executor_config=SCIFACT_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -182,6 +197,7 @@ seal_activation = PythonOperator(
         "{{ ti.xcom_pull(task_ids='build_scifact_benchmark_plan') }}",
         "{{ ti.xcom_pull(task_ids='activate_scifact_benchmark_pack') }}",
     ],
+    executor_config=SCIFACT_EXECUTOR_CONFIG,
     dag=dag,
 )
 

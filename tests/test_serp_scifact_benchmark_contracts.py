@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 from hashlib import sha256
+from pathlib import Path
 from typing import Any
 
 from dags.serp_scifact_benchmark_contracts import (
@@ -34,6 +36,40 @@ def test_scifact_plan_binds_a_dedicated_benchmark_pack_to_versioned_evidence() -
     assert plan["artifact_paths"]["archive"].endswith("/scifact.zip")
     assert plan["artifact_paths"]["index_evidence"].endswith("/scifact-indexing.json")
     assert plan["artifact_paths"]["run_evidence"].endswith("/scifact-live-run.json")
+
+
+def test_scifact_dag_assigns_the_dedicated_workload_identity_to_each_bc21_task() -> None:
+    source = (
+        Path(__file__).resolve().parents[1] / "dags" / "serp_beir_scifact_live_benchmark.py"
+    ).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    assignment = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "SCIFACT_EXECUTOR_CONFIG"
+            for target in node.targets
+        )
+    )
+    assert isinstance(assignment.value, ast.Dict)
+
+    python_operator_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "PythonOperator"
+    ]
+    assert len(python_operator_calls) == 6
+    for call in python_operator_calls:
+        executor_config = next(
+            (keyword.value for keyword in call.keywords if keyword.arg == "executor_config"),
+            None,
+        )
+        assert isinstance(executor_config, ast.Name)
+        assert executor_config.id == "SCIFACT_EXECUTOR_CONFIG"
 
 
 def test_scifact_archive_materialization_binds_bytes_and_s3_version_before_indexing() -> None:

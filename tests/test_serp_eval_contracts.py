@@ -109,6 +109,45 @@ def test_public_docs_crawler_preserves_http_status_when_error_body_times_out(
     assert response.body == b""
 
 
+def test_bc21_request_uses_the_projected_service_account_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    token_path = tmp_path / "service-account.token"
+    token_path.write_text("projected-workload-jwt\n", encoding="utf-8")
+    observed: dict[str, object] = {}
+
+    class Response:
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b"{}"
+
+    def fake_urlopen(request: object, *, timeout: float) -> Response:
+        observed["authorization"] = request.get_header("Authorization")
+        observed["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setenv("ADAPSTORY_SERP_SERVICE_ACCOUNT_TOKEN_PATH", str(token_path))
+    monkeypatch.setattr(serp_eval_contracts_module, "urlopen", fake_urlopen)
+
+    assert (
+        serp_eval_contracts_module._bc21_json_request(
+            "http://bc21.test/api/bc-21/serp/v1/runs/pipeline-state",
+            method="POST",
+            body={"status": "indexed"},
+            headers={"X-Adapstory-Tenant-Id": TENANT_ID},
+            error_label="test BC-21 submission",
+        )
+        == {}
+    )
+    assert observed == {"authorization": "Bearer projected-workload-jwt", "timeout": 5.0}
+
+
 def test_public_docs_crawler_uses_configured_source_proxy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1809,6 +1848,9 @@ def test_public_docs_crawl_state_conf_recovers_active_version_from_bc21_when_sna
     conf = _public_docs_seed_refresh_conf()
     conf["artifact_root_path"] = str(tmp_path)
     conf["bc21_base_url"] = "http://serp-context-platform.env-dev.svc.cluster.local"
+    token_path = tmp_path / "service-account.token"
+    token_path.write_text("test-workload-token\n", encoding="utf-8")
+    monkeypatch.setenv("ADAPSTORY_SERP_SERVICE_ACCOUNT_TOKEN_PATH", str(token_path))
     recovered_pack_version_id = "018f5e13-2d73-7a77-a052-8d1bcbf96542"
 
     class Response:
@@ -1843,8 +1885,7 @@ def test_public_docs_crawl_state_conf_recovers_active_version_from_bc21_when_sna
             f"/api/bc-21/serp/v1/packs/{PACK_ID}/active-version"
         )
         assert request.get_header("X-adapstory-tenant-id") == TENANT_ID
-        assert request.get_header("X-adapstory-trusted-tenant-id") == TENANT_ID
-        assert request.get_header("X-adapstory-trusted-actor-id") == conf["actor_id"]
+        assert request.get_header("Authorization") == "Bearer test-workload-token"
         return Response()
 
     monkeypatch.setattr("dags.serp_eval_contracts.urlopen", fake_urlopen)
@@ -1872,6 +1913,9 @@ def test_public_docs_crawl_state_conf_fails_closed_when_bc21_active_version_is_u
     conf = _public_docs_seed_refresh_conf()
     conf["artifact_root_path"] = str(tmp_path)
     conf["bc21_base_url"] = "http://serp-context-platform.env-dev.svc.cluster.local"
+    token_path = tmp_path / "service-account.token"
+    token_path.write_text("test-workload-token\n", encoding="utf-8")
+    monkeypatch.setenv("ADAPSTORY_SERP_SERVICE_ACCOUNT_TOKEN_PATH", str(token_path))
 
     def unavailable(_request: object, *, timeout: float) -> object:
         raise TimeoutError("registry unavailable")
@@ -1889,6 +1933,9 @@ def test_public_docs_crawl_state_conf_allows_true_first_activation_when_bc21_has
     conf = _public_docs_seed_refresh_conf()
     conf["artifact_root_path"] = str(tmp_path)
     conf["bc21_base_url"] = "http://serp-context-platform.env-dev.svc.cluster.local"
+    token_path = tmp_path / "service-account.token"
+    token_path.write_text("test-workload-token\n", encoding="utf-8")
+    monkeypatch.setenv("ADAPSTORY_SERP_SERVICE_ACCOUNT_TOKEN_PATH", str(token_path))
 
     def no_active_pack(_request: object, *, timeout: float) -> object:
         raise HTTPError(
