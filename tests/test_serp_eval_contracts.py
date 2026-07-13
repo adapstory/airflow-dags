@@ -5510,7 +5510,7 @@ def _improvement_candidate_evaluation() -> dict[str, object]:
 
 
 def _improvement_suite_evidence(suite_id: str, metric_family: str) -> dict[str, object]:
-    metric_results: list[dict[str, str]]
+    metric_results: list[dict[str, object]]
     if metric_family == "retrieval":
         metric_results = [
             {
