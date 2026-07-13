@@ -28,6 +28,7 @@ from dags.serp_eval_contracts import (
     build_benchmark_improvement_scoreboard_cli_spec,
     build_benchmark_improvement_wave_plan,
     build_improvement_candidate_eval_cli_spec,
+    build_mandatory_benchmark_dataset_evidence_plan,
     build_nightly_benchmark_export_cli_spec,
     build_nightly_registry_cli_spec,
     build_nightly_registry_submit_cli_spec,
@@ -406,6 +407,91 @@ def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:
     unsafe_bc21_base_url["bc21_base_url"] = "http://example.invalid"
     with pytest.raises(ValueError, match="bc21_base_url must use https"):
         build_nightly_regression_plan(unsafe_bc21_base_url)
+
+
+def test_mandatory_benchmark_dataset_evidence_plan_is_isolated_from_scoring() -> None:
+    plan = build_mandatory_benchmark_dataset_evidence_plan(
+        {
+            "artifact_root_path": "s3://airflow-serp-artifacts/serp-evals",
+            "generated_at": "2026-07-13T19:30:00Z",
+        }
+    )
+
+    assert plan.payload["dag_id"] == "serp_mandatory_benchmark_dataset_evidence_snapshot"
+    assert plan.payload["selected_suite_ids"] == list(MANDATORY_SERP_BENCHMARK_SUITES)
+    assert plan.payload["artifact_paths"] == {
+        "airflow_plan": (
+            "s3://airflow-serp-artifacts/serp-evals/"
+            f"{plan.payload['operation_id']}/airflow-plan.json"
+        ),
+        "benchmark_catalog": (
+            "s3://airflow-serp-artifacts/serp-evals/"
+            f"{plan.payload['operation_id']}/benchmark-catalog.json"
+        ),
+    }
+    assert [task["task_id"] for task in plan.payload["tasks"]] == [
+        "validate_mandatory_benchmark_dataset_evidence_plan",
+        "materialize_mandatory_benchmark_dataset_evidence",
+    ]
+    assert "benchmark_suite_inputs" not in plan.payload
+    assert "metric" not in plan.to_canonical_json()
+
+    with pytest.raises(
+        ValueError,
+        match="mandatory dataset evidence requires an s3:// artifact_root_path",
+    ):
+        build_mandatory_benchmark_dataset_evidence_plan(
+            {
+                "artifact_root_path": "/var/opt/adapstory/serp-evals",
+                "generated_at": "2026-07-13T19:30:00Z",
+            }
+        )
+
+
+def test_catalog_materializer_accepts_dedicated_dataset_evidence_plan() -> None:
+    plan = build_mandatory_benchmark_dataset_evidence_plan(
+        {
+            "artifact_root_path": "s3://airflow-serp-artifacts/serp-evals",
+            "generated_at": "2026-07-13T19:30:00Z",
+        }
+    )
+    written: list[dict[str, object]] = []
+
+    def snapshot_writer(**kwargs: object) -> dict[str, object]:
+        written.append(kwargs)
+        return {
+            "artifactPath": kwargs["artifact_path"],
+            "artifactSha256": "f" * 64,
+            "artifactType": kwargs["artifact_type"],
+            "artifactVersionId": "version-20260713",
+            "objectLockMode": "COMPLIANCE",
+            "operationId": kwargs["operation_id"],
+            "status": "written",
+        }
+
+    def snapshot_bytes_writer(**kwargs: object) -> dict[str, object]:
+        written.append(kwargs)
+        payload = cast(bytes, kwargs["payload"])
+        return {
+            "artifactPath": kwargs["artifact_path"],
+            "artifactSha256": sha256(payload).hexdigest(),
+            "artifactType": kwargs["artifact_type"],
+            "artifactVersionId": "version-20260713",
+            "objectLockMode": "COMPLIANCE",
+            "operationId": kwargs["operation_id"],
+            "status": "written",
+        }
+
+    result = materialize_live_benchmark_catalog_artifact(
+        plan.to_canonical_json(),
+        fetch_bytes=lambda url: url.encode("utf-8"),
+        snapshot_writer=snapshot_writer,
+        snapshot_bytes_writer=snapshot_bytes_writer,
+    )
+
+    assert result["catalogStatus"] == "ready"
+    assert result["blockingSuiteIds"] == []
+    assert len(written) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 3) + 1
 
 
 def test_nightly_regression_plan_rejects_caller_supplied_suite_inputs() -> None:
@@ -4463,6 +4549,14 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
             ],
         ),
         (
+            "serp_mandatory_benchmark_dataset_evidence_snapshot.py",
+            "serp_mandatory_benchmark_dataset_evidence_snapshot",
+            [
+                "validate_mandatory_benchmark_dataset_evidence_plan",
+                "materialize_mandatory_benchmark_dataset_evidence",
+            ],
+        ),
+        (
             "serp_tenant_golden_set_regression.py",
             "serp_tenant_golden_set_regression",
             [
@@ -4550,6 +4644,7 @@ def test_serp_dag_files_declare_expected_airflow_contracts(
 def test_serp_dag_files_import_helpers_from_packaged_dags_namespace() -> None:
     for dag_file in (
         "serp_nightly_regression_suite.py",
+        "serp_mandatory_benchmark_dataset_evidence_snapshot.py",
         "serp_online_eval_rollup.py",
         "serp_tenant_golden_set_regression.py",
         "serp_benchmark_improvement_wave.py",

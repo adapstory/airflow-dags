@@ -499,6 +499,55 @@ def build_nightly_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
     return SerpDagPlan(plan_payload)
 
 
+def build_mandatory_benchmark_dataset_evidence_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
+    """Build the WORM snapshot plan without pretending to run benchmark adapters.
+
+    Dataset acquisition and benchmark scoring are distinct contracts.  This
+    narrowly scoped plan snapshots every canonical source, dataset byte stream,
+    and licensing evidence before an adapter is available; it never accepts
+    caller-provided suite inputs or emits a benchmark score.
+    """
+
+    payload = _payload(conf)
+    _reject_raw_secrets(payload)
+    for field_name in ("benchmark_suite_inputs", "selected_suite_ids"):
+        if field_name in payload:
+            raise ValueError(f"{field_name} is fixed by the mandatory dataset evidence contract")
+    generated_at = _required_datetime_string(payload, "generated_at")
+    artifact_root_path = _required_artifact_root_path(payload)
+    if not artifact_root_path.startswith("s3://"):
+        raise ValueError("mandatory dataset evidence requires an s3:// artifact_root_path")
+    operation_id = _operation_id(
+        "serp-airflow-mandatory-dataset-evidence",
+        generated_at,
+        ",".join(MANDATORY_SERP_BENCHMARK_SUITES),
+        "serp-benchmark-catalog/v2",
+    )
+    return SerpDagPlan(
+        {
+            "artifact_root_path": artifact_root_path,
+            "artifact_paths": _artifact_paths(
+                artifact_root_path,
+                operation_id,
+                (
+                    ("airflow_plan", "airflow-plan.json"),
+                    ("benchmark_catalog", "benchmark-catalog.json"),
+                ),
+            ),
+            "dag_id": "serp_mandatory_benchmark_dataset_evidence_snapshot",
+            "generated_at": generated_at,
+            "operation_id": operation_id,
+            "selected_suite_ids": list(MANDATORY_SERP_BENCHMARK_SUITES),
+            "tasks": _tasks(
+                (
+                    "validate_mandatory_benchmark_dataset_evidence_plan",
+                    "materialize_mandatory_benchmark_dataset_evidence",
+                )
+            ),
+        }
+    )
+
+
 def build_tenant_golden_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
     payload = _payload(conf)
     _reject_raw_secrets(payload)
@@ -1310,8 +1359,11 @@ def materialize_live_benchmark_catalog_artifact(
 
     plan = _json_object(plan_json, "plan_json")
     _reject_raw_secrets(plan)
-    if _required_str(plan, "dag_id") != "serp_nightly_regression_suite":
-        raise ValueError("plan dag_id does not match nightly catalog materializer")
+    if _required_str(plan, "dag_id") not in {
+        "serp_nightly_regression_suite",
+        "serp_mandatory_benchmark_dataset_evidence_snapshot",
+    }:
+        raise ValueError("plan dag_id does not match benchmark catalog materializer")
     artifact_paths = _required_artifact_paths(plan, ("benchmark_catalog",))
     from dags.serp_benchmark_catalog import build_live_benchmark_catalog_evidence
 
