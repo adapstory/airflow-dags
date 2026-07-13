@@ -255,9 +255,8 @@ def build_bc21_submission_payloads(
         }
         fingerprint = "sha256:" + sha256(_canonical_json(body).encode("utf-8")).hexdigest()
         headers = {
+            "X-Adapstory-Actor-Id": plan["actor_id"],
             "X-Adapstory-Tenant-Id": plan["tenant_id"],
-            "X-Adapstory-Trusted-Actor-Id": plan["actor_id"],
-            "X-Adapstory-Trusted-Tenant-Id": plan["tenant_id"],
             "X-Fingerprint": fingerprint,
             "X-Idempotency-Key": str(
                 uuid5(NAMESPACE_URL, f"{plan['operation_id']}|{family}|bc21-benchmark-run")

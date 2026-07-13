@@ -2014,8 +2014,6 @@ def write_public_docs_post_activation_rollback_artifact(
         headers={
             "X-Adapstory-Actor-Id": actor_id,
             "X-Adapstory-Tenant-Id": tenant_id,
-            "X-Adapstory-Trusted-Actor-Id": actor_id,
-            "X-Adapstory-Trusted-Tenant-Id": tenant_id,
             "X-Fingerprint": fingerprint,
             "X-Idempotency-Key": idempotency_key,
         },
@@ -4554,40 +4552,42 @@ def _submit_live_registry_submission(
     submission: Mapping[str, Any],
 ) -> dict[str, Any]:
     body = _required_mapping(submission, "body")
-    body_bytes = _canonical_json(body).encode("utf-8")
     endpoint_path = _required_str(submission, "endpointPath")
     request = Request(
         base_url + endpoint_path,
-        data=body_bytes,
+        data=_canonical_json(body).encode("utf-8"),
+        method="POST",
         headers={
             "Accept": "application/json",
             "Content-Type": "application/json",
             "X-Adapstory-Actor-Id": _required_str(submission, "trustedActorId"),
             "X-Adapstory-Tenant-Id": tenant_id,
-            "X-Adapstory-Trusted-Actor-Id": _required_str(submission, "trustedActorId"),
-            "X-Adapstory-Trusted-Tenant-Id": tenant_id,
             "X-Fingerprint": _required_str(submission, "fingerprint"),
             "X-Idempotency-Key": _required_str(submission, "idempotencyKey"),
+            **_bc21_workload_authorization_headers(),
         },
-        method="POST",
     )
     try:
         with urlopen(request, timeout=5.0) as response:
             status_code = response.status
-            response_body = response.read().decode("utf-8")
-    except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            response_payload = _json_object(
+                response.read().decode("utf-8"), "benchmark_registry_response"
+            )
+    except HTTPError as exc:
+        raise ValueError(
+            "benchmark registry submission for "
+            f"{_required_str(submission, 'suiteCode')}/"
+            f"{_required_str(submission, 'metricFamily')} failed: status={exc.code}"
+            f"{_safe_bc21_problem_detail(exc)}"
+        ) from exc
+    except (URLError, TimeoutError, OSError) as exc:
         raise ValueError(
             "benchmark registry submission failed for "
             f"{_required_str(submission, 'suiteCode')}/"
             f"{_required_str(submission, 'metricFamily')}"
         ) from exc
-    response_payload = _json_object(response_body, "benchmark_registry_response")
     if status_code < 200 or status_code >= 300:
-        raise ValueError(
-            "benchmark registry submission failed: "
-            f"status={status_code} response_sha256="
-            f"{sha256(_canonical_json(response_payload).encode('utf-8')).hexdigest()}"
-        )
+        raise ValueError(f"benchmark registry submission failed: status={status_code}")
     return {
         "benchmarkResultId": _required_str(response_payload, "benchmarkResultId"),
         "endpointPath": endpoint_path,
@@ -4640,8 +4640,6 @@ def _ensure_public_docs_catalog_source(
         headers={
             "X-Adapstory-Actor-Id": actor_id,
             "X-Adapstory-Tenant-Id": tenant_id,
-            "X-Adapstory-Trusted-Actor-Id": actor_id,
-            "X-Adapstory-Trusted-Tenant-Id": tenant_id,
             "X-Fingerprint": fingerprint,
             "X-Idempotency-Key": idempotency_key,
         },
@@ -4714,7 +4712,9 @@ def _bc21_json_request(
     except HTTPError as exc:
         if allow_conflict and exc.code == 409:
             return None
-        raise ValueError(f"{error_label} failed: status={exc.code}") from exc
+        raise ValueError(
+            f"{error_label} failed: status={exc.code}{_safe_bc21_problem_detail(exc)}"
+        ) from exc
     except (URLError, TimeoutError, OSError) as exc:
         raise ValueError(f"{error_label} failed") from exc
 
@@ -4729,6 +4729,24 @@ def _bc21_workload_authorization_headers() -> dict[str, str]:
     if not token:
         raise ValueError("BC-21 projected Kubernetes ServiceAccount token is empty")
     return {"Authorization": f"Bearer {token}"}
+
+
+def _safe_bc21_problem_detail(exc: HTTPError) -> str:
+    try:
+        payload = json.loads(exc.read().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return ""
+    if not isinstance(payload, Mapping):
+        return ""
+    title = payload.get("title")
+    detail = payload.get("detail")
+    if not isinstance(title, str) or not isinstance(detail, str):
+        return ""
+    normalized_title = title.strip()
+    normalized_detail = detail.strip()
+    if not normalized_title or not normalized_detail:
+        return ""
+    return f" problem={normalized_title[:120]}: {normalized_detail[:240]}"
 
 
 def _benchmark_export_payload(report: Mapping[str, Any]) -> dict[str, Any]:

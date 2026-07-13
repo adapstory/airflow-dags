@@ -613,8 +613,6 @@ def _mutation_headers(
     return {
         "X-Adapstory-Actor-Id": actor_id,
         "X-Adapstory-Tenant-Id": tenant_id,
-        "X-Adapstory-Trusted-Actor-Id": actor_id,
-        "X-Adapstory-Trusted-Tenant-Id": tenant_id,
         "X-Fingerprint": "sha256:"
         + sha256(
             json.dumps(body, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode()

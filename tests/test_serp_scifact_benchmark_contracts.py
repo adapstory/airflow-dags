@@ -261,8 +261,8 @@ def test_scifact_pack_activation_requires_index_receipt_and_records_selection() 
         headers = submission["headers"]
         assert headers["X-Adapstory-Tenant-Id"] == plan["tenant_id"]
         assert headers["X-Adapstory-Actor-Id"] == plan["actor_id"]
-        assert headers["X-Adapstory-Trusted-Actor-Id"] == plan["actor_id"]
-        assert headers["X-Adapstory-Trusted-Tenant-Id"] == plan["tenant_id"]
+        assert "X-Adapstory-Trusted-Actor-Id" not in headers
+        assert "X-Adapstory-Trusted-Tenant-Id" not in headers
     assert result["active_pack_version_id"] == registry["pack_version_id"]
     assert result["workflow_selection"]["selectionState"] == "active"
 

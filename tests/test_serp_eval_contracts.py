@@ -149,6 +149,46 @@ def test_bc21_request_uses_the_projected_service_account_token(
     assert observed == {"authorization": "Bearer projected-workload-jwt", "timeout": 5.0}
 
 
+def test_bc21_request_exposes_only_safe_problem_detail_on_forbidden_response(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    token_path = tmp_path / "service-account.token"
+    token_path.write_text("projected-workload-jwt\n", encoding="utf-8")
+
+    def forbidden_urlopen(request: Request, *, timeout: float) -> object:
+        assert request.get_header("Authorization") == "Bearer projected-workload-jwt"
+        assert timeout == 5.0
+        raise HTTPError(
+            request.full_url,
+            403,
+            "Forbidden",
+            hdrs=Message(),
+            fp=io.BytesIO(
+                b'{"status":403,"title":"Untrusted SERP request context",'
+                b'"detail":"SERP request workload identity could not be verified."}'
+            ),
+        )
+
+    monkeypatch.setenv("ADAPSTORY_SERP_SERVICE_ACCOUNT_TOKEN_PATH", str(token_path))
+    monkeypatch.setattr(serp_eval_contracts_module, "urlopen", forbidden_urlopen)
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "status=403 problem=Untrusted SERP request context: "
+            "SERP request workload identity could not be verified."
+        ),
+    ):
+        serp_eval_contracts_module._bc21_json_request(
+            "http://bc21.test/api/bc-21/serp/v1/runs/pipeline-state",
+            method="POST",
+            body={"status": "indexed"},
+            headers={"X-Adapstory-Tenant-Id": TENANT_ID},
+            error_label="test BC-21 submission",
+        )
+
+
 def test_public_docs_crawler_uses_configured_source_proxy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3213,8 +3253,6 @@ def test_post_activation_failure_rolls_back_to_direct_predecessor(
             "headers": {
                 "X-Adapstory-Actor-Id": "airflow-serp-public-docs-refresh",
                 "X-Adapstory-Tenant-Id": TENANT_ID,
-                "X-Adapstory-Trusted-Actor-Id": "airflow-serp-public-docs-refresh",
-                "X-Adapstory-Trusted-Tenant-Id": TENANT_ID,
                 "X-Fingerprint": artifact["payload"]["fingerprint"],
                 "X-Idempotency-Key": artifact["payload"]["idempotency_key"],
             },
