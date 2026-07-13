@@ -9,6 +9,7 @@ from dags.serp_scifact_benchmark_contracts import (
     build_scifact_benchmark_plan,
     materialize_scifact_archive,
     prepare_scifact_benchmark_registry,
+    seal_scifact_activation_evidence,
     submit_scifact_pipeline_state,
 )
 
@@ -313,3 +314,43 @@ def test_scifact_pipeline_state_submission_binds_the_index_evidence_to_a_worm_re
     assert receipt["status"] == "accepted"
     assert receipt["response"]["evidenceBundleId"] == "00000000-0000-4000-a000-000000000444"
     assert receipt["snapshot"]["artifactVersionId"] == "pipeline-state-version"
+
+
+def test_scifact_activation_receipts_are_written_as_distinct_compliance_snapshots() -> None:
+    plan = build_scifact_benchmark_plan(
+        {
+            "artifact_root_path": "s3://airflow-serp-evidence/serp-evals",
+            "generated_at": "2026-07-13T12:00:00Z",
+        },
+        bc21_base_url="http://prod-serp-context-platform-svc.env-prod.svc.cluster.local:8080",
+    )
+    writes: list[dict[str, object]] = []
+
+    def writer(**kwargs: object) -> dict[str, str]:
+        writes.append(kwargs)
+        return {
+            "artifactETag": "evidence-etag",
+            "artifactPath": str(kwargs["artifact_path"]),
+            "artifactSha256": "d" * 64,
+            "artifactType": str(kwargs["artifact_type"]),
+            "artifactVersionId": "evidence-version-" + str(len(writes)),
+            "objectLockMode": "COMPLIANCE",
+        }
+
+    receipt = seal_scifact_activation_evidence(
+        plan,
+        {
+            "active_pack_version_id": "00000000-0000-4000-a000-000000000333",
+            "activation": {"activationState": "active"},
+            "approval": {"approvalState": "approved"},
+            "workflow_selection": {"selectionState": "active"},
+        },
+        snapshot_writer=writer,
+    )
+
+    assert [write["artifact_path"] for write in writes] == [
+        plan["artifact_paths"]["activation_receipt"],
+        plan["artifact_paths"]["workflow_selection_receipt"],
+    ]
+    assert receipt["activation_snapshot"]["objectLockMode"] == "COMPLIANCE"
+    assert receipt["selection_snapshot"]["objectLockMode"] == "COMPLIANCE"
