@@ -14,6 +14,7 @@ from threading import Barrier
 from typing import Any, cast
 from urllib.error import HTTPError
 from urllib.parse import urlparse
+from urllib.request import Request
 from uuid import UUID
 
 import pytest
@@ -127,7 +128,7 @@ def test_bc21_request_uses_the_projected_service_account_token(
         def read(self) -> bytes:
             return b"{}"
 
-    def fake_urlopen(request: object, *, timeout: float) -> Response:
+    def fake_urlopen(request: Request, *, timeout: float) -> Response:
         observed["authorization"] = request.get_header("Authorization")
         observed["timeout"] = timeout
         return Response()
