@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from hashlib import sha256
+from typing import Any, cast
+
+import pytest
 
 from dags.serp_benchmark_catalog import (
     BENCHMARK_CATALOG_CONTRACT_VERSION,
@@ -15,7 +18,9 @@ from dags.serp_eval_contracts import (
 )
 
 
-def test_benchmark_catalog_fetch_uses_configured_source_proxy(monkeypatch) -> None:
+def test_benchmark_catalog_fetch_uses_configured_source_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     proxy_urls: list[dict[str, str]] = []
 
     class Response:
@@ -110,22 +115,15 @@ def test_live_catalog_evidence_is_content_addressed_and_fails_closed_for_unattes
         observed_at="2026-07-13T00:00:00Z",
         fetch_bytes=payload_by_url.__getitem__,
     )
+    suites = cast(list[dict[str, Any]], evidence["suites"])
 
     assert evidence["contract_version"] == BENCHMARK_CATALOG_CONTRACT_VERSION
     assert evidence["catalog_status"] == "blocked"
-    assert [item["suite_id"] for item in evidence["suites"]] == list(
-        MANDATORY_SERP_BENCHMARK_SUITES
-    )
-    assert all(
-        item["source_snapshot"]["sha256"].startswith("sha256:") for item in evidence["suites"]
-    )
-    assert all(
-        item["license_snapshot"]["sha256"].startswith("sha256:") for item in evidence["suites"]
-    )
+    assert [item["suite_id"] for item in suites] == list(MANDATORY_SERP_BENCHMARK_SUITES)
+    assert all(item["source_snapshot"]["sha256"].startswith("sha256:") for item in suites)
+    assert all(item["license_snapshot"]["sha256"].startswith("sha256:") for item in suites)
     assert {
-        item["suite_id"]
-        for item in evidence["suites"]
-        if item["execution_status"] == "review-required"
+        item["suite_id"] for item in suites if item["execution_status"] == "review-required"
     } == {"CodeRAG-Bench", "SWE-bench Verified", "rusBEIR"}
 
 
@@ -161,9 +159,10 @@ def test_live_catalog_retains_immutable_source_and_license_snapshots() -> None:
         fetch_bytes=payload_by_url.__getitem__,
         snapshot_bytes=snapshot_bytes,
     )
+    suites = cast(list[dict[str, Any]], evidence["suites"])
 
     assert len(calls) == len(MANDATORY_SERP_BENCHMARK_SUITES) * 2
-    beir = next(item for item in evidence["suites"] if item["suite_id"] == "BEIR")
+    beir = next(item for item in suites if item["suite_id"] == "BEIR")
     assert beir["source_snapshot"]["immutable_artifact"]["objectLockMode"] == "COMPLIANCE"
     assert beir["license_snapshot"]["immutable_artifact"]["artifactVersionId"] == (
         "version-BEIR-license"
@@ -171,7 +170,7 @@ def test_live_catalog_retains_immutable_source_and_license_snapshots() -> None:
 
 
 def test_immutable_evidence_snapshot_requires_versioned_compliance_locked_s3_object(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class S3Client:
         def __init__(self) -> None:
@@ -201,7 +200,7 @@ def test_immutable_evidence_snapshot_requires_versioned_compliance_locked_s3_obj
 
 
 def test_immutable_binary_snapshot_binds_raw_dataset_bytes_to_s3_version(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class S3Client:
         def __init__(self) -> None:

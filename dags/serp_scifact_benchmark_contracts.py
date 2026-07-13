@@ -14,7 +14,9 @@ from dags.serp_eval_contracts import (
     _fetch_https_bytes,
     build_evidence_artifact_paths,
     post_bc21_json,
+    read_evidence_artifact,
     write_immutable_evidence_bytes_snapshot,
+    write_immutable_evidence_snapshot,
 )
 
 SCIFACT_ARCHIVE_URL = (
@@ -24,6 +26,7 @@ SCIFACT_BENCHMARK_DAG_ID = "serp_beir_scifact_live_benchmark"
 SCIFACT_BENCHMARK_CONTRACT_VERSION = "beir-scifact-airflow/v1"
 SCIFACT_TENANT_ID = "00000000-0000-4000-a000-000000000001"
 SCIFACT_ACTOR_ID = "airflow-serp-beir-scifact"
+SCIFACT_GATEWAY_ACTOR_ID = "00000000-0000-4000-a000-000000000203"
 SCIFACT_PACK_SLUG = "benchmark-beir-scifact"
 SCIFACT_POLICY_VERSION = "beir-scifact-license-policy@2026.07.13"
 SCIFACT_WORKFLOW_SCOPE = {
@@ -68,6 +71,7 @@ def build_scifact_benchmark_plan(
         "contract_version": SCIFACT_BENCHMARK_CONTRACT_VERSION,
         "dag_id": SCIFACT_BENCHMARK_DAG_ID,
         "generated_at": generated_at,
+        "gateway_actor_id": SCIFACT_GATEWAY_ACTOR_ID,
         "operation_id": operation_id,
         "pack_slug": SCIFACT_PACK_SLUG,
         "tenant_id": SCIFACT_TENANT_ID,
@@ -340,6 +344,162 @@ def activate_scifact_benchmark_pack(
     }
 
 
+def submit_scifact_pipeline_state(
+    plan: Mapping[str, Any],
+    registry: Mapping[str, Any],
+    *,
+    evidence_reader: Callable[[str, str], Mapping[str, Any]] | None = None,
+    post_json: Callable[..., Mapping[str, Any]] | None = None,
+    snapshot_writer: Callable[..., Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Submit exactly the version-bound indexing transition and seal its receipt."""
+
+    _validate_plan(plan)
+    tenant_id = _required_str(plan, "tenant_id")
+    registry_tenant_id = _required_str(registry, "tenant_id")
+    if registry_tenant_id != tenant_id:
+        raise ValueError("SciFact registry tenant must match benchmark plan")
+    reader = evidence_reader or read_evidence_artifact
+    evidence = dict(reader(_artifact_path(plan, "index_evidence"), "scifact_indexing_evidence"))
+    if _required_str(evidence, "artifact_type") != "beir_scifact_indexing_evidence":
+        raise ValueError("SciFact index evidence artifact type is invalid")
+    if _required_str(evidence, "status") != "indexed":
+        raise ValueError("SciFact index evidence must have indexed status")
+    _require_matching_registry_identity(evidence, registry, tenant_id=tenant_id)
+    archive_snapshot = _required_mapping(evidence, "archive_snapshot")
+    if _required_str(archive_snapshot, "artifact_path") != _artifact_path(plan, "archive"):
+        raise ValueError("SciFact index evidence archive path does not match plan")
+    if _required_prefixed_sha256(archive_snapshot, "artifact_sha256") != (
+        "sha256:" + _required_sha256(registry, "archive_sha256")
+    ):
+        raise ValueError("SciFact index evidence archive checksum does not match registry")
+    if _required_str(archive_snapshot, "artifact_version_id") != _required_str(
+        registry, "archive_version_id"
+    ):
+        raise ValueError("SciFact index evidence archive version does not match registry")
+    if _required_str(archive_snapshot, "object_lock_mode") != "COMPLIANCE":
+        raise ValueError("SciFact index evidence archive must use COMPLIANCE lock")
+
+    submission = _required_mapping(evidence, "pipeline_state_submission")
+    endpoint_path = _required_str(submission, "endpointPath")
+    if endpoint_path != "/api/bc-21/serp/v1/runs/pipeline-state":
+        raise ValueError("SciFact pipeline-state endpoint is invalid")
+    body = dict(_required_mapping(submission, "body"))
+    headers = {
+        str(name): str(value) for name, value in _required_mapping(submission, "headers").items()
+    }
+    if _required_str(body, "resourceId") != _required_str(registry, "pack_id"):
+        raise ValueError("SciFact pipeline-state resource must match benchmark pack")
+    if _required_str(body, "packVersionId") != _required_str(registry, "pack_version_id"):
+        raise ValueError("SciFact pipeline-state pack version must match registry")
+    if _required_str(body, "sourceId") != _required_str(registry, "source_id"):
+        raise ValueError("SciFact pipeline-state source must match registry")
+    if _required_str(body, "status") != "indexed":
+        raise ValueError("SciFact pipeline-state submission must be indexed")
+    if headers.get("X-Adapstory-Tenant-Id") != tenant_id:
+        raise ValueError("SciFact pipeline-state tenant header does not match plan")
+    if headers.get("X-Adapstory-Actor-Id") != _required_str(plan, "actor_id"):
+        raise ValueError("SciFact pipeline-state actor header does not match plan")
+
+    response = dict(
+        (post_json or post_bc21_json)(
+            _required_str(plan, "bc21_base_url"),
+            endpoint_path,
+            body=body,
+            headers=headers,
+            error_label="BEIR/SciFact pipeline-state submission",
+        )
+    )
+    if _required_str(response, "tenantId") != tenant_id:
+        raise ValueError("SciFact pipeline-state response tenant does not match plan")
+    if _required_str(response, "resourceId") != _required_str(registry, "pack_id"):
+        raise ValueError("SciFact pipeline-state response resource does not match registry")
+    if _required_str(response, "runId") != _required_str(body, "runId"):
+        raise ValueError("SciFact pipeline-state response run does not match submission")
+    if _required_str(response, "status") != "indexed":
+        raise ValueError("SciFact pipeline-state response is not indexed")
+    _required_str(response, "evidenceBundleId")
+    _required_prefixed_sha256(response, "evidenceSealHash")
+
+    receipt = {
+        "archive_snapshot": dict(archive_snapshot),
+        "contract_version": SCIFACT_BENCHMARK_CONTRACT_VERSION,
+        "index_evidence_path": _artifact_path(plan, "index_evidence"),
+        "operation_id": _required_str(plan, "operation_id"),
+        "registry": {
+            "pack_id": _required_str(registry, "pack_id"),
+            "pack_version_id": _required_str(registry, "pack_version_id"),
+            "source_id": _required_str(registry, "source_id"),
+            "tenant_id": tenant_id,
+        },
+        "response": response,
+        "status": "accepted",
+    }
+    snapshot = dict(
+        (snapshot_writer or write_immutable_evidence_snapshot)(
+            artifact_path=_artifact_path(plan, "pipeline_state_receipt"),
+            artifact_type="beir_scifact_pipeline_state_receipt",
+            operation_id=_required_str(plan, "operation_id"),
+            payload=receipt,
+        )
+    )
+    _validate_immutable_json_snapshot(snapshot, "beir_scifact_pipeline_state_receipt")
+    return {**receipt, "snapshot": snapshot}
+
+
+def seal_scifact_activation_evidence(
+    plan: Mapping[str, Any],
+    activation: Mapping[str, Any],
+    *,
+    snapshot_writer: Callable[..., Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Persist approval, activation, and server-resolved selection as WORM evidence."""
+
+    _validate_plan(plan)
+    if not isinstance(activation.get("activation"), Mapping):
+        raise ValueError("SciFact activation response is required")
+    if not isinstance(activation.get("approval"), Mapping):
+        raise ValueError("SciFact approval response is required")
+    if not isinstance(activation.get("workflow_selection"), Mapping):
+        raise ValueError("SciFact workflow selection response is required")
+    writer = snapshot_writer or write_immutable_evidence_snapshot
+    payload = {
+        "activation": dict(_required_mapping(activation, "activation")),
+        "active_pack_version_id": _required_str(activation, "active_pack_version_id"),
+        "approval": dict(_required_mapping(activation, "approval")),
+        "contract_version": SCIFACT_BENCHMARK_CONTRACT_VERSION,
+        "operation_id": _required_str(plan, "operation_id"),
+        "workflow_selection": dict(_required_mapping(activation, "workflow_selection")),
+    }
+    activation_snapshot = dict(
+        writer(
+            artifact_path=_artifact_path(plan, "activation_receipt"),
+            artifact_type="beir_scifact_activation_receipt",
+            operation_id=_required_str(plan, "operation_id"),
+            payload=payload,
+        )
+    )
+    _validate_immutable_json_snapshot(activation_snapshot, "beir_scifact_activation_receipt")
+    selection_snapshot = dict(
+        writer(
+            artifact_path=_artifact_path(plan, "workflow_selection_receipt"),
+            artifact_type="beir_scifact_workflow_selection_receipt",
+            operation_id=_required_str(plan, "operation_id"),
+            payload={
+                "contract_version": SCIFACT_BENCHMARK_CONTRACT_VERSION,
+                "operation_id": _required_str(plan, "operation_id"),
+                "workflow_selection": dict(_required_mapping(activation, "workflow_selection")),
+            },
+        )
+    )
+    _validate_immutable_json_snapshot(selection_snapshot, "beir_scifact_workflow_selection_receipt")
+    return {
+        **payload,
+        "activation_snapshot": activation_snapshot,
+        "selection_snapshot": selection_snapshot,
+    }
+
+
 def _validate_plan(plan: Mapping[str, Any]) -> None:
     if _required_str(plan, "dag_id") != SCIFACT_BENCHMARK_DAG_ID:
         raise ValueError("SciFact plan dag_id is invalid")
@@ -361,6 +521,35 @@ def _validate_immutable_snapshot(snapshot: Mapping[str, object], archive: bytes)
     if not _required_str(snapshot, "artifactPath").startswith("s3://"):
         raise ValueError("SciFact archive snapshot must be stored in S3")
     _required_str(snapshot, "artifactVersionId")
+
+
+def _validate_immutable_json_snapshot(snapshot: Mapping[str, Any], artifact_type: str) -> None:
+    if _required_str(snapshot, "artifactType") != artifact_type:
+        raise ValueError("SciFact immutable receipt has an unexpected artifact type")
+    if _required_str(snapshot, "objectLockMode") != "COMPLIANCE":
+        raise ValueError("SciFact immutable receipt must use COMPLIANCE object lock")
+    if not _required_str(snapshot, "artifactPath").startswith("s3://"):
+        raise ValueError("SciFact immutable receipt must be stored in S3")
+    _required_sha256(snapshot, "artifactSha256")
+    _required_str(snapshot, "artifactVersionId")
+    _required_str(snapshot, "artifactETag")
+
+
+def _require_matching_registry_identity(
+    evidence: Mapping[str, Any],
+    registry: Mapping[str, Any],
+    *,
+    tenant_id: str,
+) -> None:
+    required_pairs = (
+        ("tenant_id", tenant_id),
+        ("source_id", _required_str(registry, "source_id")),
+        ("pack_id", _required_str(registry, "pack_id")),
+        ("pack_version_id", _required_str(registry, "pack_version_id")),
+    )
+    for field_name, expected_value in required_pairs:
+        if _required_str(evidence, field_name) != expected_value:
+            raise ValueError(f"SciFact index evidence {field_name} does not match registry")
 
 
 def _list_bc21_resources(

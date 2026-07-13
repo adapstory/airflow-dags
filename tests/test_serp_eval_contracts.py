@@ -4811,6 +4811,7 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
             self.kwargs = kwargs
 
     for name in (
+        "ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS",
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT",
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_PATH_STYLE",
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION",
@@ -4832,6 +4833,7 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         "ADAPSTORY_SERP_OPENSEARCH_URL",
         "ADAPSTORY_SERP_QDRANT_TIMEOUT_SECONDS",
         "ADAPSTORY_SERP_QDRANT_URL",
+        "ADAPSTORY_SERP_SEARCH_SERVE_BASE_URL",
         "ADAPSTORY_SERP_PUBLIC_DOCS_RETRY_DELAY_SECONDS",
         "ADAPSTORY_SERP_SOURCE_CURL_FALLBACK_ENABLED",
         "ADAPSTORY_SERP_SOURCE_FETCH_TIMEOUT_SECONDS",

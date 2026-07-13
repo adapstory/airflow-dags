@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from hashlib import sha256
+from typing import Any
 
 from dags.serp_scifact_benchmark_contracts import (
     SCIFACT_ARCHIVE_URL,
@@ -8,6 +9,7 @@ from dags.serp_scifact_benchmark_contracts import (
     build_scifact_benchmark_plan,
     materialize_scifact_archive,
     prepare_scifact_benchmark_registry,
+    submit_scifact_pipeline_state,
 )
 
 
@@ -84,7 +86,7 @@ def test_scifact_registry_setup_creates_or_reuses_only_a_dedicated_pack_and_sour
         "objectLockMode": "COMPLIANCE",
         "sourceUrl": SCIFACT_ARCHIVE_URL,
     }
-    submissions: list[dict[str, object]] = []
+    submissions: list[dict[str, Any]] = []
 
     def post_json(
         _base_url: str,
@@ -147,7 +149,7 @@ def test_scifact_pack_activation_requires_index_receipt_and_records_selection() 
         },
         "status": "accepted",
     }
-    submissions: list[dict[str, object]] = []
+    submissions: list[dict[str, Any]] = []
 
     def post_json(
         _base_url: str,
@@ -226,3 +228,88 @@ def test_scifact_pack_activation_requires_index_receipt_and_records_selection() 
         assert headers["X-Adapstory-Trusted-Tenant-Id"] == plan["tenant_id"]
     assert result["active_pack_version_id"] == registry["pack_version_id"]
     assert result["workflow_selection"]["selectionState"] == "active"
+
+
+def test_scifact_pipeline_state_submission_binds_the_index_evidence_to_a_worm_receipt() -> None:
+    plan = build_scifact_benchmark_plan(
+        {
+            "artifact_root_path": "s3://airflow-serp-evidence/serp-evals",
+            "generated_at": "2026-07-13T12:00:00Z",
+        },
+        bc21_base_url="http://prod-serp-context-platform-svc.env-prod.svc.cluster.local:8080",
+    )
+    registry = {
+        "archive_sha256": "a" * 64,
+        "archive_version_id": "version-scifact",
+        "pack_id": "00000000-0000-4000-a000-000000000222",
+        "pack_version_id": "00000000-0000-4000-a000-000000000333",
+        "source_id": "00000000-0000-4000-a000-000000000111",
+        "tenant_id": plan["tenant_id"],
+    }
+    evidence = {
+        "archive_snapshot": {
+            "artifact_path": plan["artifact_paths"]["archive"],
+            "artifact_sha256": "sha256:" + "a" * 64,
+            "artifact_version_id": registry["archive_version_id"],
+            "object_lock_mode": "COMPLIANCE",
+        },
+        "artifact_type": "beir_scifact_indexing_evidence",
+        "pack_id": registry["pack_id"],
+        "pack_version_id": registry["pack_version_id"],
+        "source_id": registry["source_id"],
+        "status": "indexed",
+        "tenant_id": plan["tenant_id"],
+        "pipeline_state_submission": {
+            "body": {
+                "packVersionId": registry["pack_version_id"],
+                "resourceId": registry["pack_id"],
+                "runId": "00000000-0000-4000-a000-000000000555",
+                "sourceId": registry["source_id"],
+                "status": "indexed",
+            },
+            "endpointPath": "/api/bc-21/serp/v1/runs/pipeline-state",
+            "headers": {
+                "X-Adapstory-Actor-Id": plan["actor_id"],
+                "X-Adapstory-Tenant-Id": plan["tenant_id"],
+            },
+        },
+    }
+    submitted: list[dict[str, Any]] = []
+
+    def post_json(
+        _base_url: str,
+        endpoint: str,
+        *,
+        body: dict[str, object],
+        headers: dict[str, str],
+        error_label: str,
+    ) -> dict[str, str]:
+        submitted.append({"body": body, "endpoint": endpoint, "headers": headers})
+        return {
+            "evidenceBundleId": "00000000-0000-4000-a000-000000000444",
+            "evidenceSealHash": "sha256:" + "b" * 64,
+            "resourceId": registry["pack_id"],
+            "runId": body["runId"],
+            "status": "indexed",
+            "tenantId": plan["tenant_id"],
+        }
+
+    receipt = submit_scifact_pipeline_state(
+        plan,
+        registry,
+        evidence_reader=lambda _path, _field: evidence,
+        post_json=post_json,
+        snapshot_writer=lambda **kwargs: {
+            "artifactETag": "pipeline-state-etag",
+            "artifactPath": kwargs["artifact_path"],
+            "artifactSha256": "c" * 64,
+            "artifactType": kwargs["artifact_type"],
+            "artifactVersionId": "pipeline-state-version",
+            "objectLockMode": "COMPLIANCE",
+        },
+    )
+
+    assert submitted[0]["endpoint"] == "/api/bc-21/serp/v1/runs/pipeline-state"
+    assert receipt["status"] == "accepted"
+    assert receipt["response"]["evidenceBundleId"] == "00000000-0000-4000-a000-000000000444"
+    assert receipt["snapshot"]["artifactVersionId"] == "pipeline-state-version"
