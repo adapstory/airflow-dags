@@ -25,6 +25,7 @@ SCIFACT_BENCHMARK_CONTRACT_VERSION = "beir-scifact-airflow/v1"
 SCIFACT_TENANT_ID = "00000000-0000-4000-a000-000000000001"
 SCIFACT_ACTOR_ID = "airflow-serp-beir-scifact"
 SCIFACT_PACK_SLUG = "benchmark-beir-scifact"
+SCIFACT_POLICY_VERSION = "beir-scifact-license-policy@2026.07.13"
 SCIFACT_WORKFLOW_SCOPE = {
     "tenant_mode": "benchmark",
     "tenant_scope": "private",
@@ -153,6 +154,7 @@ def prepare_scifact_benchmark_registry(
                     tenant_id,
                     uuid5(NAMESPACE_URL, operation_id + "|scifact-source"),
                     source_body,
+                    actor_id=actor_id,
                 ),
                 error_label="BEIR/SciFact source registration",
             )
@@ -170,6 +172,7 @@ def prepare_scifact_benchmark_registry(
                     tenant_id,
                     uuid5(NAMESPACE_URL, operation_id + "|scifact-pack"),
                     pack_body,
+                    actor_id=actor_id,
                 ),
                 error_label="BEIR/SciFact pack registration",
             )
@@ -202,6 +205,7 @@ def activate_scifact_benchmark_pack(
 
     _validate_plan(plan)
     tenant_id = _required_str(plan, "tenant_id")
+    actor_id = _required_str(plan, "actor_id")
     base_url = _required_str(plan, "bc21_base_url")
     pack_id = _required_str(registry, "pack_id")
     pack_version_id = _required_str(registry, "pack_version_id")
@@ -213,15 +217,23 @@ def activate_scifact_benchmark_pack(
     if not isinstance(receipt, Mapping):
         raise ValueError("SciFact pipeline receipt response must be an object")
     evidence_bundle_id = _required_str(receipt, "evidenceBundleId")
-    evidence_seal_hash = _required_str(receipt, "evidenceSealHash")
+    evidence_seal_hash = _required_prefixed_sha256(receipt, "evidenceSealHash")
+    if _required_str(receipt, "tenantId") != tenant_id:
+        raise ValueError("SciFact pipeline receipt tenant does not match benchmark plan")
+    if _required_str(receipt, "resourceId") != pack_id:
+        raise ValueError("SciFact pipeline receipt resource does not match benchmark pack")
+    indexed_run_id = _required_str(receipt, "runId")
     submit = post_json or post_bc21_json
 
     approval_body = {
-        "evidenceBundleId": evidence_bundle_id,
-        "evidenceSealHash": evidence_seal_hash,
+        "actorId": actor_id,
+        "dataClass": "PUBLIC",
+        "freshnessState": "fresh",
+        "licenseObligationState": "public_share_allowed",
         "packId": pack_id,
-        "packVersionId": pack_version_id,
-        "tenantId": tenant_id,
+        "policyVersion": SCIFACT_POLICY_VERSION,
+        "sourceType": "website",
+        "trustState": "trusted",
     }
     approval = dict(
         submit(
@@ -232,20 +244,29 @@ def activate_scifact_benchmark_pack(
                 tenant_id,
                 uuid5(NAMESPACE_URL, _required_str(plan, "operation_id") + "|scifact-approval"),
                 approval_body,
+                actor_id=actor_id,
             ),
             error_label="BEIR/SciFact autonomous approval",
         )
     )
+    if _required_str(approval, "tenantId") != tenant_id:
+        raise ValueError("SciFact benchmark approval tenant does not match benchmark plan")
+    if _required_str(approval, "packId") != pack_id:
+        raise ValueError("SciFact benchmark approval pack does not match registry")
+    if _required_str(approval, "policyDecision") != "approved":
+        raise ValueError("SciFact benchmark policy decision was not approved")
+    if _required_str(approval, "approvalDecision") != "approve":
+        raise ValueError("SciFact benchmark approval decision was not approve")
     if _required_str(approval, "approvalState") != "approved":
         raise ValueError("SciFact benchmark approval was not approved")
 
     activation_body = {
+        "activationReasonCode": "beir_scifact_indexed_evidence_approved",
         "approvalRunId": _required_str(approval, "autonomousRunId"),
         "evidenceBundleId": evidence_bundle_id,
         "evidenceSealHash": evidence_seal_hash,
-        "packId": pack_id,
+        "indexedRunId": indexed_run_id,
         "packVersionId": pack_version_id,
-        "tenantId": tenant_id,
     }
     activation = dict(
         submit(
@@ -256,19 +277,40 @@ def activate_scifact_benchmark_pack(
                 tenant_id,
                 uuid5(NAMESPACE_URL, _required_str(plan, "operation_id") + "|scifact-activation"),
                 activation_body,
+                actor_id=actor_id,
             ),
             error_label="BEIR/SciFact pack activation",
         )
     )
+    if _required_str(activation, "tenantId") != tenant_id:
+        raise ValueError("SciFact activation tenant does not match benchmark plan")
+    if _required_str(activation, "packId") != pack_id:
+        raise ValueError("SciFact activation pack does not match registry")
     if _required_str(activation, "packVersionId") != pack_version_id:
         raise ValueError("SciFact activation pack version does not match registry")
+    if _required_str(activation, "activationState") != "active":
+        raise ValueError("SciFact activation was not active")
 
+    workflow_scope = _required_mapping(plan, "workflow_scope")
     selection_body = {
+        "actorId": actor_id,
+        "evidenceBundleId": evidence_bundle_id,
         "packId": pack_id,
-        "packVersionId": pack_version_id,
-        "selectionReasonCode": "benchmark_activation",
-        "tenantId": tenant_id,
-        **SCIFACT_WORKFLOW_SCOPE,
+        "policyBundleSha256": "sha256:"
+        + sha256(
+            "|".join(
+                (
+                    _required_sha256(registry, "archive_sha256"),
+                    evidence_bundle_id,
+                    pack_version_id,
+                )
+            ).encode()
+        ).hexdigest(),
+        "policyVersion": SCIFACT_POLICY_VERSION,
+        "selectionReasonCode": "beir_scifact_live_benchmark",
+        "tenantMode": _required_str(workflow_scope, "tenant_mode"),
+        "tenantScope": _required_str(workflow_scope, "tenant_scope"),
+        "workflowCode": _required_str(workflow_scope, "workflow_code"),
     }
     selection = dict(
         submit(
@@ -279,10 +321,15 @@ def activate_scifact_benchmark_pack(
                 tenant_id,
                 uuid5(NAMESPACE_URL, _required_str(plan, "operation_id") + "|scifact-selection"),
                 selection_body,
+                actor_id=actor_id,
             ),
             error_label="BEIR/SciFact workflow selection",
         )
     )
+    if _required_str(selection, "tenantId") != tenant_id:
+        raise ValueError("SciFact workflow selection tenant does not match benchmark plan")
+    if _required_str(selection, "packId") != pack_id:
+        raise ValueError("SciFact workflow selection pack does not match registry")
     if _required_str(selection, "selectionState") != "active":
         raise ValueError("SciFact workflow selection was not activated")
     return {
@@ -363,10 +410,17 @@ def _acceptance_resource_id(payload: Mapping[str, Any]) -> str:
 
 
 def _mutation_headers(
-    tenant_id: str, idempotency_key: object, body: Mapping[str, Any]
+    tenant_id: str,
+    idempotency_key: object,
+    body: Mapping[str, Any],
+    *,
+    actor_id: str,
 ) -> dict[str, str]:
     return {
+        "X-Adapstory-Actor-Id": actor_id,
         "X-Adapstory-Tenant-Id": tenant_id,
+        "X-Adapstory-Trusted-Actor-Id": actor_id,
+        "X-Adapstory-Trusted-Tenant-Id": tenant_id,
         "X-Fingerprint": "sha256:"
         + sha256(
             json.dumps(body, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode()
@@ -411,6 +465,21 @@ def _required_sha256(value: Mapping[str, Any], field_name: str) -> str:
     if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
         raise ValueError(f"{field_name} must be a SHA-256 hex digest")
     return digest
+
+
+def _required_prefixed_sha256(value: Mapping[str, Any], field_name: str) -> str:
+    digest = _required_str(value, field_name)
+    if not digest.startswith("sha256:"):
+        raise ValueError(f"{field_name} must be a sha256-prefixed digest")
+    _required_sha256({field_name: digest.removeprefix("sha256:")}, field_name)
+    return digest
+
+
+def _required_mapping(value: Mapping[str, Any], field_name: str) -> Mapping[str, Any]:
+    nested = value.get(field_name)
+    if not isinstance(nested, Mapping):
+        raise ValueError(f"{field_name} is required")
+    return nested
 
 
 def _required_str(value: Mapping[str, object], field_name: str) -> str:

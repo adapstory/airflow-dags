@@ -147,7 +147,7 @@ def test_scifact_pack_activation_requires_index_receipt_and_records_selection() 
         },
         "status": "accepted",
     }
-    endpoints: list[str] = []
+    submissions: list[dict[str, object]] = []
 
     def post_json(
         _base_url: str,
@@ -157,7 +157,7 @@ def test_scifact_pack_activation_requires_index_receipt_and_records_selection() 
         headers: dict[str, str],
         error_label: str,
     ) -> dict[str, str]:
-        endpoints.append(endpoint)
+        submissions.append({"body": body, "endpoint": endpoint, "headers": headers})
         if endpoint.endswith("autonomous-approval-decisions"):
             return {
                 "approvalDecision": "approve",
@@ -169,6 +169,7 @@ def test_scifact_pack_activation_requires_index_receipt_and_records_selection() 
             }
         if endpoint.endswith("publish-activations"):
             return {
+                "activationState": "active",
                 "evidenceBundleId": "00000000-0000-4000-a000-000000000444",
                 "packId": registry["pack_id"],
                 "packVersionId": registry["pack_version_id"],
@@ -188,10 +189,40 @@ def test_scifact_pack_activation_requires_index_receipt_and_records_selection() 
         post_json=post_json,
     )
 
-    assert endpoints == [
+    assert [submission["endpoint"] for submission in submissions] == [
         "/api/bc-21/serp/v1/governance/autonomous-approval-decisions",
         f"/api/bc-21/serp/v1/packs/{registry['pack_id']}/publish-activations",
         "/api/bc-21/serp/v1/packs/workflow-selections",
     ]
+    approval = submissions[0]
+    assert approval["body"] == {
+        "actorId": plan["actor_id"],
+        "dataClass": "PUBLIC",
+        "freshnessState": "fresh",
+        "licenseObligationState": "public_share_allowed",
+        "packId": registry["pack_id"],
+        "policyVersion": "beir-scifact-license-policy@2026.07.13",
+        "sourceType": "website",
+        "trustState": "trusted",
+    }
+    activation = submissions[1]
+    assert activation["body"] == {
+        "activationReasonCode": "beir_scifact_indexed_evidence_approved",
+        "approvalRunId": "00000000-0000-4000-a000-000000000666",
+        "evidenceBundleId": "00000000-0000-4000-a000-000000000444",
+        "evidenceSealHash": "sha256:" + "b" * 64,
+        "indexedRunId": "00000000-0000-4000-a000-000000000555",
+        "packVersionId": registry["pack_version_id"],
+    }
+    selection = submissions[2]
+    assert selection["body"]["actorId"] == plan["actor_id"]
+    assert selection["body"]["evidenceBundleId"] == "00000000-0000-4000-a000-000000000444"
+    assert selection["body"]["policyBundleSha256"].startswith("sha256:")
+    for submission in submissions:
+        headers = submission["headers"]
+        assert headers["X-Adapstory-Tenant-Id"] == plan["tenant_id"]
+        assert headers["X-Adapstory-Actor-Id"] == plan["actor_id"]
+        assert headers["X-Adapstory-Trusted-Actor-Id"] == plan["actor_id"]
+        assert headers["X-Adapstory-Trusted-Tenant-Id"] == plan["tenant_id"]
     assert result["active_pack_version_id"] == registry["pack_version_id"]
     assert result["workflow_selection"]["selectionState"] == "active"
