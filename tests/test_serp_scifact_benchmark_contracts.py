@@ -72,6 +72,19 @@ def test_scifact_dag_assigns_the_dedicated_workload_identity_to_each_bc21_task()
         assert executor_config.id == "SCIFACT_EXECUTOR_CONFIG"
 
 
+def test_scifact_kubernetes_tasks_use_separate_acquisition_and_evaluation_identities() -> None:
+    source = (
+        Path(__file__).resolve().parents[1] / "dags" / "serp_beir_scifact_live_benchmark.py"
+    ).read_text(encoding="utf-8")
+
+    assert "SCIFACT_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT" in source
+    assert "SCIFACT_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT" in source
+    assert "SCIFACT_ACQUISITION_WORKLOAD_LABELS" in source
+    assert "SCIFACT_EVALUATOR_WORKLOAD_LABELS" in source
+    assert "service_account_name=SCIFACT_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT" in source
+    assert "service_account_name=SCIFACT_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT" in source
+
+
 def test_scifact_archive_materialization_binds_bytes_and_s3_version_before_indexing() -> None:
     plan = build_scifact_benchmark_plan(
         {

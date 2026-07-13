@@ -58,6 +58,8 @@ _EVAL_CONTRACT_VERSION = "2026.07.2"
 _BENCHMARK_SUITE_CONTRACT_VERSION = "2026.07.3"
 _METRIC_COMPATIBILITY_CONTRACT_VERSION = "serp-suite-metric-compatibility/v1"
 _BENCHMARK_METRIC_FAMILIES = ("retrieval", "answer-quality", "citation", "policy")
+_STRICT_PRIMARY_RETRIEVAL_METRICS = frozenset({"MRR@10", "nDCG@10"})
+_STRICT_PAIRED_RUN_COUNT = 5
 _ALLOWED_DATASET_DISTRIBUTION_RULES = {
     "internal-only",
     "internal-only-no-redistribution",
@@ -1313,19 +1315,27 @@ def write_immutable_evidence_bytes_snapshot(
     if artifact.kind != "s3":
         raise ValueError("immutable evidence snapshots require an s3:// artifact path")
     retention_days = _required_positive_int_env(_EVIDENCE_RETENTION_DAYS_ENV)
-    response = (s3_client or _s3_client()).put_object(
+    client = s3_client or _s3_client()
+    written_at = datetime.now(UTC)
+    response = client.put_object(
         Bucket=_required_str_ref(artifact.bucket),
         Key=_required_str_ref(artifact.key),
         Body=payload,
         ContentType=content_type,
-        ObjectLockMode="COMPLIANCE",
-        ObjectLockRetainUntilDate=datetime.now(UTC) + timedelta(days=retention_days),
     )
     if not isinstance(response, Mapping):
         raise ValueError("immutable evidence S3 response is invalid")
     version_id = response.get("VersionId")
     if not isinstance(version_id, str) or not version_id.strip():
         raise ValueError("immutable evidence S3 response is missing VersionId")
+    _verify_compliance_locked_evidence_version(
+        client,
+        bucket=_required_str_ref(artifact.bucket),
+        key=_required_str_ref(artifact.key),
+        version_id=version_id,
+        retention_days=retention_days,
+        written_at=written_at,
+    )
     etag = response.get("ETag")
     if not isinstance(etag, str) or not etag.strip():
         raise ValueError("immutable evidence S3 response is missing ETag")
@@ -1341,6 +1351,38 @@ def write_immutable_evidence_bytes_snapshot(
         "retentionDays": retention_days,
         "status": "written",
     }
+
+
+def _verify_compliance_locked_evidence_version(
+    s3_client: Any,
+    *,
+    bucket: str,
+    key: str,
+    version_id: str,
+    retention_days: int,
+    written_at: datetime,
+) -> None:
+    """Fail closed unless bucket policy applied COMPLIANCE retention to this version.
+
+    Evidence writers intentionally lack ``s3:PutObjectRetention``.  The
+    GitOps-owned evidence bucket supplies its default COMPLIANCE retention, and
+    this read-after-write check binds that protection to the exact VersionId
+    returned by the upload before any provenance record is accepted.
+    """
+
+    response = s3_client.head_object(Bucket=bucket, Key=key, VersionId=version_id)
+    if not isinstance(response, Mapping):
+        raise ValueError("immutable evidence HeadObject response is invalid")
+    if response.get("VersionId") != version_id:
+        raise ValueError("immutable evidence HeadObject VersionId does not match upload")
+    if response.get("ObjectLockMode") != "COMPLIANCE":
+        raise ValueError("immutable evidence HeadObject must report COMPLIANCE retention")
+    retain_until = response.get("ObjectLockRetainUntilDate")
+    if not isinstance(retain_until, datetime) or retain_until.tzinfo is None:
+        raise ValueError("immutable evidence HeadObject must include retention timestamp")
+    minimum_retention = written_at + timedelta(days=retention_days) - timedelta(minutes=1)
+    if retain_until.astimezone(UTC) < minimum_retention:
+        raise ValueError("immutable evidence retention is shorter than the required policy")
 
 
 def materialize_live_benchmark_catalog_artifact(
@@ -4962,13 +5004,20 @@ def _required_improvement_candidate_evaluation(
             r"sha256:[0-9a-f]{64}", _required_str(suite, "executionEvidenceSha256")
         ):
             raise ValueError("candidate_evaluation executionEvidenceSha256 must be a sha256 digest")
+        _required_str(suite, "executionEvidenceVersionId")
         for metric in _required_object_list(suite, "metricResults"):
-            _required_str(metric, "metric")
+            metric_name = _required_str(metric, "metric")
             if _required_str(metric, "metricFamily") != metric_family:
                 raise ValueError("candidate_evaluation metricFamily must match its suite result")
             _required_number_from_string(metric, "baselineScore")
             _required_number_from_string(metric, "candidateScore")
             _required_number_from_string(metric, "normalizedScore")
+            if metric_family == "retrieval" and metric_name in _STRICT_PRIMARY_RETRIEVAL_METRICS:
+                _validate_paired_retrieval_evidence(
+                    metric,
+                    suite_id=suite_id,
+                    metric_name=metric_name,
+                )
     if observed_cells != expected_cells:
         raise ValueError(
             "candidate_evaluation must include every metric_compatibility suite and metric family"
@@ -4992,10 +5041,13 @@ def _validate_improvement_suite_provenance(
         "datasetRightsStatus",
         "datasetManifestUri",
         "datasetManifestSha256",
+        "datasetManifestVersionId",
         "baselineEvidenceUri",
         "baselineEvidenceSha256",
+        "baselineEvidenceVersionId",
         "candidateEvidenceUri",
         "candidateEvidenceSha256",
+        "candidateEvidenceVersionId",
         "referenceSourceUri",
     ):
         _required_str(provenance, field_name)
@@ -5003,6 +5055,22 @@ def _validate_improvement_suite_provenance(
         parsed = urlparse(_required_str(provenance, field_name))
         if parsed.scheme != "https" or not parsed.hostname:
             raise ValueError(f"{suite_id} {field_name} must be an https URL")
+    envelope = _required_mapping(provenance, "comparisonEnvelope")
+    for field_name in (
+        "evaluatorImageDigest",
+        "policyBundleVersion",
+        "rerankerProfileVersion",
+        "retrievalProfileVersion",
+    ):
+        _required_str(envelope, field_name)
+    for field_name in (
+        "evaluatorImageDigest",
+        "qrelsSha256",
+        "querySetSha256",
+        "sampleManifestSha256",
+    ):
+        _required_sha256_prefixed(envelope, field_name)
+    _required_str_list(envelope, "packVersionIds")
     if not re.fullmatch(r"[0-9a-f]{40}", _required_str(provenance, "adapterSourceRevision")):
         raise ValueError(f"{suite_id} adapterSourceRevision must be a 40-character SHA")
     for field_name in (
@@ -5022,6 +5090,38 @@ def _validate_improvement_suite_provenance(
         rights_status=_required_str(provenance, "datasetRightsStatus"),
         error_prefix=suite_id,
     )
+
+
+def _validate_paired_retrieval_evidence(
+    metric_result: Mapping[str, Any],
+    *,
+    suite_id: str,
+    metric_name: str,
+) -> None:
+    paired_runs = _required_object_list(metric_result, "pairedRunScores")
+    if len(paired_runs) != _STRICT_PAIRED_RUN_COUNT:
+        raise ValueError("pairedRunScores must contain exactly five paired runs")
+    observed_evidence_versions: set[tuple[str, str]] = set()
+    for paired_run in paired_runs:
+        for evidence_name in ("baselineEvidence", "candidateEvidence"):
+            uri_field = f"{evidence_name}Uri"
+            sha_field = f"{evidence_name}Sha256"
+            version_field = f"{evidence_name}VersionId"
+            if _artifact_ref(uri_field, _required_str(paired_run, uri_field)).kind != "s3":
+                raise ValueError(f"pairedRunScores {uri_field} must be an s3:// immutable artifact")
+            _required_sha256_prefixed(paired_run, sha_field)
+            _required_str(paired_run, version_field)
+        _required_number_from_string(paired_run, "baselineRawScore")
+        _required_number_from_string(paired_run, "candidateRawScore")
+        evidence_versions = (
+            _required_str(paired_run, "baselineEvidenceVersionId"),
+            _required_str(paired_run, "candidateEvidenceVersionId"),
+        )
+        if evidence_versions in observed_evidence_versions:
+            raise ValueError(
+                f"pairedRunScores evidence versions must be distinct for {suite_id}/{metric_name}"
+            )
+        observed_evidence_versions.add(evidence_versions)
 
 
 def _improvement_replay_context(
@@ -5108,8 +5208,10 @@ def _improvement_spec_payload(
         "artifact_paths": dict(artifact_paths),
         "baseline": {
             "beatCondition": {
-                "minimumLead": {"MRR@10": 0.01, "nDCG@10": 0.01},
-                "rule": "primary_metrics_improve_without_blocking_regressions",
+                "bootstrapConfidenceLevel": "0.95",
+                "minimumMultiplier": "2.0",
+                "pairedRunCount": 5,
+                "rule": "all_required_primary_accuracy_metrics_meet_multiplier",
             },
             "normalizedGateFloor": SERP_NORMALIZED_GATE_FLOOR,
             "referenceRunId": baseline_run_id,
@@ -5148,10 +5250,10 @@ def _improvement_spec_payload(
         },
         "modelGovernance": dict(_required_mapping(plan, "model_governance")),
         "objective": {
+            "metricUpperBounds": {"MRR@10": "1.0", "nDCG@10": "1.0"},
             "optimizationDirection": "maximize",
-            "targetMetricFamily": {
-                "primary": ["nDCG@10", "MRR@10"],
-                "secondary": ["Recall@10", "Citation Accuracy"],
+            "primaryAccuracyMetrics": {
+                suite_id: {"retrieval": ["nDCG@10", "MRR@10"]} for suite_id in selected_suite_ids
             },
             "type": "benchmark-ratchet",
         },

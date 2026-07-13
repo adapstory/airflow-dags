@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Any, cast
 
@@ -200,10 +201,19 @@ def test_immutable_evidence_snapshot_requires_versioned_compliance_locked_s3_obj
     class S3Client:
         def __init__(self) -> None:
             self.calls: list[dict[str, object]] = []
+            self.head_calls: list[dict[str, object]] = []
 
         def put_object(self, **kwargs: object) -> dict[str, str]:
             self.calls.append(kwargs)
             return {"ETag": '"deadbeef"', "VersionId": "version-20260713"}
+
+        def head_object(self, **kwargs: object) -> dict[str, object]:
+            self.head_calls.append(kwargs)
+            return {
+                "ObjectLockMode": "COMPLIANCE",
+                "ObjectLockRetainUntilDate": datetime.now(UTC) + timedelta(days=366),
+                "VersionId": "version-20260713",
+            }
 
     monkeypatch.setenv("ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS", "365")
     client = S3Client()
@@ -221,7 +231,14 @@ def test_immutable_evidence_snapshot_requires_versioned_compliance_locked_s3_obj
     assert result["artifactETag"] == "deadbeef"
     assert client.calls[0]["Bucket"] == "airflow-serp-evidence"
     assert client.calls[0]["Key"] == "serp-evals/run/catalog.json"
-    assert client.calls[0]["ObjectLockMode"] == "COMPLIANCE"
+    assert "ObjectLockMode" not in client.calls[0]
+    assert client.head_calls == [
+        {
+            "Bucket": "airflow-serp-evidence",
+            "Key": "serp-evals/run/catalog.json",
+            "VersionId": "version-20260713",
+        }
+    ]
 
 
 def test_immutable_binary_snapshot_binds_raw_dataset_bytes_to_s3_version(
@@ -230,10 +247,19 @@ def test_immutable_binary_snapshot_binds_raw_dataset_bytes_to_s3_version(
     class S3Client:
         def __init__(self) -> None:
             self.calls: list[dict[str, object]] = []
+            self.head_calls: list[dict[str, object]] = []
 
         def put_object(self, **kwargs: object) -> dict[str, str]:
             self.calls.append(kwargs)
             return {"ETag": '"scifact-archive"', "VersionId": "version-scifact"}
+
+        def head_object(self, **kwargs: object) -> dict[str, object]:
+            self.head_calls.append(kwargs)
+            return {
+                "ObjectLockMode": "COMPLIANCE",
+                "ObjectLockRetainUntilDate": datetime.now(UTC) + timedelta(days=366),
+                "VersionId": "version-scifact",
+            }
 
     monkeypatch.setenv("ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS", "365")
     client = S3Client()
@@ -253,4 +279,5 @@ def test_immutable_binary_snapshot_binds_raw_dataset_bytes_to_s3_version(
     )
     assert client.calls[0]["Body"] == b"PK\\x03\\x04scifact"
     assert client.calls[0]["ContentType"] == "application/zip"
-    assert client.calls[0]["ObjectLockMode"] == "COMPLIANCE"
+    assert "ObjectLockMode" not in client.calls[0]
+    assert client.head_calls[0]["VersionId"] == "version-scifact"

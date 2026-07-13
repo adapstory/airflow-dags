@@ -27,12 +27,27 @@ from dags.serp_web_seed_crawl_refresh import (
     pipeline_runner_runtime_env_vars,
 )
 
-SCIFACT_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-beir-scifact"
+SCIFACT_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-beir-scifact"
+SCIFACT_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-evidence-evaluator"
+SCIFACT_ACQUISITION_WORKLOAD_LABELS = {
+    "adapstory.com/serp-evidence-workload": "true",
+    "adapstory.com/serp-network-profile": "benchmark-acquisition",
+    "component": "worker",
+    "release": "airflow",
+    "tier": "airflow",
+}
+SCIFACT_EVALUATOR_WORKLOAD_LABELS = {
+    "adapstory.com/serp-evidence-workload": "true",
+    "adapstory.com/serp-network-profile": "benchmark-evaluator",
+    "component": "worker",
+    "release": "airflow",
+    "tier": "airflow",
+}
 SCIFACT_EXECUTOR_CONFIG = {
     "pod_override": k8s.V1Pod(
         spec=k8s.V1PodSpec(
             containers=[k8s.V1Container(name="base")],
-            service_account_name=SCIFACT_WORKLOAD_SERVICE_ACCOUNT,
+            service_account_name=SCIFACT_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT,
         )
     )
 }
@@ -148,9 +163,9 @@ index_scifact = KubernetesPodOperator(
         _store_name("ADAPSTORY_SERP_PUBLIC_DOCS_NEO4J_DATABASE"),
     ],
     env_vars=pipeline_runner_runtime_env_vars(),
-    service_account_name="airflow-worker",
+    service_account_name=SCIFACT_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT,
     automount_service_account_token=False,
-    labels={"component": "worker", "release": "airflow", "tier": "airflow"},
+    labels=SCIFACT_ACQUISITION_WORKLOAD_LABELS,
     container_resources=SERP_PIPELINE_RUNNER_RESOURCES,
     container_security_context=k8s.V1SecurityContext(
         allow_privilege_escalation=False,
@@ -228,9 +243,9 @@ evaluate_scifact = KubernetesPodOperator(
         "{{ ti.xcom_pull(task_ids='prepare_scifact_benchmark_registry')['pack_version_id'] }}",
     ],
     env_vars=pipeline_runner_runtime_env_vars(),
-    service_account_name="airflow-worker",
+    service_account_name=SCIFACT_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT,
     automount_service_account_token=False,
-    labels={"component": "worker", "release": "airflow", "tier": "airflow"},
+    labels=SCIFACT_EVALUATOR_WORKLOAD_LABELS,
     container_resources=SERP_PIPELINE_RUNNER_RESOURCES,
     container_security_context=k8s.V1SecurityContext(
         allow_privilege_escalation=False,

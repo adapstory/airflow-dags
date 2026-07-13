@@ -63,6 +63,14 @@ SERP_PIPELINE_RUNNER_RESOURCES = k8s.V1ResourceRequirements(
     requests={"cpu": "250m", "memory": "512Mi"},
     limits={"cpu": "1000m", "memory": "2Gi"},
 )
+PUBLIC_DOCS_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-public-docs-acquisition"
+PUBLIC_DOCS_ACQUISITION_WORKLOAD_LABELS = {
+    "adapstory.com/serp-evidence-workload": "true",
+    "adapstory.com/serp-network-profile": "public-docs-acquisition",
+    "component": "worker",
+    "release": "airflow",
+    "tier": "airflow",
+}
 
 
 def current_airflow_runtime_image() -> str:
@@ -99,7 +107,7 @@ def pipeline_runner_runtime_env_vars() -> list[k8s.V1EnvVar]:
                 name="ADAPSTORY_AIRFLOW_ARTIFACT_S3_ACCESS_KEY",
                 value_from=k8s.V1EnvVarSource(
                     secret_key_ref=k8s.V1SecretKeySelector(
-                        name="airflow-artifact-store",
+                        name="airflow-serp-evidence-store",
                         key="access-key",
                     )
                 ),
@@ -108,7 +116,7 @@ def pipeline_runner_runtime_env_vars() -> list[k8s.V1EnvVar]:
                 name="ADAPSTORY_AIRFLOW_ARTIFACT_S3_SECRET_KEY",
                 value_from=k8s.V1EnvVarSource(
                     secret_key_ref=k8s.V1SecretKeySelector(
-                        name="airflow-artifact-store",
+                        name="airflow-serp-evidence-store",
                         key="secret-key",
                     )
                 ),
@@ -237,13 +245,9 @@ run_pipeline = KubernetesPodOperator(
     image=current_airflow_runtime_image(),
     cmds=["python", "-m", "adapstory_serp_pipeline.orchestration.seed_refresh_remote_runner"],
     env_vars=pipeline_runner_env_vars("dispatch_pipeline_seed_refresh_handoff"),
-    service_account_name="airflow-worker",
+    service_account_name=PUBLIC_DOCS_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT,
     automount_service_account_token=False,
-    labels={
-        "component": "worker",
-        "release": "airflow",
-        "tier": "airflow",
-    },
+    labels=PUBLIC_DOCS_ACQUISITION_WORKLOAD_LABELS,
     container_resources=SERP_PIPELINE_RUNNER_RESOURCES,
     container_security_context=k8s.V1SecurityContext(
         allow_privilege_escalation=False,

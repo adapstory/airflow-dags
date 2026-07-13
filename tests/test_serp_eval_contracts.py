@@ -1613,6 +1613,23 @@ def test_build_benchmark_improvement_wave_plan_requires_executable_candidate_evi
         build_benchmark_improvement_wave_plan(conf)
 
 
+def test_build_benchmark_improvement_wave_plan_requires_versioned_paired_retrieval_evidence() -> (
+    None
+):
+    conf = _improvement_wave_conf()
+    candidate = cast(dict[str, Any], conf["candidate_evaluation"])
+    retrieval_result = next(
+        suite
+        for suite in cast(list[dict[str, Any]], candidate["suiteResults"])
+        if suite["metricFamily"] == "retrieval"
+    )
+    retrieval_metric = cast(list[dict[str, Any]], retrieval_result["metricResults"])[0]
+    retrieval_metric.pop("pairedRunScores")
+
+    with pytest.raises(ValueError, match="pairedRunScores"):
+        build_benchmark_improvement_wave_plan(conf)
+
+
 def test_improvement_plan_uses_policy_declared_metric_families() -> None:
     conf = _improvement_wave_conf()
     candidate = cast(dict[str, Any], conf["candidate_evaluation"])
@@ -1701,6 +1718,21 @@ def test_write_benchmark_improvement_spec_persists_external_candidate_evaluation
     assert spec_path.exists()
     assert spec_artifact["payload"]["status"] == "ready-for-executable-evaluation"
     assert spec_artifact["payload"]["dryRun"] is False
+    assert spec_artifact["payload"]["baseline"]["beatCondition"] == {
+        "bootstrapConfidenceLevel": "0.95",
+        "minimumMultiplier": "2.0",
+        "pairedRunCount": 5,
+        "rule": "all_required_primary_accuracy_metrics_meet_multiplier",
+    }
+    assert spec_artifact["payload"]["objective"] == {
+        "metricUpperBounds": {"MRR@10": "1.0", "nDCG@10": "1.0"},
+        "optimizationDirection": "maximize",
+        "primaryAccuracyMetrics": {
+            suite_id: {"retrieval": ["nDCG@10", "MRR@10"]}
+            for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+        },
+        "type": "benchmark-ratchet",
+    }
     assert spec_artifact["payload"]["replay"] == {
         "baselineRunId": conf["baseline_run_id"],
         "candidateRunId": "candidate-reranker-v2-run-001",
@@ -4678,6 +4710,10 @@ def test_serp_public_docs_dag_runs_default_seed_registry_pipeline_path() -> None
     assert "datetime.now(UTC)" in source
     assert "KubernetesPodOperator" in source
     assert "run_public_docs_seed_refresh_pipeline" in source
+    assert "airflow-serp-evidence-store" in source
+    assert "airflow-artifact-store" not in source
+    assert "PUBLIC_DOCS_ACQUISITION_WORKLOAD_LABELS" in source
+    assert "airflow-serp-public-docs-acquisition" in source
 
 
 def test_serp_public_docs_pipeline_task_survives_scheduler_rollout() -> None:
@@ -4713,15 +4749,33 @@ def test_serp_public_docs_pipeline_task_survives_scheduler_rollout() -> None:
             assert "current_airflow_runtime_image" in source
             assert "ADAPSTORY_SERP_EMBEDDING_DIMENSION" in source
             labels = next(keyword.value for keyword in node.keywords if keyword.arg == "labels")
-            assert isinstance(labels, ast.Dict)
+            assert isinstance(labels, ast.Name)
+            assert labels.id == "PUBLIC_DOCS_ACQUISITION_WORKLOAD_LABELS"
+            labels_definition = next(
+                assignment.value
+                for assignment in tree.body
+                if isinstance(assignment, ast.Assign)
+                and any(
+                    isinstance(target, ast.Name)
+                    and target.id == "PUBLIC_DOCS_ACQUISITION_WORKLOAD_LABELS"
+                    for target in assignment.targets
+                )
+            )
+            assert isinstance(labels_definition, ast.Dict)
             assert {
                 key.value: value.value
-                for key, value in zip(labels.keys, labels.values, strict=True)
+                for key, value in zip(
+                    labels_definition.keys,
+                    labels_definition.values,
+                    strict=True,
+                )
                 if isinstance(key, ast.Constant)
                 and isinstance(key.value, str)
                 and isinstance(value, ast.Constant)
                 and isinstance(value.value, str)
             } == {
+                "adapstory.com/serp-evidence-workload": "true",
+                "adapstory.com/serp-network-profile": "public-docs-acquisition",
                 "component": "worker",
                 "release": "airflow",
                 "tier": "airflow",
@@ -5456,18 +5510,20 @@ def _improvement_suite_evidence(suite_id: str, metric_family: str) -> dict[str, 
     if metric_family == "retrieval":
         metric_results = [
             {
-                "baselineScore": "0.7800",
-                "candidateScore": "0.8000",
+                "baselineScore": "0.3800",
+                "candidateScore": "0.7600",
                 "metric": "nDCG@10",
                 "metricFamily": metric_family,
-                "normalizedScore": "0.8000",
+                "normalizedScore": "0.7600",
+                "pairedRunScores": _improvement_paired_run_scores(suite_id, "ndcg"),
             },
             {
-                "baselineScore": "0.7700",
-                "candidateScore": "0.7900",
+                "baselineScore": "0.3800",
+                "candidateScore": "0.7600",
                 "metric": "MRR@10",
                 "metricFamily": metric_family,
-                "normalizedScore": "0.7900",
+                "normalizedScore": "0.7600",
+                "pairedRunScores": _improvement_paired_run_scores(suite_id, "mrr"),
             },
         ]
     else:
@@ -5483,6 +5539,7 @@ def _improvement_suite_evidence(suite_id: str, metric_family: str) -> dict[str, 
     return {
         "executionEvidenceSha256": "sha256:" + "f" * 64,
         "executionEvidenceUri": f"s3://airflow-serp-artifacts/fixtures/{suite_id}/{metric_family}.json",
+        "executionEvidenceVersionId": f"fixture-{suite_id}-{metric_family}-execution-v1",
         "gateStatus": "passed",
         "metricFamily": metric_family,
         "metricResults": metric_results,
@@ -5494,19 +5551,54 @@ def _improvement_suite_evidence(suite_id: str, metric_family: str) -> dict[str, 
             "adapterImageDigest": "sha256:" + "b" * 64,
             "baselineEvidenceUri": f"s3://airflow-serp-artifacts/fixtures/{suite_id}/baseline.json",
             "baselineEvidenceSha256": "sha256:" + "c" * 64,
+            "baselineEvidenceVersionId": f"fixture-{suite_id}-baseline-v1",
             "candidateEvidenceUri": f"s3://airflow-serp-artifacts/fixtures/{suite_id}/candidate.json",
             "candidateEvidenceSha256": "sha256:" + "d" * 64,
+            "candidateEvidenceVersionId": f"fixture-{suite_id}-candidate-v1",
             "datasetDistributionRule": "snippets-only",
             "datasetLicenseId": "Apache-2.0",
             "datasetRightsStatus": "attested",
             "datasetManifestUri": f"s3://airflow-serp-artifacts/fixtures/{suite_id}/dataset.json",
             "datasetManifestSha256": "sha256:" + "e" * 64,
+            "datasetManifestVersionId": f"fixture-{suite_id}-dataset-v1",
             "referenceSourceUri": "https://example.com/benchmark-reference",
+            "comparisonEnvelope": {
+                "evaluatorImageDigest": "sha256:" + "a" * 64,
+                "packVersionIds": ["fixture-pack-v1"],
+                "policyBundleVersion": "policy@fixture-v1",
+                "qrelsSha256": "sha256:" + "b" * 64,
+                "querySetSha256": "sha256:" + "c" * 64,
+                "rerankerProfileVersion": "reranker@fixture-v2",
+                "retrievalProfileVersion": "hybrid@fixture-v1",
+                "sampleManifestSha256": "sha256:" + "d" * 64,
+            },
         },
         "suiteCode": suite_id,
         "suiteContractVersion": "2026.07.3",
         "suiteVersion": "fixture@2026.07.3",
     }
+
+
+def _improvement_paired_run_scores(suite_id: str, metric_key: str) -> list[dict[str, str]]:
+    return [
+        {
+            "baselineEvidenceSha256": "sha256:" + f"{index}" * 64,
+            "baselineEvidenceUri": (
+                f"s3://airflow-serp-artifacts/fixtures/{suite_id}/{metric_key}/"
+                f"baseline-{index}.json"
+            ),
+            "baselineEvidenceVersionId": f"fixture-{suite_id}-{metric_key}-baseline-{index}",
+            "baselineRawScore": "0.3800",
+            "candidateEvidenceSha256": "sha256:" + f"{index + 5}" * 64,
+            "candidateEvidenceUri": (
+                f"s3://airflow-serp-artifacts/fixtures/{suite_id}/{metric_key}/"
+                f"candidate-{index}.json"
+            ),
+            "candidateEvidenceVersionId": f"fixture-{suite_id}-{metric_key}-candidate-{index}",
+            "candidateRawScore": "0.7600",
+        }
+        for index in range(5)
+    ]
 
 
 def _improvement_metric_compatibility(
