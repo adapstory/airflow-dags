@@ -19,7 +19,7 @@ from tempfile import TemporaryDirectory
 from time import perf_counter, sleep
 from typing import Any, NoReturn
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import ParseResult, parse_qsl, unquote, urlparse
 from urllib.request import ProxyHandler, Request, build_opener, urlopen
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -1461,6 +1461,9 @@ def _fetch_https_bytes(url: str) -> bytes:
     parsed = urlparse(url)
     if parsed.scheme != "https" or not parsed.hostname:
         raise ValueError("benchmark upstream evidence URLs must use https")
+    huggingface_artifact = _huggingface_dataset_artifact(parsed)
+    if huggingface_artifact is not None:
+        return _fetch_huggingface_dataset_bytes(*huggingface_artifact)
     request = Request(
         url,
         headers={
@@ -1475,6 +1478,45 @@ def _fetch_https_bytes(url: str) -> bytes:
         raise ValueError(f"benchmark upstream evidence fetch failed: {url}") from exc
     if not isinstance(payload, bytes) or not payload:
         raise ValueError(f"benchmark upstream evidence fetch returned no bytes: {url}")
+    return payload
+
+
+def _huggingface_dataset_artifact(parsed_url: ParseResult) -> tuple[str, str, str] | None:
+    """Return a pinned Hub dataset reference only for immutable resolve URLs."""
+    if parsed_url.hostname != "huggingface.co":
+        return None
+    match = re.fullmatch(
+        r"/datasets/([^/]+)/([^/]+)/resolve/([0-9a-f]{40})/(.+)",
+        parsed_url.path,
+    )
+    if match is None:
+        return None
+    namespace, repository, revision, filename = match.groups()
+    return f"{unquote(namespace)}/{unquote(repository)}", revision, unquote(filename)
+
+
+def _fetch_huggingface_dataset_bytes(repo_id: str, revision: str, filename: str) -> bytes:
+    """Download a pinned Hub dataset file through the official Xet-aware client."""
+    hub = importlib.import_module("huggingface_hub")
+    download = getattr(hub, "hf_hub_download", None)
+    if not callable(download):
+        raise ValueError("huggingface_hub does not provide hf_hub_download")
+    token = os.environ.get("ADAPSTORY_SERP_HUGGINGFACE_TOKEN") or None
+    try:
+        local_path = download(
+            filename=filename,
+            repo_id=repo_id,
+            repo_type="dataset",
+            revision=revision,
+            token=token,
+        )
+        payload = Path(local_path).read_bytes()
+    except Exception as exc:
+        raise ValueError(
+            f"Hugging Face dataset download failed for {repo_id}@{revision}:{filename}"
+        ) from exc
+    if not payload:
+        raise ValueError(f"Hugging Face dataset download returned no bytes: {repo_id}:{filename}")
     return payload
 
 

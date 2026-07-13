@@ -115,6 +115,13 @@ SERP eval DAG contracts:
   raw secrets, malformed provenance, or non-passing candidate metrics result
   in a fail-closed discard decision; only evidence-backed improvements can be
   retained.
+- `serp_mandatory_benchmark_dataset_evidence_snapshot` persists source, raw
+  dataset, and licensing bytes for every mandatory suite before D6 can consume
+  an adapter result. Hugging Face revision-pinned `resolve` artifacts are
+  downloaded with the official Xet-aware `huggingface_hub` client rather than
+  raw presigned URLs. `ADAPSTORY_SERP_HUGGINGFACE_TOKEN` is optional for public
+  data; when configured, it must be injected from the platform secret store and
+  must never be supplied in a DAG run configuration or evidence artifact.
 - `serp_web_seed_crawl_refresh` is the D20 scheduled public-docs seed refresh
   DAG. When `dag_run.conf` is empty, it builds the default public-docs seed
   registry from the stack-inventory anchored source set. Override

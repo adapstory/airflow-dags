@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -55,6 +56,49 @@ def test_benchmark_catalog_fetch_uses_configured_source_proxy(
         {
             "http": "http://forward-proxy.forward-proxy.svc.cluster.local:3128",
             "https": "http://forward-proxy.forward-proxy.svc.cluster.local:3128",
+        }
+    ]
+
+
+def test_huggingface_dataset_artifact_uses_pinned_xet_aware_client(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    downloaded = tmp_path / "dataset.parquet"
+    downloaded.write_bytes(b"xet-backed-dataset")
+    calls: list[dict[str, object]] = []
+
+    class HuggingFaceHub:
+        @staticmethod
+        def hf_hub_download(**kwargs: object) -> str:
+            calls.append(kwargs)
+            return str(downloaded)
+
+    def fake_import_module(name: str) -> object:
+        assert name == "huggingface_hub"
+        return HuggingFaceHub
+
+    monkeypatch.setenv("ADAPSTORY_SERP_HUGGINGFACE_TOKEN", "test-token")
+    monkeypatch.setattr("dags.serp_eval_contracts.importlib.import_module", fake_import_module)
+    monkeypatch.setattr(
+        "dags.serp_eval_contracts._open_public_docs_crawler_request",
+        lambda *_args, **_kwargs: pytest.fail("Xet dataset download must not use raw urllib"),
+    )
+
+    assert (
+        _fetch_https_bytes(
+            "https://huggingface.co/datasets/galileo-ai/ragbench/resolve/"
+            "97808f3e5fd16ede40bbff6c2949af8139b2eb7b/covidqa/test-00000-of-00001.parquet"
+        )
+        == b"xet-backed-dataset"
+    )
+    assert calls == [
+        {
+            "filename": "covidqa/test-00000-of-00001.parquet",
+            "repo_id": "galileo-ai/ragbench",
+            "repo_type": "dataset",
+            "revision": "97808f3e5fd16ede40bbff6c2949af8139b2eb7b",
+            "token": "test-token",
         }
     ]
 

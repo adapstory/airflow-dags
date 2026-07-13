@@ -5,6 +5,7 @@ description = "Installable Airflow DAG package for the Adapstory runtime image."
 requires-python = ">=3.12"
 dependencies = [
     "boto3>=1.35,<2.0",
+    "huggingface_hub>=0.32,<2.0",
     "kubernetes>=36.0.2,<37.0.0",
 ]
 
