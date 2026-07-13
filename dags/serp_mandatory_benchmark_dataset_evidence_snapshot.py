@@ -46,6 +46,7 @@ dag = DAG(
     schedule="@daily",
     catchup=False,
     max_active_runs=1,
+    is_paused_upon_creation=False,
     render_template_as_native_obj=True,
     tags=["serp", "evals", "benchmark", "evidence", "dataset"],
 )
