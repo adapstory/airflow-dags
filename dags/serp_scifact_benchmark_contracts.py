@@ -29,7 +29,7 @@ SCIFACT_TENANT_ID = "00000000-0000-4000-a000-000000000001"
 SCIFACT_ACTOR_ID = "airflow-serp-beir-scifact"
 SCIFACT_GATEWAY_ACTOR_ID = "00000000-0000-4000-a000-000000000203"
 SCIFACT_PACK_SLUG = "benchmark-beir-scifact"
-SCIFACT_POLICY_VERSION = "beir-scifact-license-policy@2026.07.13"
+SCIFACT_POLICY_VERSION = "source-approval@2026.07.1"
 SCIFACT_WORKFLOW_SCOPE = {
     "tenant_mode": "benchmark",
     "tenant_scope": "private",

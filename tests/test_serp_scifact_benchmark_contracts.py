@@ -240,7 +240,7 @@ def test_scifact_pack_activation_requires_index_receipt_and_records_selection() 
         "freshnessState": "fresh",
         "licenseObligationState": "public_share_allowed",
         "packId": registry["pack_id"],
-        "policyVersion": "beir-scifact-license-policy@2026.07.13",
+        "policyVersion": "source-approval@2026.07.1",
         "sourceType": "website",
         "trustState": "trusted",
     }
