@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -334,8 +335,8 @@ def _snapshot_bytes(
 
 def _native_adapter_materializer(
     suite_id: str,
-    payloads: dict[str, bytes],
-    snapshots: dict[str, dict[str, object]],
+    payloads: Mapping[str, bytes],
+    snapshots: Mapping[str, Mapping[str, object]],
 ) -> dict[str, object]:
     assert payloads
     assert set(payloads) == set(snapshots)

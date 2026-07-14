@@ -27,10 +27,7 @@ from dags.serp_eval_contracts import (
     write_improvement_spec_artifact,
     write_paired_eval_request_artifact,
 )
-from dags.serp_web_seed_crawl_refresh import (
-    SERP_PIPELINE_RUNNER_RESOURCES,
-    current_airflow_runtime_image,
-)
+from dags.serp_web_seed_crawl_refresh import current_airflow_runtime_image
 
 D19_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-evidence-evaluator"
 D19_EVALUATOR_WORKLOAD_LABELS = {
@@ -40,6 +37,10 @@ D19_EVALUATOR_WORKLOAD_LABELS = {
     "release": "airflow",
     "tier": "airflow",
 }
+D19_NATIVE_ADAPTER_RUNNER_RESOURCES = k8s.V1ResourceRequirements(
+    requests={"cpu": "500m", "memory": "1Gi"},
+    limits={"cpu": "1000m", "memory": "3Gi"},
+)
 _D19_EVALUATOR_ENV_NAMES = (
     "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT",
     "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION",
@@ -197,7 +198,7 @@ run_paired_evaluation = KubernetesPodOperator(
     service_account_name=D19_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT,
     automount_service_account_token=True,
     labels=D19_EVALUATOR_WORKLOAD_LABELS,
-    container_resources=SERP_PIPELINE_RUNNER_RESOURCES,
+    container_resources=D19_NATIVE_ADAPTER_RUNNER_RESOURCES,
     container_security_context=k8s.V1SecurityContext(
         allow_privilege_escalation=False,
         capabilities=k8s.V1Capabilities(drop=["ALL"]),

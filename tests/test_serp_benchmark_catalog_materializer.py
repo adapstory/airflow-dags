@@ -144,8 +144,8 @@ def test_catalog_acquisition_workload_has_minimal_proxy_and_evidence_contract(
     assert ".svc.cluster.local" in literal_env["NO_PROXY"]
     assert BENCHMARK_CATALOG_ACQUISITION_RESOURCES.to_dict() == {
         "claims": None,
-        "limits": {"cpu": "500m", "memory": "1Gi"},
-        "requests": {"cpu": "250m", "memory": "256Mi"},
+        "limits": {"cpu": "1000m", "memory": "3Gi"},
+        "requests": {"cpu": "500m", "memory": "1Gi"},
     }
     assert BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS == 90
     assert benchmark_catalog_acquisition_pod_security_context().to_dict() == {
