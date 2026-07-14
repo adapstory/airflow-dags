@@ -13,6 +13,11 @@ from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
 from kubernetes.client import models as k8s
 
+from dags.serp_evidence_workload_identity import (
+    minio_web_identity_env_vars,
+    minio_web_identity_volume_mounts,
+    minio_web_identity_volumes,
+)
 from dags.serp_scifact_benchmark_contracts import (
     activate_scifact_benchmark_pack,
     build_scifact_benchmark_plan,
@@ -28,7 +33,7 @@ from dags.serp_web_seed_crawl_refresh import (
 )
 
 SCIFACT_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-beir-scifact"
-SCIFACT_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-evidence-evaluator"
+SCIFACT_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-benchmark-evaluator"
 SCIFACT_ACQUISITION_WORKLOAD_LABELS = {
     "adapstory.com/serp-evidence-workload": "true",
     "adapstory.com/serp-network-profile": "benchmark-acquisition",
@@ -52,6 +57,25 @@ SCIFACT_EXECUTOR_CONFIG = {
         )
     )
 }
+_SCIFACT_EVALUATOR_ENV_NAMES = (
+    "ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS",
+    "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT",
+    "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION",
+    "ADAPSTORY_SERP_SEARCH_SERVE_BASE_URL",
+)
+SCIFACT_EVALUATOR_WEB_IDENTITY_VOLUMES = minio_web_identity_volumes()
+SCIFACT_EVALUATOR_WEB_IDENTITY_VOLUME_MOUNTS = minio_web_identity_volume_mounts()
+
+
+def scifact_evaluator_env_vars() -> list[k8s.V1EnvVar]:
+    """Return the narrow runtime contract for governed SciFact evaluation.
+
+    The evaluator reads and seals immutable evidence through MinIO and calls
+    only the governed search gateway. It must not inherit indexer, graph,
+    model, or source-acquisition credentials from the public-docs runner.
+    """
+
+    return minio_web_identity_env_vars(_SCIFACT_EVALUATOR_ENV_NAMES)
 
 
 def build_scifact_plan_from_dag_run(**context: Any) -> dict[str, Any]:
@@ -243,9 +267,11 @@ evaluate_scifact = KubernetesPodOperator(
         "--pack-version-id",
         "{{ ti.xcom_pull(task_ids='prepare_scifact_benchmark_registry')['pack_version_id'] }}",
     ],
-    env_vars=pipeline_runner_runtime_env_vars(),
+    env_vars=scifact_evaluator_env_vars(),
     service_account_name=SCIFACT_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT,
     automount_service_account_token=False,
+    volumes=SCIFACT_EVALUATOR_WEB_IDENTITY_VOLUMES,
+    volume_mounts=SCIFACT_EVALUATOR_WEB_IDENTITY_VOLUME_MOUNTS,
     labels=SCIFACT_EVALUATOR_WORKLOAD_LABELS,
     container_resources=SERP_PIPELINE_RUNNER_RESOURCES,
     container_security_context=k8s.V1SecurityContext(

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -27,9 +26,14 @@ from dags.serp_eval_contracts import (
     write_improvement_spec_artifact,
     write_paired_eval_request_artifact,
 )
+from dags.serp_evidence_workload_identity import (
+    minio_web_identity_env_vars,
+    minio_web_identity_volume_mounts,
+    minio_web_identity_volumes,
+)
 from dags.serp_web_seed_crawl_refresh import current_airflow_runtime_image
 
-D19_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-evidence-evaluator"
+D19_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-benchmark-evaluator"
 D19_EVALUATOR_WORKLOAD_LABELS = {
     "adapstory.com/serp-evidence-workload": "true",
     "adapstory.com/serp-network-profile": "benchmark-evaluator",
@@ -45,40 +49,14 @@ _D19_EVALUATOR_ENV_NAMES = (
     "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT",
     "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION",
 )
+D19_EVALUATOR_WEB_IDENTITY_VOLUMES = minio_web_identity_volumes()
+D19_EVALUATOR_WEB_IDENTITY_VOLUME_MOUNTS = minio_web_identity_volume_mounts()
 
 
 def d19_evaluator_env_vars() -> list[k8s.V1EnvVar]:
-    """Return the minimal S3-only runtime contract for paired evaluation."""
+    """Return the minimal STS-only runtime contract for paired evaluation."""
 
-    values: list[k8s.V1EnvVar] = []
-    for name in _D19_EVALUATOR_ENV_NAMES:
-        value = os.environ.get(name)
-        if value is None or not value.strip():
-            raise ValueError(f"D19 evaluator environment is required: {name}")
-        values.append(k8s.V1EnvVar(name=name, value=value.strip()))
-    values.extend(
-        (
-            k8s.V1EnvVar(
-                name="ADAPSTORY_AIRFLOW_ARTIFACT_S3_ACCESS_KEY",
-                value_from=k8s.V1EnvVarSource(
-                    secret_key_ref=k8s.V1SecretKeySelector(
-                        name="airflow-serp-evidence-store",
-                        key="access-key",
-                    )
-                ),
-            ),
-            k8s.V1EnvVar(
-                name="ADAPSTORY_AIRFLOW_ARTIFACT_S3_SECRET_KEY",
-                value_from=k8s.V1EnvVarSource(
-                    secret_key_ref=k8s.V1SecretKeySelector(
-                        name="airflow-serp-evidence-store",
-                        key="secret-key",
-                    )
-                ),
-            ),
-        )
-    )
-    return values
+    return minio_web_identity_env_vars(_D19_EVALUATOR_ENV_NAMES)
 
 
 def validate_benchmark_improvement_wave_plan(**context: Any) -> str:
@@ -196,7 +174,9 @@ run_paired_evaluation = KubernetesPodOperator(
     ],
     env_vars=d19_evaluator_env_vars(),
     service_account_name=D19_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT,
-    automount_service_account_token=True,
+    automount_service_account_token=False,
+    volumes=D19_EVALUATOR_WEB_IDENTITY_VOLUMES,
+    volume_mounts=D19_EVALUATOR_WEB_IDENTITY_VOLUME_MOUNTS,
     labels=D19_EVALUATOR_WORKLOAD_LABELS,
     container_resources=D19_NATIVE_ADAPTER_RUNNER_RESOURCES,
     container_security_context=k8s.V1SecurityContext(

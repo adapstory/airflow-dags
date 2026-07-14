@@ -85,6 +85,42 @@ def test_scifact_kubernetes_tasks_use_separate_acquisition_and_evaluation_identi
     assert "service_account_name=SCIFACT_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT" in source
 
 
+def test_scifact_evaluator_gets_only_its_evidence_and_governed_search_contract() -> None:
+    source = (
+        Path(__file__).resolve().parents[1] / "dags" / "serp_beir_scifact_live_benchmark.py"
+    ).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    evaluator = next(
+        call
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "KubernetesPodOperator"
+        and any(
+            keyword.arg == "task_id"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value == "evaluate_scifact_live_gateway"
+            for keyword in call.keywords
+        )
+    )
+    evaluator_env = next(
+        keyword.value for keyword in evaluator.keywords if keyword.arg == "env_vars"
+    )
+    assert isinstance(evaluator_env, ast.Call)
+    assert isinstance(evaluator_env.func, ast.Name)
+    assert evaluator_env.func.id == "scifact_evaluator_env_vars"
+    assert "volumes=SCIFACT_EVALUATOR_WEB_IDENTITY_VOLUMES" in source
+    assert "volume_mounts=SCIFACT_EVALUATOR_WEB_IDENTITY_VOLUME_MOUNTS" in source
+    assert "def scifact_evaluator_env_vars()" in source
+    evaluator_contract = source.split("def scifact_evaluator_env_vars()", 1)[1].split(
+        "def build_scifact_plan_from_dag_run", 1
+    )[0]
+    assert "ADAPSTORY_SERP_NEO4J_PASSWORD" not in evaluator_contract
+    assert "airflow-serp-evidence-store" not in evaluator_contract
+    assert "return minio_web_identity_env_vars(_SCIFACT_EVALUATOR_ENV_NAMES)" in evaluator_contract
+
+
 def test_scifact_evaluator_omits_an_unused_projected_service_account_token() -> None:
     source = (
         Path(__file__).resolve().parents[1] / "dags" / "serp_beir_scifact_live_benchmark.py"

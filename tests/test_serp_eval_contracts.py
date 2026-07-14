@@ -5507,6 +5507,11 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     models.V1SeccompProfile = FakeKubernetesModel
     models.V1SecretKeySelector = FakeKubernetesModel
     models.V1SecurityContext = FakeKubernetesModel
+    models.V1ServiceAccountTokenProjection = FakeKubernetesModel
+    models.V1Volume = FakeKubernetesModel
+    models.V1VolumeMount = FakeKubernetesModel
+    models.V1VolumeProjection = FakeKubernetesModel
+    models.V1ProjectedVolumeSource = FakeKubernetesModel
     cast(Any, modules["kubernetes.client"]).models = models
     for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)
@@ -5535,7 +5540,29 @@ def test_serp_improvement_dag_runs_paired_evaluation_in_an_isolated_evaluator_po
     assert "run_paired_evaluation = KubernetesPodOperator(" in source
     assert "service_account_name=D19_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT" in source
     assert "labels=D19_EVALUATOR_WORKLOAD_LABELS" in source
-    assert "automount_service_account_token=True" in source
+    tree = ast.parse(source)
+    evaluator = next(
+        call
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and _matches_call(call, "KubernetesPodOperator")
+        and any(
+            keyword.arg == "task_id"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value == "run_paired_benchmark_evaluation"
+            for keyword in call.keywords
+        )
+    )
+    evaluator_automount = next(
+        keyword.value
+        for keyword in evaluator.keywords
+        if keyword.arg == "automount_service_account_token"
+    )
+    assert isinstance(evaluator_automount, ast.Constant)
+    assert evaluator_automount.value is False
+    assert "volumes=D19_EVALUATOR_WEB_IDENTITY_VOLUMES" in source
+    assert "volume_mounts=D19_EVALUATOR_WEB_IDENTITY_VOLUME_MOUNTS" in source
+    assert "airflow-serp-evidence-store" not in source
     assert "def run_paired_benchmark_evaluation" not in source
     assert "execute_pipeline_cli_spec" not in source
 
@@ -5561,6 +5588,10 @@ def test_serp_improvement_dag_passes_exact_s3_values_to_the_evaluator_pod(
     assert values == {
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT": ("http://minio.env-prod.svc.cluster.local:9000"),
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION": "us-west-1",
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_STS_DURATION_SECONDS": "900",
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_WEB_IDENTITY_TOKEN_FILE": (
+            "/var/run/secrets/adapstory/minio-web-identity/token"
+        ),
     }
 
 
