@@ -5508,7 +5508,9 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     models.V1Capabilities = FakeKubernetesModel
     models.V1EnvVar = FakeKubernetesModel
     models.V1EnvVarSource = FakeKubernetesModel
+    models.V1PodSecurityContext = FakeKubernetesModel
     models.V1ResourceRequirements = FakeKubernetesModel
+    models.V1SeccompProfile = FakeKubernetesModel
     models.V1SecretKeySelector = FakeKubernetesModel
     models.V1SecurityContext = FakeKubernetesModel
     cast(Any, modules["kubernetes.client"]).models = models
@@ -5542,6 +5544,30 @@ def test_serp_improvement_dag_runs_paired_evaluation_in_an_isolated_evaluator_po
     assert "automount_service_account_token=True" in source
     assert "def run_paired_benchmark_evaluation" not in source
     assert "execute_pipeline_cli_spec" not in source
+
+
+def test_serp_improvement_dag_passes_exact_s3_values_to_the_evaluator_pod(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    module = importlib.import_module("dags.serp_benchmark_improvement_wave")
+    module = importlib.reload(module)
+    monkeypatch.setenv(
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT",
+        "http://minio.env-prod.svc.cluster.local:9000",
+    )
+    monkeypatch.setenv("ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION", "us-west-1")
+
+    values = {
+        env_var.kwargs["name"]: env_var.kwargs["value"]
+        for env_var in module.d19_evaluator_env_vars()
+        if "value" in env_var.kwargs
+    }
+
+    assert values == {
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT": ("http://minio.env-prod.svc.cluster.local:9000"),
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION": "us-west-1",
+    }
 
 
 def test_airflowignore_excludes_non_dag_test_modules() -> None:

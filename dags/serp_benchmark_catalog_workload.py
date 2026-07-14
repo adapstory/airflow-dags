@@ -42,7 +42,7 @@ def benchmark_catalog_acquisition_env_vars() -> list[k8s.V1EnvVar]:
         value = os.environ.get(name)
         if value is None or not value.strip():
             raise ValueError(f"benchmark catalog acquisition environment is required: {name}")
-        values.append(k8s.V1EnvVar(name=name, value=repr(value)))
+        values.append(k8s.V1EnvVar(name=name, value=value.strip()))
     proxy_url = os.environ["ADAPSTORY_SERP_SOURCE_PROXY_URL"].strip()
     values.extend(
         (

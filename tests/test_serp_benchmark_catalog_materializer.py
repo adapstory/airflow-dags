@@ -130,6 +130,15 @@ def test_catalog_acquisition_workload_has_minimal_proxy_and_evidence_contract(
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_SECRET_KEY",
     ]
     literal_env = {env_var.name: env_var.value for env_var in env_vars if env_var.value is not None}
+    assert literal_env["ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT"] == (
+        "http://minio.env-prod.svc:9000"
+    )
+    assert literal_env["ADAPSTORY_AIRFLOW_ARTIFACT_S3_PATH_STYLE"] == "true"
+    assert literal_env["ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION"] == "us-east-1"
+    assert literal_env["ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS"] == "365"
+    assert literal_env["ADAPSTORY_SERP_SOURCE_PROXY_URL"] == (
+        "http://forward-proxy.forward-proxy.svc:3128"
+    )
     assert literal_env["HTTP_PROXY"] == "http://forward-proxy.forward-proxy.svc:3128"
     assert literal_env["HTTPS_PROXY"] == "http://forward-proxy.forward-proxy.svc:3128"
     assert ".svc.cluster.local" in literal_env["NO_PROXY"]

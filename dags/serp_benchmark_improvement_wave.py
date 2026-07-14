@@ -54,7 +54,7 @@ def d19_evaluator_env_vars() -> list[k8s.V1EnvVar]:
         value = os.environ.get(name)
         if value is None or not value.strip():
             raise ValueError(f"D19 evaluator environment is required: {name}")
-        values.append(k8s.V1EnvVar(name=name, value=repr(value)))
+        values.append(k8s.V1EnvVar(name=name, value=value.strip()))
     values.extend(
         (
             k8s.V1EnvVar(
