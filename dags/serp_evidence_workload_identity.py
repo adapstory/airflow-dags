@@ -29,32 +29,14 @@ _STATIC_CREDENTIAL_ENV_NAMES = (
 
 
 def minio_web_identity_env_vars(required_names: Sequence[str]) -> list[k8s.V1EnvVar]:
-    """Return literal runtime values plus a bounded projected-token contract."""
-
-    try:
-        from airflow.sdk import literal
-    except ImportError:
-        # DAG contract tests load this module outside the Airflow runtime. The
-        # fallback keeps NativeEnvironment from coercing numeric-looking
-        # values while preserving ordinary endpoint and URL strings.
-        def literal(value: str) -> str:
-            try:
-                float(value)
-            except ValueError:
-                return value
-            return repr(value)
+    """Return serializable runtime values plus a bounded projected-token contract."""
 
     values: list[k8s.V1EnvVar] = []
     for name in required_names:
         value = os.environ.get(name)
         if value is None or not value.strip():
             raise ValueError(f"evidence workload environment is required: {name}")
-        # Airflow renders KPO templates through NativeEnvironment.  A plain
-        # numeric-looking string (for example a retention period) is then
-        # coerced to an integer and rejected by the Kubernetes EnvVar API.
-        # `literal` preserves the required contract for every caller, rather
-        # than making each workload remember to special-case numeric values.
-        values.append(k8s.V1EnvVar(name=name, value=literal(value.strip())))
+        values.append(k8s.V1EnvVar(name=name, value=value.strip()))
     values.extend(
         (
             k8s.V1EnvVar(
@@ -63,7 +45,7 @@ def minio_web_identity_env_vars(required_names: Sequence[str]) -> list[k8s.V1Env
             ),
             k8s.V1EnvVar(
                 name="ADAPSTORY_AIRFLOW_ARTIFACT_S3_STS_DURATION_SECONDS",
-                value=literal(str(MINIO_WEB_IDENTITY_EXPIRATION_SECONDS)),
+                value=str(MINIO_WEB_IDENTITY_EXPIRATION_SECONDS),
             ),
         )
     )
