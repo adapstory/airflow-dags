@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -68,18 +69,41 @@ def test_huggingface_dataset_artifact_uses_pinned_xet_aware_client(
     downloaded = tmp_path / "dataset.parquet"
     downloaded.write_bytes(b"xet-backed-dataset")
     calls: list[dict[str, object]] = []
+    transport_events: list[str] = []
+    client_kwargs: list[dict[str, object]] = []
+
+    class Httpx:
+        class Client:
+            def __init__(self, **kwargs: object) -> None:
+                client_kwargs.append(kwargs)
 
     class HuggingFaceHub:
+        @staticmethod
+        def set_client_factory(factory: object) -> None:
+            assert callable(factory)
+            transport_events.append("set-client-factory")
+            factory()
+
+        @staticmethod
+        def close_session() -> None:
+            transport_events.append("close-session")
+
         @staticmethod
         def hf_hub_download(**kwargs: object) -> str:
             calls.append(kwargs)
             return str(downloaded)
 
     def fake_import_module(name: str) -> object:
-        assert name == "huggingface_hub"
-        return HuggingFaceHub
+        if name == "huggingface_hub":
+            return HuggingFaceHub
+        assert name == "httpx"
+        return Httpx
 
     monkeypatch.setenv("ADAPSTORY_SERP_HUGGINGFACE_TOKEN", "test-token")
+    monkeypatch.setenv(
+        "ADAPSTORY_SERP_SOURCE_PROXY_URL",
+        "http://forward-proxy.forward-proxy.svc.cluster.local:3128",
+    )
     monkeypatch.setattr("dags.serp_eval_contracts.importlib.import_module", fake_import_module)
     monkeypatch.setattr(
         "dags.serp_eval_contracts._open_public_docs_crawler_request",
@@ -102,6 +126,18 @@ def test_huggingface_dataset_artifact_uses_pinned_xet_aware_client(
             "token": "test-token",
         }
     ]
+    assert transport_events == ["set-client-factory", "close-session"]
+    assert client_kwargs == [
+        {
+            "follow_redirects": True,
+            "proxy": "http://forward-proxy.forward-proxy.svc.cluster.local:3128",
+            "timeout": None,
+            "trust_env": False,
+        }
+    ]
+    assert os.environ["HTTP_PROXY"] == "http://forward-proxy.forward-proxy.svc.cluster.local:3128"
+    assert os.environ["HTTPS_PROXY"] == "http://forward-proxy.forward-proxy.svc.cluster.local:3128"
+    assert ".svc.cluster.local" in os.environ["NO_PROXY"]
 
 
 def test_catalog_covers_every_mandatory_suite_with_explicit_licensing_boundary() -> None:

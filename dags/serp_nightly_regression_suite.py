@@ -7,13 +7,16 @@ from airflow.configuration import conf
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
-from kubernetes.client import models as k8s
 
 from dags.serp_benchmark_catalog import mandatory_benchmark_adapters_ready
 from dags.serp_benchmark_catalog_workload import (
+    BENCHMARK_CATALOG_ACQUISITION_RESOURCES,
+    BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS,
     BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_LABELS,
     BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT,
+    benchmark_catalog_acquisition_container_security_context,
     benchmark_catalog_acquisition_env_vars,
+    benchmark_catalog_acquisition_pod_security_context,
 )
 from dags.serp_eval_contracts import (
     MANDATORY_SERP_BENCHMARK_SUITES,
@@ -31,7 +34,6 @@ from dags.serp_eval_contracts import (
     write_nightly_suite_plan_artifact,
 )
 from dags.serp_web_seed_crawl_refresh import (
-    SERP_PIPELINE_RUNNER_RESOURCES,
     current_airflow_runtime_image,
 )
 
@@ -124,11 +126,9 @@ materialize_catalog = KubernetesPodOperator(
     service_account_name=BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT,
     automount_service_account_token=False,
     labels=BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_LABELS,
-    container_resources=SERP_PIPELINE_RUNNER_RESOURCES,
-    container_security_context=k8s.V1SecurityContext(
-        allow_privilege_escalation=False,
-        capabilities=k8s.V1Capabilities(drop=["ALL"]),
-    ),
+    container_resources=BENCHMARK_CATALOG_ACQUISITION_RESOURCES,
+    security_context=benchmark_catalog_acquisition_pod_security_context(),
+    container_security_context=benchmark_catalog_acquisition_container_security_context(),
     get_logs=True,
     log_events_on_failure=True,
     random_name_suffix=True,
@@ -136,7 +136,7 @@ materialize_catalog = KubernetesPodOperator(
     on_kill_action="keep_pod",
     on_finish_action="delete_pod",
     retries=1,
-    retry_delay=timedelta(seconds=5),
+    retry_delay=timedelta(seconds=BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS),
     dag=dag,
 )
 

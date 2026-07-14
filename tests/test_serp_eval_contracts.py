@@ -4935,6 +4935,13 @@ def test_serp_dag_files_declare_expected_airflow_contracts(
         assert _keyword_values(tree, "KubernetesPodOperator", "task_id") == [
             "materialize_mandatory_benchmark_dataset_evidence"
         ]
+        assert "BENCHMARK_CATALOG_ACQUISITION_RESOURCES" in source
+        assert "security_context=benchmark_catalog_acquisition_pod_security_context()" in source
+        assert (
+            "container_security_context=benchmark_catalog_acquisition_container_security_context()"
+            in source
+        )
+        assert "BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS" in source
     else:
         assert _keyword_values(tree, "PythonOperator", "task_id") == task_ids
     assert "external_runner_pending" not in source
@@ -4970,6 +4977,13 @@ def test_serp_nightly_dag_uses_live_gateway_cli_for_d6_path() -> None:
     assert "BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT" in source
     assert "BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_LABELS" in source
     assert "benchmark_catalog_acquisition_env_vars" in source
+    assert "BENCHMARK_CATALOG_ACQUISITION_RESOURCES" in source
+    assert "security_context=benchmark_catalog_acquisition_pod_security_context()" in source
+    assert (
+        "container_security_context=benchmark_catalog_acquisition_container_security_context()"
+        in source
+    )
+    assert "BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS" in source
     assert "materialize_live_benchmark_catalog_artifact" not in source
     assert "execute_gateway_cli_spec" in source
     assert "build_nightly_runner_cli_spec" in source

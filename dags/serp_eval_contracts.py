@@ -1760,6 +1760,7 @@ def _fetch_huggingface_dataset_bytes(repo_id: str, revision: str, filename: str)
     download = getattr(hub, "hf_hub_download", None)
     if not callable(download):
         raise ValueError("huggingface_hub does not provide hf_hub_download")
+    _configure_huggingface_proxy_transport(hub)
     token = os.environ.get("ADAPSTORY_SERP_HUGGINGFACE_TOKEN") or None
     try:
         local_path = download(
@@ -1777,6 +1778,40 @@ def _fetch_huggingface_dataset_bytes(repo_id: str, revision: str, filename: str)
     if not payload:
         raise ValueError(f"Hugging Face dataset download returned no bytes: {repo_id}:{filename}")
     return payload
+
+
+def _configure_huggingface_proxy_transport(hub: Any) -> None:
+    """Route Hub metadata and Xet transfers through the approved source proxy."""
+
+    proxy_url = _public_docs_source_proxy_url()
+    if proxy_url is None:
+        return
+    httpx = importlib.import_module("httpx")
+    client_class = getattr(httpx, "Client", None)
+    set_client_factory = getattr(hub, "set_client_factory", None)
+    close_session = getattr(hub, "close_session", None)
+    if not (callable(client_class) and callable(set_client_factory) and callable(close_session)):
+        raise ValueError("huggingface_hub proxy transport configuration is unavailable")
+    os.environ["HTTP_PROXY"] = proxy_url
+    os.environ["HTTPS_PROXY"] = proxy_url
+    os.environ["NO_PROXY"] = _benchmark_source_no_proxy_value()
+    set_client_factory(
+        lambda: client_class(
+            follow_redirects=True,
+            proxy=proxy_url,
+            timeout=None,
+            trust_env=False,
+        )
+    )
+    close_session()
+
+
+def _benchmark_source_no_proxy_value() -> str:
+    existing = [
+        value.strip() for value in os.environ.get("NO_PROXY", "").split(",") if value.strip()
+    ]
+    required_hosts = ("localhost", "127.0.0.1", ".svc", ".svc.cluster.local")
+    return ",".join(dict.fromkeys((*existing, *required_hosts)))
 
 
 def read_evidence_artifact(artifact_path: str, field_name: str) -> dict[str, Any]:

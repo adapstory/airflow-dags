@@ -7,9 +7,13 @@ from dags.serp_benchmark_catalog_materializer import (
     materialize_benchmark_catalog_receipt,
 )
 from dags.serp_benchmark_catalog_workload import (
+    BENCHMARK_CATALOG_ACQUISITION_RESOURCES,
+    BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS,
     BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_LABELS,
     BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT,
+    benchmark_catalog_acquisition_container_security_context,
     benchmark_catalog_acquisition_env_vars,
+    benchmark_catalog_acquisition_pod_security_context,
 )
 
 
@@ -100,6 +104,48 @@ def test_catalog_acquisition_workload_has_minimal_proxy_and_evidence_contract(
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION",
         "ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS",
         "ADAPSTORY_SERP_SOURCE_PROXY_URL",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ACCESS_KEY",
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_SECRET_KEY",
     ]
+    literal_env = {env_var.name: env_var.value for env_var in env_vars if env_var.value is not None}
+    assert literal_env["HTTP_PROXY"] == "http://forward-proxy.forward-proxy.svc:3128"
+    assert literal_env["HTTPS_PROXY"] == "http://forward-proxy.forward-proxy.svc:3128"
+    assert ".svc.cluster.local" in literal_env["NO_PROXY"]
+    assert BENCHMARK_CATALOG_ACQUISITION_RESOURCES.to_dict() == {
+        "claims": None,
+        "limits": {"cpu": "500m", "memory": "1Gi"},
+        "requests": {"cpu": "250m", "memory": "256Mi"},
+    }
+    assert BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS == 90
+    assert benchmark_catalog_acquisition_pod_security_context().to_dict() == {
+        "app_armor_profile": None,
+        "fs_group": None,
+        "fs_group_change_policy": None,
+        "run_as_group": None,
+        "run_as_non_root": True,
+        "run_as_user": 50000,
+        "se_linux_change_policy": None,
+        "se_linux_options": None,
+        "seccomp_profile": {"localhost_profile": None, "type": "RuntimeDefault"},
+        "supplemental_groups": None,
+        "supplemental_groups_policy": None,
+        "sysctls": None,
+        "windows_options": None,
+    }
+    assert benchmark_catalog_acquisition_container_security_context().to_dict() == {
+        "allow_privilege_escalation": False,
+        "app_armor_profile": None,
+        "capabilities": {"add": None, "drop": ["ALL"]},
+        "privileged": None,
+        "proc_mount": None,
+        "read_only_root_filesystem": None,
+        "run_as_group": None,
+        "run_as_non_root": True,
+        "run_as_user": 50000,
+        "se_linux_options": None,
+        "seccomp_profile": None,
+        "windows_options": None,
+    }
