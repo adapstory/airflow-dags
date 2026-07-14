@@ -111,6 +111,7 @@ dag = DAG(
     schedule=None,
     catchup=False,
     is_paused_upon_creation=False,
+    render_template_as_native_obj=True,
     tags=["serp", "evals", "benchmark", "improvement"],
 )
 

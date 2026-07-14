@@ -526,22 +526,21 @@ def test_catalog_materializer_accepts_dedicated_dataset_evidence_plan() -> None:
         fetch_bytes=lambda url: url.encode("utf-8"),
         snapshot_writer=snapshot_writer,
         snapshot_bytes_writer=snapshot_bytes_writer,
+        native_adapter_materializer=_native_adapter_materializer,
     )
 
-    assert result["catalogStatus"] == "blocked"
-    assert result["blockingSuiteIds"] == [
-        suite_id for suite_id in MANDATORY_SERP_BENCHMARK_SUITES if suite_id != "BEIR"
-    ]
+    assert result["catalogStatus"] == "ready"
+    assert result["blockingSuiteIds"] == []
     assert result["suiteSummary"] == [
         {
             "distributionRule": entry.distribution_rule,
-            "executionStatus": entry.execution_status,
+            "executionStatus": "ready",
             "rightsStatus": entry.rights_status,
             "suiteId": entry.suite_id,
         }
         for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
     ]
-    assert len(written) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 3) + 1
+    assert len(written) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 3) + 3
 
 
 def test_nightly_regression_plan_rejects_caller_supplied_suite_inputs() -> None:
@@ -552,7 +551,7 @@ def test_nightly_regression_plan_rejects_caller_supplied_suite_inputs() -> None:
         build_nightly_regression_plan(conf)
 
 
-def test_nightly_catalog_materialization_writes_all_live_legal_evidence_before_blocking() -> None:
+def test_nightly_catalog_materialization_writes_all_live_evidence_before_native_ready() -> None:
     plan = build_nightly_regression_plan(
         {**_nightly_conf(), "artifact_root_path": "s3://airflow-serp-evidence/serp-evals"}
     )
@@ -588,17 +587,16 @@ def test_nightly_catalog_materialization_writes_all_live_legal_evidence_before_b
         fetch_bytes=lambda url: url.encode("utf-8"),
         snapshot_writer=snapshot_writer,
         snapshot_bytes_writer=snapshot_bytes_writer,
+        native_adapter_materializer=_native_adapter_materializer,
     )
 
-    assert result["catalogStatus"] == "blocked"
-    assert result["blockingSuiteIds"] == [
-        suite_id for suite_id in MANDATORY_SERP_BENCHMARK_SUITES if suite_id != "BEIR"
-    ]
+    assert result["catalogStatus"] == "ready"
+    assert result["blockingSuiteIds"] == []
     assert [entry["suiteId"] for entry in result["suiteSummary"]] == list(
         MANDATORY_SERP_BENCHMARK_SUITES
     )
     assert written[-1]["artifact_path"] == plan.payload["artifact_paths"]["benchmark_catalog"]
-    assert len(written) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 3) + 1
+    assert len(written) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 3) + 3
 
 
 @pytest.mark.parametrize(
@@ -616,15 +614,12 @@ def test_load_materialized_catalog_binds_receipt_and_catalog_s3_versions(
         plan = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
     catalog_path = plan.payload["artifact_paths"]["benchmark_catalog"]
     receipt_path = plan.payload["artifact_paths"]["benchmark_catalog_receipt"]
-    blocking_suite_ids = [
-        suite_id for suite_id in MANDATORY_SERP_BENCHMARK_SUITES if suite_id != "BEIR"
-    ]
     catalog_payload = {
-        "catalog_status": "blocked",
+        "catalog_status": "ready",
         "suites": [
             {
                 "distribution_rule": entry.distribution_rule,
-                "execution_status": entry.execution_status,
+                "execution_status": "ready",
                 "rights_status": entry.rights_status,
                 "suite_id": entry.suite_id,
             }
@@ -637,20 +632,20 @@ def test_load_materialized_catalog_binds_receipt_and_catalog_s3_versions(
             "artifactPath": catalog_path,
             "artifactSha256": sha256(catalog_bytes).hexdigest(),
             "artifactVersionId": "catalog-v1",
-            "blockingSuiteIds": blocking_suite_ids,
-            "catalogStatus": "blocked",
+            "blockingSuiteIds": [],
+            "catalogStatus": "ready",
             "objectLockMode": "COMPLIANCE",
             "suiteSummary": [
                 {
                     "distributionRule": entry.distribution_rule,
-                    "executionStatus": entry.execution_status,
+                    "executionStatus": "ready",
                     "rightsStatus": entry.rights_status,
                     "suiteId": entry.suite_id,
                 }
                 for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
             ],
         },
-        "contractVersion": "serp-benchmark-catalog-materializer/v2",
+        "contractVersion": "serp-benchmark-catalog-materializer/v3",
         "dagId": plan.payload["dag_id"],
         "operationId": plan.payload["operation_id"],
     }
@@ -708,10 +703,8 @@ def test_load_materialized_catalog_binds_receipt_and_catalog_s3_versions(
 
     assert snapshot["artifactVersionId"] == "catalog-v1"
     assert snapshot["catalogReceiptVersionId"] == "receipt-v1"
-    assert snapshot["blockingSuiteIds"] == blocking_suite_ids
-    assert snapshot["blockingReasonBySuite"] == {
-        suite_id: "adapter-unavailable" for suite_id in blocking_suite_ids
-    }
+    assert snapshot["blockingSuiteIds"] == []
+    assert snapshot["blockingReasonBySuite"] == {}
 
     receipt_payload["catalogSnapshot"]["suiteSummary"][0]["distributionRule"] = "internal-only"
     with pytest.raises(ValueError, match="suite summary does not match catalog object"):
@@ -853,7 +846,7 @@ def test_build_nightly_gateway_cli_specs_are_file_based_and_deterministic() -> N
     assert submit["stdout_path"] == plan.payload["artifact_paths"]["nightly_registry_receipts"]
 
 
-def test_nightly_d6_airflow_path_blocks_before_gateway_runner_when_licenses_are_unattested(
+def test_nightly_d6_airflow_path_blocks_before_gateway_runner_when_rights_policy_blocks(
     tmp_path: Path,
 ) -> None:
     conf = _nightly_conf()
@@ -866,9 +859,9 @@ def test_nightly_d6_airflow_path_blocks_before_gateway_runner_when_licenses_are_
         "artifactVersionId": "version-20260713",
         "blockingSuiteIds": ["CodeRAG-Bench", "SWE-bench Verified", "rusBEIR"],
         "blockingReasonBySuite": {
-            "CodeRAG-Bench": "adapter-unavailable",
+            "CodeRAG-Bench": "rights-policy-blocked",
             "SWE-bench Verified": "rights-policy-blocked",
-            "rusBEIR": "adapter-unavailable",
+            "rusBEIR": "rights-policy-blocked",
         },
         "catalogStatus": "blocked",
         "objectLockMode": "COMPLIANCE",
@@ -877,8 +870,8 @@ def test_nightly_d6_airflow_path_blocks_before_gateway_runner_when_licenses_are_
     with pytest.raises(
         ValueError,
         match=(
-            "benchmark catalog blocks D6: adapter-unavailable=CodeRAG-Bench, rusBEIR; "
-            "rights-policy-blocked=SWE-bench Verified"
+            "benchmark catalog blocks D6: rights-policy-blocked=CodeRAG-Bench, "
+            "SWE-bench Verified, rusBEIR"
         ),
     ):
         write_nightly_suite_plan_artifact(json.loads(plan_json), catalog_snapshot)
@@ -1980,7 +1973,7 @@ def test_paired_eval_request_derives_canonical_catalog_bindings_as_worm_evidence
         "catalogReceiptPath": plan.payload["artifact_paths"]["benchmark_catalog_receipt"],
         "catalogReceiptSha256": "sha256:" + "b" * 64,
         "catalogReceiptVersionId": "catalog-receipt-version-001",
-        "catalogStatus": "blocked",
+        "catalogStatus": "ready",
     }
     assert "Score" not in json.dumps(request)
     assert snapshots == [
@@ -4978,6 +4971,7 @@ def test_serp_dag_files_declare_expected_airflow_contracts(
 
     assert _call_string_args(tree, "DAG")[0] == dag_id
     if dag_id == "serp_benchmark_improvement_wave":
+        assert "render_template_as_native_obj=True" in source
         assert _keyword_values(tree, "PythonOperator", "task_id") == [
             "validate_benchmark_improvement_wave_plan",
             "write_improvement_spec",
@@ -5886,23 +5880,37 @@ def _improvement_wave_conf() -> dict[str, object]:
     }
 
 
+def _native_adapter_materializer(
+    suite_id: str,
+    payloads: Mapping[str, bytes],
+    snapshots: Mapping[str, Mapping[str, object]],
+) -> Mapping[str, object]:
+    assert payloads
+    assert set(payloads) == set(snapshots)
+    return {
+        "adapterId": f"native/{suite_id.casefold()}@v1",
+        "caseCount": 1,
+        "caseManifestSha256": "sha256:" + ("a" * 64),
+        "status": "materialized",
+        "suiteId": suite_id,
+    }
+
+
 def _d19_catalog_snapshot(plan: Any) -> dict[str, object]:
     return {
         "artifactPath": plan.payload["artifact_paths"]["benchmark_catalog"],
         "artifactSha256": "a" * 64,
         "artifactVersionId": "catalog-version-001",
-        "blockingSuiteIds": [
-            suite_id for suite_id in MANDATORY_SERP_BENCHMARK_SUITES if suite_id != "BEIR"
-        ],
+        "blockingSuiteIds": [],
         "catalogReceiptPath": plan.payload["artifact_paths"]["benchmark_catalog_receipt"],
         "catalogReceiptSha256": "b" * 64,
         "catalogReceiptVersionId": "catalog-receipt-version-001",
-        "catalogStatus": "blocked",
+        "catalogStatus": "ready",
         "objectLockMode": "COMPLIANCE",
         "suiteSummary": [
             {
                 "distributionRule": "internal-only",
-                "executionStatus": "ready" if suite_id == "BEIR" else "adapter-unavailable",
+                "executionStatus": "ready",
                 "rightsStatus": "attested",
                 "suiteId": suite_id,
             }

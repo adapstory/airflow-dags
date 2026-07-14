@@ -157,6 +157,11 @@ def test_catalog_covers_every_mandatory_suite_with_explicit_licensing_boundary()
         for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
     )
     assert all(
+        url.startswith("https://")
+        for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+        for _, url in entry.supplemental_dataset_artifacts
+    )
+    assert all(
         entry.adapter_source_url.startswith("https://")
         for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
     )
@@ -164,15 +169,17 @@ def test_catalog_covers_every_mandatory_suite_with_explicit_licensing_boundary()
 
 
 def test_catalog_exposes_fail_closed_d6_schedule_readiness() -> None:
-    """D6 cannot be scheduled until every mandatory adapter is executable."""
+    """D6 is schedulable only because every suite has a native adapter in the image."""
 
-    assert mandatory_benchmark_adapters_ready() is False
+    assert mandatory_benchmark_adapters_ready() is True
 
 
 def test_catalog_pins_each_upstream_dataset_to_an_immutable_revision() -> None:
     assert all(
-        len(entry.dataset_revision) == 40
-        and all(character in "0123456789abcdef" for character in entry.dataset_revision)
+        all(
+            len(revision) == 40 and all(character in "0123456789abcdef" for character in revision)
+            for revision in entry.dataset_revision.split("+")
+        )
         for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
     )
     assert all(
@@ -183,6 +190,11 @@ def test_catalog_pins_each_upstream_dataset_to_an_immutable_revision() -> None:
     )
     assert all(
         "/main/" not in entry.dataset_artifact_url for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+    )
+    assert all(
+        "/main/" not in url
+        for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+        for _, url in entry.supplemental_dataset_artifacts
     )
 
 
@@ -205,6 +217,7 @@ def test_live_catalog_allows_rights_unverified_internal_runs() -> None:
             for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
         }
     )
+    payload_by_url.update(_supplemental_dataset_payloads())
     payload_by_url.update(
         {
             entry.adapter_source_url: f"adapter:{entry.suite_id}".encode()
@@ -215,38 +228,41 @@ def test_live_catalog_allows_rights_unverified_internal_runs() -> None:
     evidence = build_live_benchmark_catalog_evidence(
         observed_at="2026-07-13T00:00:00Z",
         fetch_bytes=payload_by_url.__getitem__,
+        snapshot_bytes=_snapshot_bytes,
+        native_adapter_materializer=_native_adapter_materializer,
     )
     suites = cast(list[dict[str, Any]], evidence["suites"])
 
     assert evidence["contract_version"] == BENCHMARK_CATALOG_CONTRACT_VERSION
-    assert evidence["catalog_status"] == "blocked"
+    assert evidence["catalog_status"] == "ready"
     assert [item["suite_id"] for item in suites] == list(MANDATORY_SERP_BENCHMARK_SUITES)
     assert all(item["source_snapshot"]["sha256"].startswith("sha256:") for item in suites)
     assert all(item["license_snapshot"]["sha256"].startswith("sha256:") for item in suites)
-    assert all(item["dataset_snapshot"]["sha256"].startswith("sha256:") for item in suites)
+    assert all(
+        all(
+            snapshot["sha256"].startswith("sha256:")
+            for snapshot in item["dataset_snapshots"].values()
+        )
+        for item in suites
+    )
     assert {
         item["suite_id"] for item in suites if item["rights_status"] == "rights-unverified"
     } == {"CodeRAG-Bench", "SWE-bench Verified", "rusBEIR"}
-    assert {item["suite_id"] for item in suites if item["execution_status"] == "ready"} == {"BEIR"}
+    assert {item["suite_id"] for item in suites if item["execution_status"] == "ready"} == set(
+        MANDATORY_SERP_BENCHMARK_SUITES
+    )
     assert {
         item["distribution_rule"] for item in suites if item["rights_status"] == "rights-unverified"
     } == {"internal-only-no-redistribution"}
 
 
-def test_catalog_does_not_mark_a_dataset_snapshot_as_a_runnable_adapter() -> None:
-    evidence = build_live_benchmark_catalog_evidence(
-        observed_at="2026-07-13T00:00:00Z",
-        fetch_bytes=lambda _url: b"upstream-bytes",
-    )
-    suites = cast(list[dict[str, Any]], evidence["suites"])
-
-    assert evidence["catalog_status"] == "blocked"
-    assert {item["suite_id"] for item in suites if item["execution_status"] == "ready"} == {"BEIR"}
-    assert all(
-        item["execution_status"] == "adapter-unavailable"
-        for item in suites
-        if item["suite_id"] != "BEIR"
-    )
+def test_catalog_refuses_to_mark_a_snapshot_ready_without_native_adapter_evidence() -> None:
+    with pytest.raises(ValueError, match="native adapter materializer is required"):
+        build_live_benchmark_catalog_evidence(
+            observed_at="2026-07-13T00:00:00Z",
+            fetch_bytes=lambda _url: b"upstream-bytes",
+            snapshot_bytes=_snapshot_bytes,
+        )
 
 
 def test_live_catalog_retains_immutable_source_and_license_snapshots() -> None:
@@ -266,6 +282,7 @@ def test_live_catalog_retains_immutable_source_and_license_snapshots() -> None:
             for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
         }
     )
+    payload_by_url.update(_supplemental_dataset_payloads())
     calls: list[tuple[str, str, str, bytes]] = []
 
     def snapshot_bytes(
@@ -286,16 +303,57 @@ def test_live_catalog_retains_immutable_source_and_license_snapshots() -> None:
         observed_at="2026-07-13T00:00:00Z",
         fetch_bytes=payload_by_url.__getitem__,
         snapshot_bytes=snapshot_bytes,
+        native_adapter_materializer=_native_adapter_materializer,
     )
     suites = cast(list[dict[str, Any]], evidence["suites"])
 
-    assert len(calls) == len(MANDATORY_SERP_BENCHMARK_SUITES) * 3
+    assert len(calls) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 3) + 2
     beir = next(item for item in suites if item["suite_id"] == "BEIR")
-    assert beir["dataset_snapshot"]["immutable_artifact"]["objectLockMode"] == "COMPLIANCE"
+    assert (
+        beir["dataset_snapshots"]["dataset"]["immutable_artifact"]["objectLockMode"] == "COMPLIANCE"
+    )
     assert beir["source_snapshot"]["immutable_artifact"]["objectLockMode"] == "COMPLIANCE"
     assert beir["license_snapshot"]["immutable_artifact"]["artifactVersionId"] == (
         "version-BEIR-license"
     )
+
+
+def _snapshot_bytes(
+    suite_id: str,
+    evidence_type: str,
+    _url: str,
+    payload: bytes,
+) -> dict[str, str]:
+    return {
+        "artifactPath": f"s3://airflow-serp-evidence/catalog/{suite_id}/{evidence_type}",
+        "artifactSha256": sha256(payload).hexdigest(),
+        "artifactVersionId": f"version-{suite_id}-{evidence_type}",
+        "objectLockMode": "COMPLIANCE",
+    }
+
+
+def _native_adapter_materializer(
+    suite_id: str,
+    payloads: dict[str, bytes],
+    snapshots: dict[str, dict[str, object]],
+) -> dict[str, object]:
+    assert payloads
+    assert set(payloads) == set(snapshots)
+    return {
+        "adapterId": f"native/{suite_id.casefold()}@v1",
+        "caseCount": 1,
+        "caseManifestSha256": "sha256:" + ("a" * 64),
+        "status": "materialized",
+        "suiteId": suite_id,
+    }
+
+
+def _supplemental_dataset_payloads() -> dict[str, bytes]:
+    return {
+        url: f"dataset-bytes:{entry.suite_id}:{source_id}".encode()
+        for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+        for source_id, url in entry.supplemental_dataset_artifacts
+    }
 
 
 def test_immutable_evidence_snapshot_requires_versioned_compliance_locked_s3_object(

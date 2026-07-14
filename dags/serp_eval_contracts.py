@@ -17,7 +17,7 @@ from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from time import perf_counter, sleep
-from typing import Any, NoReturn
+from typing import Any, NoReturn, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import ParseResult, parse_qsl, unquote, urlparse
 from urllib.request import ProxyHandler, Request, build_opener, urlopen
@@ -72,11 +72,8 @@ _ALLOWED_DATASET_DISTRIBUTION_RULES = {
 _UNATTESTED_LICENSE_MARKERS = ("pending", "unknown", "noassertion", "unlicensed")
 _DATASET_RIGHTS_STATUSES = frozenset({"attested", "rights-unverified"})
 _RIGHTS_UNVERIFIED_DISTRIBUTION_RULE = "internal-only-no-redistribution"
-_CATALOG_EXECUTION_STATUSES = frozenset({"ready", "adapter-unavailable", "rights-policy-blocked"})
-_CATALOG_BLOCKING_REASON_ORDER = (
-    "adapter-unavailable",
-    "rights-policy-blocked",
-)
+_CATALOG_EXECUTION_STATUSES = frozenset({"ready", "rights-policy-blocked"})
+_CATALOG_BLOCKING_REASON_ORDER = ("rights-policy-blocked",)
 _BENCHMARK_NAMESPACE = UUID("018f5e13-2d73-7a77-a052-8d1bcbf96599")
 _PUBLIC_DOCS_NAMESPACE = UUID("018f5e13-2d73-7a77-a052-8d1bcbf96600")
 _PUBLIC_DOCS_EXECUTABLE_SOURCE_TYPES = frozenset({"git", "openapi", "pdf", "website"})
@@ -1500,6 +1497,10 @@ def materialize_live_benchmark_catalog_artifact(
     fetch_bytes: Callable[[str], bytes] | None = None,
     snapshot_writer: Callable[..., dict[str, Any]] | None = None,
     snapshot_bytes_writer: Callable[..., dict[str, Any]] | None = None,
+    native_adapter_materializer: Callable[
+        [str, Mapping[str, bytes], Mapping[str, Mapping[str, object]]], Mapping[str, object]
+    ]
+    | None = None,
 ) -> dict[str, Any]:
     """Capture all upstream benchmark licensing evidence in immutable storage.
 
@@ -1547,6 +1548,11 @@ def materialize_live_benchmark_catalog_artifact(
         observed_at=_required_datetime_string(plan, "generated_at"),
         fetch_bytes=_fetch_https_bytes if fetch_bytes is None else fetch_bytes,
         snapshot_bytes=snapshot_bytes,
+        native_adapter_materializer=(
+            _native_adapter_materializer
+            if native_adapter_materializer is None
+            else native_adapter_materializer
+        ),
     )
     writer = write_immutable_evidence_snapshot if snapshot_writer is None else snapshot_writer
     snapshot = writer(
@@ -1567,6 +1573,27 @@ def materialize_live_benchmark_catalog_artifact(
     ]
     result["suiteSummary"] = _catalog_suite_summary(suites)
     return result
+
+
+def _native_adapter_materializer(
+    suite_id: str,
+    dataset_payloads: Mapping[str, bytes],
+    dataset_snapshots: Mapping[str, Mapping[str, object]],
+) -> Mapping[str, object]:
+    """Load the image-owned adapter only inside the isolated catalog workload."""
+
+    from adapstory_serp_pipeline.benchmark.native_adapters import (  # type: ignore[import-not-found]
+        build_native_case_manifest,
+    )
+
+    return cast(
+        Mapping[str, object],
+        build_native_case_manifest(
+            suite_id=suite_id,
+            dataset_payloads=dataset_payloads,
+            dataset_snapshots=dataset_snapshots,
+        ),
+    )
 
 
 def load_materialized_benchmark_catalog_snapshot(
@@ -1607,7 +1634,7 @@ def load_materialized_benchmark_catalog_snapshot(
         )
     except UnicodeDecodeError as exc:
         raise ValueError("benchmark catalog materialization receipt is not UTF-8 JSON") from exc
-    if _required_str(receipt, "contractVersion") != "serp-benchmark-catalog-materializer/v2":
+    if _required_str(receipt, "contractVersion") != "serp-benchmark-catalog-materializer/v3":
         raise ValueError("benchmark catalog materialization receipt contract is unsupported")
     if _required_str(receipt, "dagId") != _required_str(plan, "dag_id"):
         raise ValueError("benchmark catalog materialization receipt dagId does not match plan")
@@ -1652,7 +1679,9 @@ def load_materialized_benchmark_catalog_snapshot(
         for suite in suites
         if _required_str(suite, "execution_status") != "ready"
     ]
-    if actual_blocking_suite_ids != _required_str_list(catalog_snapshot, "blockingSuiteIds"):
+    if actual_blocking_suite_ids != _required_str_list_allow_empty(
+        catalog_snapshot, "blockingSuiteIds"
+    ):
         raise ValueError("benchmark catalog receipt blocking suites do not match catalog object")
     blocking_reason_by_suite = _catalog_blocking_reason_by_suite(suites)
     if list(blocking_reason_by_suite) != actual_blocking_suite_ids:
@@ -5503,7 +5532,7 @@ def _paired_eval_catalog_evidence(
     if _required_str(catalog_snapshot, "objectLockMode") != "COMPLIANCE":
         raise ValueError("paired evaluator catalog must use COMPLIANCE object lock")
     suite_summary = normalize_benchmark_catalog_suite_summary(catalog_snapshot.get("suiteSummary"))
-    blocking_suite_ids = _required_str_list(catalog_snapshot, "blockingSuiteIds")
+    blocking_suite_ids = _required_str_list_allow_empty(catalog_snapshot, "blockingSuiteIds")
     derived_blocking_suite_ids = [
         item["suiteId"] for item in suite_summary if item["executionStatus"] != "ready"
     ]
@@ -6946,6 +6975,18 @@ def _optional_unit_interval(
     result = float(value)
     if result < 0.0 or result > 1.0:
         raise ValueError(f"{field_name} must be between 0 and 1")
+    return result
+
+
+def _required_str_list_allow_empty(payload: Mapping[str, Any], field_name: str) -> list[str]:
+    value = payload.get(field_name)
+    if not isinstance(value, list):
+        raise ValueError(f"{field_name} must be a list")
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"{field_name} entries must be non-empty strings")
+        result.append(item)
     return result
 
 

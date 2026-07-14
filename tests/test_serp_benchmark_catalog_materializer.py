@@ -35,13 +35,13 @@ def test_catalog_materializer_seals_catalog_snapshot_in_immutable_receipt() -> N
             "artifactPath": plan["artifact_paths"]["benchmark_catalog"],
             "artifactSha256": "a" * 64,
             "artifactVersionId": "catalog-v1",
-            "catalogStatus": "blocked",
-            "blockingSuiteIds": list(MANDATORY_SERP_BENCHMARK_SUITES),
+            "catalogStatus": "ready",
+            "blockingSuiteIds": [],
             "objectLockMode": "COMPLIANCE",
             "suiteSummary": [
                 {
                     "distributionRule": "internal-only-no-redistribution",
-                    "executionStatus": "adapter-unavailable",
+                    "executionStatus": "ready",
                     "rightsStatus": "rights-unverified",
                     "suiteId": suite_id,
                 }
@@ -72,20 +72,20 @@ def test_catalog_materializer_seals_catalog_snapshot_in_immutable_receipt() -> N
                 "artifactPath": plan["artifact_paths"]["benchmark_catalog"],
                 "artifactSha256": "a" * 64,
                 "artifactVersionId": "catalog-v1",
-                "blockingSuiteIds": list(MANDATORY_SERP_BENCHMARK_SUITES),
-                "catalogStatus": "blocked",
+                "blockingSuiteIds": [],
+                "catalogStatus": "ready",
                 "objectLockMode": "COMPLIANCE",
                 "suiteSummary": [
                     {
                         "distributionRule": "internal-only-no-redistribution",
-                        "executionStatus": "adapter-unavailable",
+                        "executionStatus": "ready",
                         "rightsStatus": "rights-unverified",
                         "suiteId": suite_id,
                     }
                     for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
                 ],
             },
-            "contractVersion": "serp-benchmark-catalog-materializer/v2",
+            "contractVersion": "serp-benchmark-catalog-materializer/v3",
             "dagId": "serp_nightly_regression_suite",
             "operationId": "op-1",
         },

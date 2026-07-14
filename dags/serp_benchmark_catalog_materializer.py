@@ -14,7 +14,7 @@ from dags.serp_eval_contracts import (
     write_immutable_evidence_snapshot,
 )
 
-BENCHMARK_CATALOG_MATERIALIZER_CONTRACT_VERSION = "serp-benchmark-catalog-materializer/v2"
+BENCHMARK_CATALOG_MATERIALIZER_CONTRACT_VERSION = "serp-benchmark-catalog-materializer/v3"
 
 CatalogMaterializer = Callable[[Mapping[str, Any] | str], dict[str, Any]]
 ReceiptWriter = Callable[..., dict[str, Any]]
