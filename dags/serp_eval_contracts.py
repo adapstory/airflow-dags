@@ -1551,11 +1551,13 @@ def materialize_live_benchmark_catalog_artifact(
         raise ValueError("benchmark catalog snapshot writer returned an invalid result")
     result = dict(snapshot)
     result["catalogStatus"] = _required_str(evidence, "catalog_status")
+    suites = _required_object_list(evidence, "suites")
     result["blockingSuiteIds"] = [
         _required_str(suite, "suite_id")
-        for suite in _required_object_list(evidence, "suites")
+        for suite in suites
         if _required_str(suite, "execution_status") != "ready"
     ]
+    result["suiteSummary"] = _catalog_suite_summary(suites)
     return result
 
 
@@ -1596,7 +1598,7 @@ def load_materialized_benchmark_catalog_snapshot(
         )
     except UnicodeDecodeError as exc:
         raise ValueError("benchmark catalog materialization receipt is not UTF-8 JSON") from exc
-    if _required_str(receipt, "contractVersion") != "serp-benchmark-catalog-materializer/v1":
+    if _required_str(receipt, "contractVersion") != "serp-benchmark-catalog-materializer/v2":
         raise ValueError("benchmark catalog materialization receipt contract is unsupported")
     if _required_str(receipt, "dagId") != _required_str(plan, "dag_id"):
         raise ValueError("benchmark catalog materialization receipt dagId does not match plan")
@@ -1632,6 +1634,10 @@ def load_materialized_benchmark_catalog_snapshot(
         raise ValueError(
             "benchmark catalog object must contain mandatory suites in canonical order"
         )
+    if normalize_benchmark_catalog_suite_summary(
+        catalog_snapshot.get("suiteSummary")
+    ) != _catalog_suite_summary(suites):
+        raise ValueError("benchmark catalog receipt suite summary does not match catalog object")
     actual_blocking_suite_ids = [
         _required_str(suite, "suite_id")
         for suite in suites
@@ -1648,6 +1654,69 @@ def load_materialized_benchmark_catalog_snapshot(
         "catalogReceiptPath": artifact_paths["benchmark_catalog_receipt"],
         "catalogReceiptVersionId": receipt_version_id,
     }
+
+
+def normalize_benchmark_catalog_suite_summary(value: object) -> list[dict[str, str]]:
+    """Validate the safe, self-describing nine-suite receipt summary.
+
+    This deliberately excludes URLs, dataset bytes, hashes, and credentials.
+    The immutable catalog remains the detailed provenance source; the summary
+    makes a receipt and task log independently auditable without expanding
+    access to protected evidence.
+    """
+
+    if not isinstance(value, list):
+        raise ValueError("benchmark catalog suite summary must be a list")
+    normalized: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, Mapping) or set(item) != {
+            "distributionRule",
+            "executionStatus",
+            "rightsStatus",
+            "suiteId",
+        }:
+            raise ValueError("benchmark catalog suite summary has an invalid shape")
+        execution_status = _required_str(item, "executionStatus")
+        if execution_status not in _CATALOG_EXECUTION_STATUSES:
+            raise ValueError("benchmark catalog suite summary has an unsupported execution status")
+        rights_status = _required_str(item, "rightsStatus")
+        if rights_status not in _DATASET_RIGHTS_STATUSES:
+            raise ValueError("benchmark catalog suite summary has an unsupported rights status")
+        distribution_rule = _required_str(item, "distributionRule")
+        if distribution_rule not in _ALLOWED_DATASET_DISTRIBUTION_RULES:
+            raise ValueError("benchmark catalog suite summary has an unsupported distribution rule")
+        if (
+            rights_status == "rights-unverified"
+            and distribution_rule != _RIGHTS_UNVERIFIED_DISTRIBUTION_RULE
+        ):
+            raise ValueError(
+                "benchmark catalog suite summary must keep unverified rights internal-only"
+            )
+        normalized.append(
+            {
+                "distributionRule": distribution_rule,
+                "executionStatus": execution_status,
+                "rightsStatus": rights_status,
+                "suiteId": _required_str(item, "suiteId"),
+            }
+        )
+    if [item["suiteId"] for item in normalized] != list(MANDATORY_SERP_BENCHMARK_SUITES):
+        raise ValueError("benchmark catalog suite summary must use canonical suite order")
+    return normalized
+
+
+def _catalog_suite_summary(suites: Sequence[Mapping[str, Any]]) -> list[dict[str, str]]:
+    return normalize_benchmark_catalog_suite_summary(
+        [
+            {
+                "distributionRule": _required_str(suite, "distribution_rule"),
+                "executionStatus": _required_str(suite, "execution_status"),
+                "rightsStatus": _required_str(suite, "rights_status"),
+                "suiteId": _required_str(suite, "suite_id"),
+            }
+            for suite in suites
+        ]
+    )
 
 
 def _catalog_blocking_reason_by_suite(

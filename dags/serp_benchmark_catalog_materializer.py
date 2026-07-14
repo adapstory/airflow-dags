@@ -10,10 +10,11 @@ from urllib.parse import unquote
 
 from dags.serp_eval_contracts import (
     materialize_live_benchmark_catalog_artifact,
+    normalize_benchmark_catalog_suite_summary,
     write_immutable_evidence_snapshot,
 )
 
-BENCHMARK_CATALOG_MATERIALIZER_CONTRACT_VERSION = "serp-benchmark-catalog-materializer/v1"
+BENCHMARK_CATALOG_MATERIALIZER_CONTRACT_VERSION = "serp-benchmark-catalog-materializer/v2"
 
 CatalogMaterializer = Callable[[Mapping[str, Any] | str], dict[str, Any]]
 ReceiptWriter = Callable[..., dict[str, Any]]
@@ -34,6 +35,7 @@ def materialize_benchmark_catalog_receipt(
     catalog_snapshot = catalog_materializer(payload)
     if _required_str(catalog_snapshot, "artifactPath") != catalog_path:
         raise ValueError("benchmark catalog snapshot must match the plan artifact path")
+    suite_summary = normalize_benchmark_catalog_suite_summary(catalog_snapshot.get("suiteSummary"))
     catalog_receipt = {
         "catalogSnapshot": {
             "artifactPath": catalog_path,
@@ -42,6 +44,7 @@ def materialize_benchmark_catalog_receipt(
             "blockingSuiteIds": _required_str_list(catalog_snapshot, "blockingSuiteIds"),
             "catalogStatus": _required_str(catalog_snapshot, "catalogStatus"),
             "objectLockMode": _required_str(catalog_snapshot, "objectLockMode"),
+            "suiteSummary": suite_summary,
         },
         "contractVersion": BENCHMARK_CATALOG_MATERIALIZER_CONTRACT_VERSION,
         "dagId": _required_str(payload, "dag_id"),
@@ -57,18 +60,31 @@ def materialize_benchmark_catalog_receipt(
         raise ValueError(
             "benchmark catalog materialization receipt writer returned an invalid result"
         )
-    return dict(receipt)
+    result = dict(receipt)
+    result["catalogSnapshot"] = catalog_receipt["catalogSnapshot"]
+    return result
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     plan = _plan_payload(unquote(args.plan_json_urlencoded))
     receipt = materialize_benchmark_catalog_receipt(plan)
+    catalog_snapshot = _required_mapping(receipt, "catalogSnapshot")
     print(
         json.dumps(
             {
                 "artifactPath": _required_str(receipt, "artifactPath"),
                 "artifactVersionId": _required_str(receipt, "artifactVersionId"),
+                "catalogSnapshot": {
+                    "artifactPath": _required_str(catalog_snapshot, "artifactPath"),
+                    "artifactVersionId": _required_str(catalog_snapshot, "artifactVersionId"),
+                    "blockingSuiteIds": _required_str_list(catalog_snapshot, "blockingSuiteIds"),
+                    "catalogStatus": _required_str(catalog_snapshot, "catalogStatus"),
+                    "objectLockMode": _required_str(catalog_snapshot, "objectLockMode"),
+                    "suiteSummary": normalize_benchmark_catalog_suite_summary(
+                        catalog_snapshot.get("suiteSummary")
+                    ),
+                },
                 "objectLockMode": _required_str(receipt, "objectLockMode"),
             },
             ensure_ascii=True,

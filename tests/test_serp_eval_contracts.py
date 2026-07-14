@@ -21,6 +21,7 @@ from uuid import UUID
 import pytest
 
 import dags.serp_eval_contracts as serp_eval_contracts_module
+from dags.serp_benchmark_catalog import MANDATORY_BENCHMARK_SUITE_CATALOG
 from dags.serp_eval_contracts import (
     MANDATORY_SERP_BENCHMARK_SUITES,
     SERP_NORMALIZED_GATE_FLOOR,
@@ -531,6 +532,15 @@ def test_catalog_materializer_accepts_dedicated_dataset_evidence_plan() -> None:
     assert result["blockingSuiteIds"] == [
         suite_id for suite_id in MANDATORY_SERP_BENCHMARK_SUITES if suite_id != "BEIR"
     ]
+    assert result["suiteSummary"] == [
+        {
+            "distributionRule": entry.distribution_rule,
+            "executionStatus": entry.execution_status,
+            "rightsStatus": entry.rights_status,
+            "suiteId": entry.suite_id,
+        }
+        for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+    ]
     assert len(written) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 3) + 1
 
 
@@ -584,6 +594,9 @@ def test_nightly_catalog_materialization_writes_all_live_legal_evidence_before_b
     assert result["blockingSuiteIds"] == [
         suite_id for suite_id in MANDATORY_SERP_BENCHMARK_SUITES if suite_id != "BEIR"
     ]
+    assert [entry["suiteId"] for entry in result["suiteSummary"]] == list(
+        MANDATORY_SERP_BENCHMARK_SUITES
+    )
     assert written[-1]["artifact_path"] == plan.payload["artifact_paths"]["benchmark_catalog"]
     assert len(written) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 3) + 1
 
@@ -601,10 +614,12 @@ def test_load_materialized_catalog_binds_receipt_and_catalog_s3_versions() -> No
         "catalog_status": "blocked",
         "suites": [
             {
-                "execution_status": "ready" if suite_id == "BEIR" else "adapter-unavailable",
-                "suite_id": suite_id,
+                "distribution_rule": entry.distribution_rule,
+                "execution_status": entry.execution_status,
+                "rights_status": entry.rights_status,
+                "suite_id": entry.suite_id,
             }
-            for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+            for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
         ],
     }
     catalog_bytes = json.dumps(catalog_payload, sort_keys=True).encode("utf-8")
@@ -616,8 +631,17 @@ def test_load_materialized_catalog_binds_receipt_and_catalog_s3_versions() -> No
             "blockingSuiteIds": blocking_suite_ids,
             "catalogStatus": "blocked",
             "objectLockMode": "COMPLIANCE",
+            "suiteSummary": [
+                {
+                    "distributionRule": entry.distribution_rule,
+                    "executionStatus": entry.execution_status,
+                    "rightsStatus": entry.rights_status,
+                    "suiteId": entry.suite_id,
+                }
+                for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+            ],
         },
-        "contractVersion": "serp-benchmark-catalog-materializer/v1",
+        "contractVersion": "serp-benchmark-catalog-materializer/v2",
         "dagId": "serp_nightly_regression_suite",
         "operationId": plan.payload["operation_id"],
     }
@@ -679,6 +703,13 @@ def test_load_materialized_catalog_binds_receipt_and_catalog_s3_versions() -> No
     assert snapshot["blockingReasonBySuite"] == {
         suite_id: "adapter-unavailable" for suite_id in blocking_suite_ids
     }
+
+    receipt_payload["catalogSnapshot"]["suiteSummary"][0]["distributionRule"] = "internal-only"
+    with pytest.raises(ValueError, match="suite summary does not match catalog object"):
+        load_materialized_benchmark_catalog_snapshot(
+            plan.to_canonical_json(),
+            s3_client=FakeS3Client(),
+        )
 
 
 def test_build_nightly_regression_plan_accepts_s3_artifact_root_from_env(

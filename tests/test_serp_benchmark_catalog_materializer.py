@@ -15,6 +15,7 @@ from dags.serp_benchmark_catalog_workload import (
     benchmark_catalog_acquisition_env_vars,
     benchmark_catalog_acquisition_pod_security_context,
 )
+from dags.serp_eval_contracts import MANDATORY_SERP_BENCHMARK_SUITES
 
 
 def test_catalog_materializer_seals_catalog_snapshot_in_immutable_receipt() -> None:
@@ -35,8 +36,17 @@ def test_catalog_materializer_seals_catalog_snapshot_in_immutable_receipt() -> N
             "artifactSha256": "a" * 64,
             "artifactVersionId": "catalog-v1",
             "catalogStatus": "blocked",
-            "blockingSuiteIds": ["APIBench"],
+            "blockingSuiteIds": list(MANDATORY_SERP_BENCHMARK_SUITES),
             "objectLockMode": "COMPLIANCE",
+            "suiteSummary": [
+                {
+                    "distributionRule": "internal-only-no-redistribution",
+                    "executionStatus": "adapter-unavailable",
+                    "rightsStatus": "rights-unverified",
+                    "suiteId": suite_id,
+                }
+                for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+            ],
         }
 
     def receipt_writer(**kwargs: Any) -> dict[str, Any]:
@@ -62,11 +72,20 @@ def test_catalog_materializer_seals_catalog_snapshot_in_immutable_receipt() -> N
                 "artifactPath": plan["artifact_paths"]["benchmark_catalog"],
                 "artifactSha256": "a" * 64,
                 "artifactVersionId": "catalog-v1",
-                "blockingSuiteIds": ["APIBench"],
+                "blockingSuiteIds": list(MANDATORY_SERP_BENCHMARK_SUITES),
                 "catalogStatus": "blocked",
                 "objectLockMode": "COMPLIANCE",
+                "suiteSummary": [
+                    {
+                        "distributionRule": "internal-only-no-redistribution",
+                        "executionStatus": "adapter-unavailable",
+                        "rightsStatus": "rights-unverified",
+                        "suiteId": suite_id,
+                    }
+                    for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+                ],
             },
-            "contractVersion": "serp-benchmark-catalog-materializer/v1",
+            "contractVersion": "serp-benchmark-catalog-materializer/v2",
             "dagId": "serp_nightly_regression_suite",
             "operationId": "op-1",
         },
