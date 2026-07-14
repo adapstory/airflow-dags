@@ -5601,10 +5601,11 @@ def test_serp_improvement_dag_passes_exact_s3_values_to_the_evaluator_pod(
     }
 
 
-def test_web_identity_duration_env_is_protected_from_native_template_coercion() -> None:
+def test_web_identity_env_values_are_protected_from_native_template_coercion() -> None:
     source = (REPO_ROOT / "dags" / "serp_evidence_workload_identity.py").read_text(encoding="utf-8")
 
     assert "from airflow.sdk import literal" in source
+    assert "value=literal(value.strip())" in source
     assert "value=literal(str(MINIO_WEB_IDENTITY_EXPIRATION_SECONDS))" in source
 
 

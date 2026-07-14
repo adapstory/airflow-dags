@@ -22,7 +22,12 @@ def minio_web_identity_env_vars(required_names: Sequence[str]) -> list[k8s.V1Env
         value = os.environ.get(name)
         if value is None or not value.strip():
             raise ValueError(f"evidence workload environment is required: {name}")
-        values.append(k8s.V1EnvVar(name=name, value=value.strip()))
+        # Airflow renders KPO templates through NativeEnvironment.  A plain
+        # numeric-looking string (for example a retention period) is then
+        # coerced to an integer and rejected by the Kubernetes EnvVar API.
+        # `literal` preserves the required contract for every caller, rather
+        # than making each workload remember to special-case numeric values.
+        values.append(k8s.V1EnvVar(name=name, value=literal(value.strip())))
     values.extend(
         (
             k8s.V1EnvVar(
