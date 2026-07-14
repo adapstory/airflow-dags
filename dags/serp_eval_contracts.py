@@ -72,6 +72,11 @@ _ALLOWED_DATASET_DISTRIBUTION_RULES = {
 _UNATTESTED_LICENSE_MARKERS = ("pending", "unknown", "noassertion", "unlicensed")
 _DATASET_RIGHTS_STATUSES = frozenset({"attested", "rights-unverified"})
 _RIGHTS_UNVERIFIED_DISTRIBUTION_RULE = "internal-only-no-redistribution"
+_CATALOG_EXECUTION_STATUSES = frozenset({"ready", "adapter-unavailable", "rights-policy-blocked"})
+_CATALOG_BLOCKING_REASON_ORDER = (
+    "adapter-unavailable",
+    "rights-policy-blocked",
+)
 _BENCHMARK_NAMESPACE = UUID("018f5e13-2d73-7a77-a052-8d1bcbf96599")
 _PUBLIC_DOCS_NAMESPACE = UUID("018f5e13-2d73-7a77-a052-8d1bcbf96600")
 _PUBLIC_DOCS_EXECUTABLE_SOURCE_TYPES = frozenset({"git", "openapi", "pdf", "website"})
@@ -1634,11 +1639,39 @@ def load_materialized_benchmark_catalog_snapshot(
     ]
     if actual_blocking_suite_ids != _required_str_list(catalog_snapshot, "blockingSuiteIds"):
         raise ValueError("benchmark catalog receipt blocking suites do not match catalog object")
+    blocking_reason_by_suite = _catalog_blocking_reason_by_suite(suites)
+    if list(blocking_reason_by_suite) != actual_blocking_suite_ids:
+        raise ValueError("catalog-evidence-invalid: blocking reasons do not match catalog suites")
     return {
         **catalog_snapshot,
+        "blockingReasonBySuite": blocking_reason_by_suite,
         "catalogReceiptPath": artifact_paths["benchmark_catalog_receipt"],
         "catalogReceiptVersionId": receipt_version_id,
     }
+
+
+def _catalog_blocking_reason_by_suite(
+    suites: Sequence[Mapping[str, Any]],
+) -> dict[str, str]:
+    """Derive operator-facing D6 blocks from the immutable catalog itself.
+
+    A legal snapshot can be valid while a runner is still absent.  Keep that
+    distinction explicit so scheduled D6 failures cannot be mistaken for a
+    licensing decision or bypassed by a caller-provided reason.
+    """
+
+    reasons: dict[str, str] = {}
+    for suite in suites:
+        suite_id = _required_str(suite, "suite_id")
+        execution_status = _required_str(suite, "execution_status")
+        if execution_status not in _CATALOG_EXECUTION_STATUSES:
+            raise ValueError(
+                "catalog-evidence-invalid: unsupported execution_status for " + suite_id
+            )
+        if execution_status == "ready":
+            continue
+        reasons[suite_id] = execution_status
+    return reasons
 
 
 def _read_compliance_locked_s3_bytes(
@@ -2640,9 +2673,25 @@ def write_nightly_suite_plan_artifact(
     catalog_status = _required_str(catalog_snapshot, "catalogStatus")
     if catalog_status != "ready":
         blocking_suite_ids = _required_str_list(catalog_snapshot, "blockingSuiteIds")
+        blocking_reason_by_suite = _required_catalog_blocking_reason_by_suite(
+            catalog_snapshot,
+            blocking_suite_ids,
+        )
+        blocks_by_reason = {
+            reason: [
+                suite_id
+                for suite_id in blocking_suite_ids
+                if blocking_reason_by_suite[suite_id] == reason
+            ]
+            for reason in _CATALOG_BLOCKING_REASON_ORDER
+        }
         raise ValueError(
-            "benchmark catalog blocks D6 until dataset licenses are attested: "
-            + ", ".join(blocking_suite_ids)
+            "benchmark catalog blocks D6: "
+            + "; ".join(
+                f"{reason}={', '.join(suite_ids)}"
+                for reason, suite_ids in blocks_by_reason.items()
+                if suite_ids
+            )
         )
     payload = _nightly_suite_plan_payload(plan)
     artifact_path = artifact_paths["suite_plan"]
@@ -2653,6 +2702,25 @@ def write_nightly_suite_plan_artifact(
         operation_id=_required_str(plan, "operation_id"),
         payload=payload,
     )
+
+
+def _required_catalog_blocking_reason_by_suite(
+    catalog_snapshot: Mapping[str, Any],
+    blocking_suite_ids: Sequence[str],
+) -> dict[str, str]:
+    raw_reasons = _required_mapping(catalog_snapshot, "blockingReasonBySuite")
+    expected_suite_ids = set(blocking_suite_ids)
+    if set(raw_reasons) != expected_suite_ids:
+        raise ValueError("catalog-evidence-invalid: blocking reasons must match blocking suites")
+    reasons: dict[str, str] = {}
+    for suite_id in blocking_suite_ids:
+        reason = _required_str(raw_reasons, suite_id)
+        if reason not in _CATALOG_BLOCKING_REASON_ORDER:
+            raise ValueError(
+                "catalog-evidence-invalid: unsupported blocking reason for " + suite_id
+            )
+        reasons[suite_id] = reason
+    return reasons
 
 
 def write_online_eval_rollup_plan_artifact(

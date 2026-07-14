@@ -676,6 +676,9 @@ def test_load_materialized_catalog_binds_receipt_and_catalog_s3_versions() -> No
     assert snapshot["artifactVersionId"] == "catalog-v1"
     assert snapshot["catalogReceiptVersionId"] == "receipt-v1"
     assert snapshot["blockingSuiteIds"] == blocking_suite_ids
+    assert snapshot["blockingReasonBySuite"] == {
+        suite_id: "adapter-unavailable" for suite_id in blocking_suite_ids
+    }
 
 
 def test_build_nightly_regression_plan_accepts_s3_artifact_root_from_env(
@@ -822,11 +825,22 @@ def test_nightly_d6_airflow_path_blocks_before_gateway_runner_when_licenses_are_
         "artifactPath": plan.payload["artifact_paths"]["benchmark_catalog"],
         "artifactVersionId": "version-20260713",
         "blockingSuiteIds": ["CodeRAG-Bench", "SWE-bench Verified", "rusBEIR"],
+        "blockingReasonBySuite": {
+            "CodeRAG-Bench": "adapter-unavailable",
+            "SWE-bench Verified": "rights-policy-blocked",
+            "rusBEIR": "adapter-unavailable",
+        },
         "catalogStatus": "blocked",
         "objectLockMode": "COMPLIANCE",
     }
 
-    with pytest.raises(ValueError, match="benchmark catalog blocks D6"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            "benchmark catalog blocks D6: adapter-unavailable=CodeRAG-Bench, rusBEIR; "
+            "rights-policy-blocked=SWE-bench Verified"
+        ),
+    ):
         write_nightly_suite_plan_artifact(json.loads(plan_json), catalog_snapshot)
 
 

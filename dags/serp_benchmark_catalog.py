@@ -346,9 +346,7 @@ def mandatory_benchmark_adapters_ready() -> bool:
     satisfied.
     """
 
-    return all(
-        entry.execution_status == _READY for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
-    )
+    return all(entry.execution_status == _READY for entry in MANDATORY_BENCHMARK_SUITE_CATALOG)
 
 
 def _fetch(url: str, fetch_bytes: Callable[[str], bytes]) -> bytes:
