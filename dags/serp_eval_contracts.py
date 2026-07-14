@@ -49,7 +49,6 @@ PIPELINE_PUBLISH_ACTIVATION_CLI_MODULE = "adapstory_serp_pipeline.registry.publi
 PIPELINE_RETIRED_PACK_CLEANUP_CLI_MODULE = (
     "adapstory_serp_pipeline.orchestration.retired_pack_cleanup_cli"
 )
-PIPELINE_PAIRED_EVAL_CLI_MODULE = "adapstory_serp_pipeline.orchestration.paired_eval_receipt"
 
 _RESOURCE_TYPES = frozenset({"pack", "tenant", "workflow"})
 _GATEWAY_CLI_CONTRACT_VERSION = "serp-airflow-gateway-cli-bridge/v1"
@@ -702,6 +701,8 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
     )
     model_governance = _improvement_model_governance(payload)
     artifact_root_path = _required_artifact_root_path(payload)
+    if not artifact_root_path.startswith("s3://"):
+        raise ValueError("benchmark improvement wave requires an s3:// artifact_root_path")
     operation_id = _operation_id(
         "serp-airflow-benchmark-improvement-wave",
         tenant_id,
@@ -722,7 +723,6 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
                 ("improvement_spec", "improvement-spec.json"),
                 ("paired_eval_request", "paired-eval-request.json"),
                 ("paired_eval_receipt", "paired-eval-receipt.json"),
-                ("paired_eval_control", "paired-eval-control.json"),
             ),
         ),
         "baseline_run_id": baseline_run_id,
@@ -2837,7 +2837,6 @@ def write_improvement_spec_artifact(
             "improvement_spec",
             "paired_eval_request",
             "paired_eval_receipt",
-            "paired_eval_control",
         ),
     )
     artifact_paths = _required_mapping(plan, "artifact_paths")
@@ -2864,13 +2863,21 @@ def write_paired_eval_request_artifact(
     artifact_paths = _required_artifact_paths(plan, ("paired_eval_request",))
     payload = _paired_eval_request_payload(plan)
     artifact_path = artifact_paths["paired_eval_request"]
-    _write_json_artifact(artifact_path, payload)
-    return _artifact_result(
+    request_evidence = write_immutable_evidence_snapshot(
         artifact_path,
-        artifact_type="paired_eval_request",
+        artifact_type="serp_paired_eval_request",
         operation_id=_required_str(plan, "operation_id"),
         payload=payload,
     )
+    return {
+        **_artifact_result(
+            artifact_path,
+            artifact_type="paired_eval_request",
+            operation_id=_required_str(plan, "operation_id"),
+            payload=payload,
+        ),
+        "requestEvidence": request_evidence,
+    }
 
 
 def build_nightly_runner_cli_spec(plan_json: str) -> dict[str, Any]:
@@ -2971,43 +2978,6 @@ def build_online_eval_registry_cli_spec(plan_json: str) -> dict[str, Any]:
         output_path_key="online_eval_registry_submissions",
         option_names=("--airflow-plan", "--online-eval-rollup"),
     )
-
-
-def build_paired_eval_executor_cli_spec(plan_json: str) -> dict[str, Any]:
-    """Build the D19 executor bridge without exposing a caller score path."""
-
-    plan = _json_object(plan_json, "plan_json")
-    if _required_str(plan, "dag_id") != "serp_benchmark_improvement_wave":
-        raise ValueError("plan dag_id does not match paired benchmark evaluator")
-    artifact_paths = _required_artifact_paths(
-        plan,
-        ("paired_eval_request", "paired_eval_receipt", "paired_eval_control"),
-    )
-    request_path = artifact_paths["paired_eval_request"]
-    receipt_path = artifact_paths["paired_eval_receipt"]
-    return {
-        "argv": [
-            GATEWAY_CLI_PYTHON,
-            "-m",
-            PIPELINE_PAIRED_EVAL_CLI_MODULE,
-            "--paired-eval-request",
-            request_path,
-            "--evidence-output",
-            receipt_path,
-        ],
-        "contract_version": _PIPELINE_CLI_CONTRACT_VERSION,
-        "dag_id": "serp_benchmark_improvement_wave",
-        "evidence_output_owner": "pipeline",
-        "evidence_output_path": receipt_path,
-        "input_paths": [request_path],
-        "operation_id": _required_str(plan, "operation_id"),
-        "plan_sha256": sha256(_canonical_json(plan).encode("utf-8")).hexdigest(),
-        "status": "ready_for_pipeline_cli_runner",
-        "stdout_path": artifact_paths["paired_eval_control"],
-        "task_id": "run_paired_benchmark_evaluation",
-        "tenant_id": _required_str(plan, "tenant_id"),
-    }
-
 
 
 def evaluate_nightly_regression_gate(report: Mapping[str, Any]) -> dict[str, Any]:

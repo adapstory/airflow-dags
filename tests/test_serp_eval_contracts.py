@@ -34,7 +34,6 @@ from dags.serp_eval_contracts import (
     build_online_eval_registry_cli_spec,
     build_online_eval_rollup_cli_spec,
     build_online_eval_rollup_plan,
-    build_paired_eval_executor_cli_spec,
     build_public_docs_publish_activation_cli_spec,
     build_public_docs_publish_activation_plan,
     build_public_docs_publish_activation_submit_cli_spec,
@@ -1689,21 +1688,19 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
     assert plan.payload["baseline_run_id"] == "evalrun_public_reranker_baseline_001"
     assert plan.payload["artifact_paths"] == {
         "airflow_plan": (
-            f"/var/opt/adapstory/serp-evals/{plan.payload['operation_id']}/airflow-plan.json"
+            "s3://airflow-serp-evidence/serp-evals/"
+            f"{plan.payload['operation_id']}/airflow-plan.json"
         ),
         "improvement_spec": (
-            "/var/opt/adapstory/serp-evals/"
+            "s3://airflow-serp-evidence/serp-evals/"
             f"{plan.payload['operation_id']}/improvement-spec.json"
         ),
-        "paired_eval_control": (
-            "/var/opt/adapstory/serp-evals/"
-            f"{plan.payload['operation_id']}/paired-eval-control.json"
-        ),
         "paired_eval_receipt": (
-            f"/var/opt/adapstory/serp-evals/{plan.payload['operation_id']}/paired-eval-receipt.json"
+            "s3://airflow-serp-evidence/serp-evals/"
+            f"{plan.payload['operation_id']}/paired-eval-receipt.json"
         ),
         "paired_eval_request": (
-            "/var/opt/adapstory/serp-evals/"
+            "s3://airflow-serp-evidence/serp-evals/"
             f"{plan.payload['operation_id']}/paired-eval-request.json"
         ),
     }
@@ -1734,13 +1731,45 @@ def test_build_benchmark_improvement_wave_plan_rejects_caller_supplied_candidate
         build_benchmark_improvement_wave_plan(conf)
 
 
-def test_paired_eval_request_derives_canonical_catalog_bindings(tmp_path: Path) -> None:
+def test_paired_eval_request_derives_canonical_catalog_bindings_as_worm_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     conf = _improvement_wave_conf()
-    conf["artifact_root_path"] = str(tmp_path)
     plan = build_benchmark_improvement_wave_plan(conf)
-    request = write_paired_eval_request_artifact(
-        write_airflow_plan_artifact(plan)
-    )["payload"]
+    snapshots: list[dict[str, Any]] = []
+
+    def snapshot_writer(
+        artifact_path: str,
+        *,
+        artifact_type: str,
+        operation_id: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, str]:
+        snapshots.append(
+            {
+                "artifact_path": artifact_path,
+                "artifact_type": artifact_type,
+                "operation_id": operation_id,
+                "payload": dict(payload),
+            }
+        )
+        return {
+            "artifactPath": artifact_path,
+            "artifactSha256": "a" * 64,
+            "artifactType": artifact_type,
+            "artifactVersionId": "paired-request-version-001",
+            "objectLockMode": "COMPLIANCE",
+            "objectLockRetainUntil": "2027-07-14T00:00:00Z",
+            "status": "written",
+        }
+
+    monkeypatch.setattr(
+        serp_eval_contracts_module,
+        "write_immutable_evidence_snapshot",
+        snapshot_writer,
+    )
+    request_artifact = write_paired_eval_request_artifact(plan.to_canonical_json())
+    request = request_artifact["payload"]
 
     assert request["selectedSuiteIds"] == list(MANDATORY_SERP_BENCHMARK_SUITES)
     assert request["metricDefinitionAuthority"] == "executor-pinned-metric-definition-profile"
@@ -1748,39 +1777,46 @@ def test_paired_eval_request_derives_canonical_catalog_bindings(tmp_path: Path) 
         MANDATORY_SERP_BENCHMARK_SUITES
     )
     assert "Score" not in json.dumps(request)
-
-
-def test_build_paired_benchmark_executor_cli_spec_is_file_based_and_deterministic() -> None:
-    plan = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
-    executor = build_paired_eval_executor_cli_spec(plan.to_canonical_json())
-
-    assert executor["status"] == "ready_for_pipeline_cli_runner"
-    assert executor["task_id"] == "run_paired_benchmark_evaluation"
-    assert executor["argv"] == [
-        "python",
-        "-m",
-        "adapstory_serp_pipeline.orchestration.paired_eval_receipt",
-        "--paired-eval-request",
-        plan.payload["artifact_paths"]["paired_eval_request"],
-        "--evidence-output",
-        plan.payload["artifact_paths"]["paired_eval_receipt"],
+    assert snapshots == [
+        {
+            "artifact_path": plan.payload["artifact_paths"]["paired_eval_request"],
+            "artifact_type": "serp_paired_eval_request",
+            "operation_id": plan.payload["operation_id"],
+            "payload": request,
+        }
     ]
-    assert executor["stdout_path"] == plan.payload["artifact_paths"]["paired_eval_control"]
+    assert request_artifact["requestEvidence"]["artifactVersionId"] == "paired-request-version-001"
+
+
+def test_build_paired_benchmark_plan_exposes_only_version_bound_request_and_receipt_paths() -> None:
+    plan = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
+
+    assert set(plan.payload["artifact_paths"]) == {
+        "airflow_plan",
+        "improvement_spec",
+        "paired_eval_request",
+        "paired_eval_receipt",
+    }
+    assert all(path.startswith("s3://") for path in plan.payload["artifact_paths"].values())
 
 
 def test_write_benchmark_improvement_spec_never_persists_external_candidate_evaluation(
-    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conf = _improvement_wave_conf()
-    conf["artifact_root_path"] = str(tmp_path)
     plan = build_benchmark_improvement_wave_plan(conf)
+    persisted: list[tuple[str, Mapping[str, Any]]] = []
+
+    monkeypatch.setattr(
+        serp_eval_contracts_module,
+        "_write_json_artifact",
+        lambda path, payload: persisted.append((path, dict(payload))),
+    )
 
     plan_json = write_airflow_plan_artifact(plan)
     spec_artifact = write_improvement_spec_artifact(json.loads(plan_json))
 
-    spec_path = Path(str(spec_artifact["artifactPath"]))
-
-    assert spec_path.exists()
+    assert persisted[-1][0] == plan.payload["artifact_paths"]["improvement_spec"]
     assert spec_artifact["payload"]["status"] == "awaiting-executor-derived-metrics"
     assert spec_artifact["payload"]["dryRun"] is False
     assert spec_artifact["payload"]["baseline"]["beatCondition"] == {
@@ -4730,7 +4766,18 @@ def test_serp_dag_files_declare_expected_airflow_contracts(
     tree = ast.parse(source)
 
     assert _call_string_args(tree, "DAG")[0] == dag_id
-    assert _keyword_values(tree, "PythonOperator", "task_id") == task_ids
+    if dag_id == "serp_benchmark_improvement_wave":
+        assert _keyword_values(tree, "PythonOperator", "task_id") == [
+            "validate_benchmark_improvement_wave_plan",
+            "write_improvement_spec",
+            "write_paired_eval_request",
+            "notify_governance_eval_surfaces",
+        ]
+        assert _keyword_values(tree, "KubernetesPodOperator", "task_id") == [
+            "run_paired_benchmark_evaluation"
+        ]
+    else:
+        assert _keyword_values(tree, "PythonOperator", "task_id") == task_ids
     assert "external_runner_pending" not in source
     assert "registry_submission_pending" not in source
     assert "host.docker.internal" not in source
@@ -5228,9 +5275,24 @@ def test_serp_improvement_dag_uses_pipeline_executor_for_d19_path() -> None:
     assert "write_benchmark_improvement_decision_artifact" not in source
     assert "write_benchmark_improvement_scoreboard_artifact" not in source
     assert "write_paired_eval_request_artifact" in source
-    assert "build_paired_eval_executor_cli_spec" in source
-    assert "execute_pipeline_cli_spec" in source
+    assert "build_paired_eval_executor_cli_spec" not in source
+    assert "execute_pipeline_cli_spec" not in source
     assert "execute_gateway_cli_spec" not in source
+
+
+def test_serp_improvement_dag_runs_paired_evaluation_in_an_isolated_evaluator_pod() -> None:
+    source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(encoding="utf-8")
+
+    assert (
+        "from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator"
+        in source
+    )
+    assert "run_paired_evaluation = KubernetesPodOperator(" in source
+    assert "service_account_name=D19_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT" in source
+    assert "labels=D19_EVALUATOR_WORKLOAD_LABELS" in source
+    assert "automount_service_account_token=True" in source
+    assert "def run_paired_benchmark_evaluation" not in source
+    assert "execute_pipeline_cli_spec" not in source
 
 
 def test_airflowignore_excludes_non_dag_test_modules() -> None:
@@ -5524,7 +5586,7 @@ def _online_eval_report() -> dict[str, object]:
 def _improvement_wave_conf() -> dict[str, object]:
     return {
         "actor_id": "airflow-serp-eval-runner",
-        "artifact_root_path": "/var/opt/adapstory/serp-evals",
+        "artifact_root_path": "s3://airflow-serp-evidence/serp-evals",
         "baseline_run_id": "evalrun_public_reranker_baseline_001",
         "candidate_id": "candidate-reranker-v2",
         "candidate_run_id": "candidate-reranker-v2-run-001",
