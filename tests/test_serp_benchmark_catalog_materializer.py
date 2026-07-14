@@ -135,7 +135,7 @@ def test_catalog_acquisition_workload_has_minimal_proxy_and_evidence_contract(
     )
     assert literal_env["ADAPSTORY_AIRFLOW_ARTIFACT_S3_PATH_STYLE"] == "true"
     assert literal_env["ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION"] == "us-east-1"
-    assert literal_env["ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS"] == "365"
+    assert literal_env["ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS"] == '"365"'
     assert literal_env["ADAPSTORY_SERP_SOURCE_PROXY_URL"] == (
         "http://forward-proxy.forward-proxy.svc:3128"
     )

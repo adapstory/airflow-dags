@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from json import dumps
 
 from kubernetes.client import models as k8s
 
@@ -45,7 +46,7 @@ def benchmark_catalog_acquisition_env_vars() -> list[k8s.V1EnvVar]:
         value = os.environ.get(name)
         if value is None or not value.strip():
             raise ValueError(f"benchmark catalog acquisition environment is required: {name}")
-        values.append(k8s.V1EnvVar(name=name, value=value.strip()))
+        values.append(k8s.V1EnvVar(name=name, value=_native_template_safe_env_value(value.strip())))
     proxy_url = os.environ["ADAPSTORY_SERP_SOURCE_PROXY_URL"].strip()
     values.extend(
         (
@@ -108,3 +109,15 @@ def _benchmark_catalog_acquisition_no_proxy_value() -> str:
         value.strip() for value in os.environ.get("NO_PROXY", "").split(",") if value.strip()
     ]
     return ",".join(dict.fromkeys((*existing, *_BENCHMARK_CATALOG_ACQUISITION_NO_PROXY_HOSTS)))
+
+
+def _native_template_safe_env_value(value: str) -> str:
+    """Preserve numeric environment values as strings under native Jinja rendering.
+
+    Airflow's ``render_template_as_native_obj`` parses a bare ``365`` into an
+    integer before the Kubernetes client serializes a pod.  Kubernetes requires
+    every EnvVar value to remain a string.  JSON string syntax makes the native
+    renderer produce the original string rather than a JSON number.
+    """
+
+    return dumps(value) if value.isdecimal() else value
