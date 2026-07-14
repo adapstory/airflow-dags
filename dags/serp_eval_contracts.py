@@ -821,6 +821,11 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
             (
                 ("airflow_plan", "airflow-plan.json"),
                 ("improvement_spec", "improvement-spec.json"),
+                ("benchmark_catalog", "benchmark-catalog.json"),
+                (
+                    "benchmark_catalog_receipt",
+                    "benchmark-catalog-materialization-receipt.json",
+                ),
                 ("paired_eval_request", "paired-eval-request.json"),
                 ("paired_eval_receipt", "paired-eval-receipt.json"),
             ),
@@ -843,6 +848,8 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
         "tasks": _tasks(
             (
                 "validate_benchmark_improvement_wave_plan",
+                "materialize_live_benchmark_catalog",
+                "load_materialized_benchmark_catalog",
                 "write_improvement_spec",
                 "write_paired_eval_request",
                 "run_paired_benchmark_evaluation",
@@ -1506,6 +1513,7 @@ def materialize_live_benchmark_catalog_artifact(
     if _required_str(plan, "dag_id") not in {
         "serp_nightly_regression_suite",
         "serp_mandatory_benchmark_dataset_evidence_snapshot",
+        "serp_benchmark_improvement_wave",
     }:
         raise ValueError("plan dag_id does not match benchmark catalog materializer")
     artifact_paths = _required_artifact_paths(plan, ("benchmark_catalog",))
@@ -1571,7 +1579,7 @@ def load_materialized_benchmark_catalog_snapshot(
     The scheduler never trusts pod stdout as benchmark provenance.  It reads the
     receipt from the isolated executor's WORM path, then checks the receipt's
     catalog VersionId, SHA-256, status, and blocking suites against the exact
-    catalog object before handing it to the D6 suite-plan writer.
+    catalog object before handing it to a D6 suite-plan or D19 paired-eval writer.
     """
 
     plan = _json_object(plan_json, "plan_json")
@@ -1579,6 +1587,7 @@ def load_materialized_benchmark_catalog_snapshot(
     if _required_str(plan, "dag_id") not in {
         "serp_nightly_regression_suite",
         "serp_mandatory_benchmark_dataset_evidence_snapshot",
+        "serp_benchmark_improvement_wave",
     }:
         raise ValueError("plan dag_id does not match benchmark catalog receipt loader")
     artifact_paths = _required_artifact_paths(
@@ -1652,6 +1661,7 @@ def load_materialized_benchmark_catalog_snapshot(
         **catalog_snapshot,
         "blockingReasonBySuite": blocking_reason_by_suite,
         "catalogReceiptPath": artifact_paths["benchmark_catalog_receipt"],
+        "catalogReceiptSha256": sha256(receipt_bytes).hexdigest(),
         "catalogReceiptVersionId": receipt_version_id,
     }
 
@@ -3230,6 +3240,8 @@ def write_improvement_spec_artifact(
         plan,
         (
             "airflow_plan",
+            "benchmark_catalog",
+            "benchmark_catalog_receipt",
             "improvement_spec",
             "paired_eval_request",
             "paired_eval_receipt",
@@ -3249,6 +3261,7 @@ def write_improvement_spec_artifact(
 
 def write_paired_eval_request_artifact(
     plan_json: Mapping[str, Any] | str,
+    catalog_snapshot: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Persist the scoreless D19 request consumed by the paired evaluator."""
 
@@ -3256,8 +3269,11 @@ def write_paired_eval_request_artifact(
     _reject_raw_secrets(plan)
     if _required_str(plan, "dag_id") != "serp_benchmark_improvement_wave":
         raise ValueError("plan dag_id does not match paired-eval request writer")
-    artifact_paths = _required_artifact_paths(plan, ("paired_eval_request",))
-    payload = _paired_eval_request_payload(plan)
+    artifact_paths = _required_artifact_paths(
+        plan,
+        ("benchmark_catalog", "benchmark_catalog_receipt", "paired_eval_request"),
+    )
+    payload = _paired_eval_request_payload(plan, catalog_snapshot)
     artifact_path = artifact_paths["paired_eval_request"]
     request_evidence = write_immutable_evidence_snapshot(
         artifact_path,
@@ -5437,17 +5453,19 @@ def _improvement_model_governance(payload: Mapping[str, Any]) -> dict[str, str]:
     }
 
 
-def _paired_eval_request_payload(plan: Mapping[str, Any]) -> dict[str, Any]:
-    """Build a canonical, scoreless request from the authoritative suite catalog."""
-
-    from dags.serp_benchmark_catalog import MANDATORY_BENCHMARK_SUITE_CATALOG
+def _paired_eval_request_payload(
+    plan: Mapping[str, Any], catalog_snapshot: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Build a canonical, scoreless request bound to a WORM catalog snapshot."""
 
     selected_suite_ids = _required_str_list(plan, "selected_suite_ids")
-    catalog_suite_ids = [entry.suite_id for entry in MANDATORY_BENCHMARK_SUITE_CATALOG]
+    catalog_evidence, suite_summary = _paired_eval_catalog_evidence(plan, catalog_snapshot)
+    catalog_suite_ids = [item["suiteId"] for item in suite_summary]
     if selected_suite_ids != catalog_suite_ids:
         raise ValueError("paired evaluator request must use the canonical suite catalog order")
     return {
         "baselineRunId": _required_str(plan, "baseline_run_id"),
+        "catalogEvidence": catalog_evidence,
         "candidateId": _required_str(plan, "candidate_id"),
         "candidateRunId": _required_str(plan, "candidate_run_id"),
         "improvementSpecId": _required_str(plan, "improvement_spec_id"),
@@ -5456,13 +5474,60 @@ def _paired_eval_request_payload(plan: Mapping[str, Any]) -> dict[str, Any]:
         "selectedSuiteIds": selected_suite_ids,
         "suiteBindings": [
             {
-                "adapterId": f"catalog:{entry.suite_id}@{entry.dataset_revision}",
-                "executionStatus": entry.execution_status,
-                "suiteId": entry.suite_id,
+                "adapterId": (
+                    f"catalog:{item['suiteId']}@{catalog_evidence['catalogArtifactVersionId']}"
+                ),
+                "executionStatus": item["executionStatus"],
+                "suiteId": item["suiteId"],
             }
-            for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+            for item in suite_summary
         ],
     }
+
+
+def _paired_eval_catalog_evidence(
+    plan: Mapping[str, Any], catalog_snapshot: Mapping[str, Any]
+) -> tuple[dict[str, str], list[dict[str, str]]]:
+    """Bind D19 to exactly the catalog materialized by its acquisition workload."""
+
+    artifact_paths = _required_artifact_paths(
+        plan,
+        ("benchmark_catalog", "benchmark_catalog_receipt"),
+    )
+    catalog_path = _required_str(catalog_snapshot, "artifactPath")
+    if catalog_path != artifact_paths["benchmark_catalog"]:
+        raise ValueError("paired evaluator catalog artifact path does not match plan")
+    receipt_path = _required_str(catalog_snapshot, "catalogReceiptPath")
+    if receipt_path != artifact_paths["benchmark_catalog_receipt"]:
+        raise ValueError("paired evaluator catalog receipt path does not match plan")
+    if _required_str(catalog_snapshot, "objectLockMode") != "COMPLIANCE":
+        raise ValueError("paired evaluator catalog must use COMPLIANCE object lock")
+    suite_summary = normalize_benchmark_catalog_suite_summary(catalog_snapshot.get("suiteSummary"))
+    blocking_suite_ids = _required_str_list(catalog_snapshot, "blockingSuiteIds")
+    derived_blocking_suite_ids = [
+        item["suiteId"] for item in suite_summary if item["executionStatus"] != "ready"
+    ]
+    if blocking_suite_ids != derived_blocking_suite_ids:
+        raise ValueError("paired evaluator catalog blocking suites do not match summary")
+    catalog_status = _required_str(catalog_snapshot, "catalogStatus")
+    if catalog_status not in {"ready", "blocked"}:
+        raise ValueError("paired evaluator catalog status is unsupported")
+    if (catalog_status == "ready") != (not blocking_suite_ids):
+        raise ValueError("paired evaluator catalog status does not match blocking suites")
+    return (
+        {
+            "catalogArtifactPath": catalog_path,
+            "catalogArtifactSha256": "sha256:"
+            + _required_sha256_hex(catalog_snapshot, "artifactSha256"),
+            "catalogArtifactVersionId": _required_str(catalog_snapshot, "artifactVersionId"),
+            "catalogReceiptPath": receipt_path,
+            "catalogReceiptSha256": "sha256:"
+            + _required_sha256_hex(catalog_snapshot, "catalogReceiptSha256"),
+            "catalogReceiptVersionId": _required_str(catalog_snapshot, "catalogReceiptVersionId"),
+            "catalogStatus": catalog_status,
+        },
+        suite_summary,
+    )
 
 
 def _improvement_spec_payload(
@@ -6776,6 +6841,13 @@ def _required_sha256_prefixed(payload: Mapping[str, Any], field_name: str) -> st
     value = _required_str(payload, field_name)
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
         raise ValueError(f"{field_name} must be sha256:<64 lowercase hex>")
+    return value
+
+
+def _required_sha256_hex(payload: Mapping[str, Any], field_name: str) -> str:
+    value = _required_str(payload, field_name)
+    if not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise ValueError(f"{field_name} must be 64 lowercase hex characters")
     return value
 
 

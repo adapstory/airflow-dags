@@ -36,7 +36,7 @@ SERP eval DAG contracts:
   | D16 `serp_policy_rollout_canary` | Planned gap | Policy rollout canary DAG is not implemented yet. |
   | D17 `serp_model_catalog_promotion` | Planned gap | Model promotion/deprecation DAG is not implemented yet. |
   | D18 `serp_chaos_restore_game_day` | Planned gap | Restore/game-day DAG is not implemented yet. |
-  | D19 `serp_benchmark_improvement_wave` | Executor-owned paired-evaluation contract in current source | Airflow rejects caller-supplied candidate scores, writes a scoreless request using the canonical ordered suite catalog, and invokes the pipeline paired-eval executor. The executor persists a version-bound receipt separately from its control record; `blocked` never reaches keep/discard, scoreboard, or rollout. It must not be described as a validated improvement until every provisioned adapter has produced all-nine immutable paired evidence. |
+  | D19 `serp_benchmark_improvement_wave` | Executor-owned paired-evaluation contract in current source | A restricted acquisition pod materializes the canonical catalog; the scheduler re-reads its exact COMPLIANCE catalog and receipt versions before it writes the scoreless paired request. Airflow rejects caller-supplied candidate scores. The pipeline executor persists a version-bound receipt separately from its control record; `blocked` never reaches keep/discard, scoreboard, or rollout. It must not be described as a validated improvement until every provisioned adapter has produced all-nine immutable paired evidence. |
   | D20 `serp_web_seed_crawl_refresh` | Implemented scheduled pipeline CLI bridge in current source | Uses a default stack-inventory anchored seed registry when no `dag_run.conf` is supplied, expands approved website `frontier_urls` into deterministic per-page fetch requests, selects due seeds from `refresh_policy` and optional `freshness_state`, writes deterministic seed/refresh artifacts, runs the packaged SERP pipeline CLI bridge only when sources are due, and emits a governed D5 trigger-conf artifact once indexed D20 evidence exists. The D5 trigger-conf carries `ADAPSTORY_SERP_BC21_BASE_URL` when the runtime env provides it, but approvals, evidence seal, benchmark gate, and idempotency remain required. Live robots/sitemap discovery, D4 child dispatch, and deployed GitOps image refresh remain planned; publish activation is handled by D5. |
 
 - `serp_nightly_regression_suite` is the D6 contract DAG. Its `dag_run.conf`
@@ -97,8 +97,10 @@ SERP eval DAG contracts:
   every mandatory suite id, replay profile versions, judge model/template
   versions, feature flags, policy/guardrail bundle versions, and provider/model
   route ids. It rejects every `candidate_evaluation` score/result payload.
-  The DAG derives `airflow-plan.json`, `improvement-spec.json`, a scoreless
-  `paired-eval-request.json`, an executor-written version-bound
+  The DAG derives `airflow-plan.json`, `improvement-spec.json`, a restricted
+  acquisition-pod materialized `benchmark-catalog.json` and receipt, a
+  scoreless `paired-eval-request.json` bound to both exact catalog
+  `VersionId`/SHA-256 values, an executor-written version-bound
   `paired-eval-receipt.json`, and a separate `paired-eval-control.json` under a
   deterministic operation directory. The packaged pipeline evaluator is the
   sole result authority; its immutable receipt cannot share or be overwritten

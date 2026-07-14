@@ -10,9 +10,19 @@ from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
 from kubernetes.client import models as k8s
 
+from dags.serp_benchmark_catalog_workload import (
+    BENCHMARK_CATALOG_ACQUISITION_RESOURCES,
+    BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS,
+    BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_LABELS,
+    BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT,
+    benchmark_catalog_acquisition_container_security_context,
+    benchmark_catalog_acquisition_env_vars,
+    benchmark_catalog_acquisition_pod_security_context,
+)
 from dags.serp_eval_contracts import (
     build_benchmark_improvement_wave_plan,
     governance_notification_pending,
+    load_materialized_benchmark_catalog_snapshot,
     write_airflow_plan_artifact,
     write_improvement_spec_artifact,
     write_paired_eval_request_artifact,
@@ -80,8 +90,12 @@ def write_improvement_spec(plan_json: str) -> dict[str, Any]:
     return write_improvement_spec_artifact(plan_json)
 
 
-def write_paired_eval_request(plan_json: str) -> dict[str, Any]:
-    return write_paired_eval_request_artifact(plan_json)
+def load_materialized_benchmark_catalog(plan_json: str) -> dict[str, Any]:
+    return load_materialized_benchmark_catalog_snapshot(plan_json)
+
+
+def write_paired_eval_request(plan_json: str, catalog_snapshot: dict[str, Any]) -> dict[str, Any]:
+    return write_paired_eval_request_artifact(plan_json, catalog_snapshot)
 
 
 default_args = {
@@ -112,10 +126,48 @@ write_spec = PythonOperator(
     dag=dag,
 )
 
+materialize_catalog = KubernetesPodOperator(
+    task_id="materialize_live_benchmark_catalog",
+    name="serp-d19-benchmark-catalog-acquisition",
+    namespace=conf.get("kubernetes_executor", "namespace"),
+    image=current_airflow_runtime_image(),
+    cmds=["python", "-m", "dags.serp_benchmark_catalog_materializer"],
+    arguments=[
+        "--plan-json-urlencoded",
+        "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') | urlencode }}",
+    ],
+    env_vars=benchmark_catalog_acquisition_env_vars(),
+    service_account_name=BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT,
+    automount_service_account_token=False,
+    labels=BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_LABELS,
+    container_resources=BENCHMARK_CATALOG_ACQUISITION_RESOURCES,
+    security_context=benchmark_catalog_acquisition_pod_security_context(),
+    container_security_context=benchmark_catalog_acquisition_container_security_context(),
+    get_logs=True,
+    log_events_on_failure=True,
+    random_name_suffix=True,
+    reattach_on_restart=True,
+    on_kill_action="keep_pod",
+    on_finish_action="delete_pod",
+    retries=1,
+    retry_delay=timedelta(seconds=BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS),
+    dag=dag,
+)
+
+load_catalog = PythonOperator(
+    task_id="load_materialized_benchmark_catalog",
+    python_callable=load_materialized_benchmark_catalog,
+    op_args=["{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') }}"],
+    dag=dag,
+)
+
 write_request = PythonOperator(
     task_id="write_paired_eval_request",
     python_callable=write_paired_eval_request,
-    op_args=["{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') }}"],
+    op_args=[
+        "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') }}",
+        "{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog') }}",
+    ],
     dag=dag,
 )
 
@@ -166,4 +218,8 @@ notify_governance = PythonOperator(
     dag=dag,
 )
 
-validate_plan >> write_spec >> write_request >> run_paired_evaluation >> notify_governance
+validate_plan >> materialize_catalog >> load_catalog
+load_catalog >> write_spec
+load_catalog >> write_request
+write_spec >> run_paired_evaluation
+write_request >> run_paired_evaluation >> notify_governance

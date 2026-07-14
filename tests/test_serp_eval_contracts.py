@@ -601,10 +601,19 @@ def test_nightly_catalog_materialization_writes_all_live_legal_evidence_before_b
     assert len(written) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 3) + 1
 
 
-def test_load_materialized_catalog_binds_receipt_and_catalog_s3_versions() -> None:
-    plan = build_nightly_regression_plan(
-        {**_nightly_conf(), "artifact_root_path": "s3://airflow-serp-evidence/serp-evals"}
-    )
+@pytest.mark.parametrize(
+    "dag_id",
+    ("serp_nightly_regression_suite", "serp_benchmark_improvement_wave"),
+)
+def test_load_materialized_catalog_binds_receipt_and_catalog_s3_versions(
+    dag_id: str,
+) -> None:
+    if dag_id == "serp_nightly_regression_suite":
+        plan = build_nightly_regression_plan(
+            {**_nightly_conf(), "artifact_root_path": "s3://airflow-serp-evidence/serp-evals"}
+        )
+    else:
+        plan = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
     catalog_path = plan.payload["artifact_paths"]["benchmark_catalog"]
     receipt_path = plan.payload["artifact_paths"]["benchmark_catalog_receipt"]
     blocking_suite_ids = [
@@ -642,7 +651,7 @@ def test_load_materialized_catalog_binds_receipt_and_catalog_s3_versions() -> No
             ],
         },
         "contractVersion": "serp-benchmark-catalog-materializer/v2",
-        "dagId": "serp_nightly_regression_suite",
+        "dagId": plan.payload["dag_id"],
         "operationId": plan.payload["operation_id"],
     }
 
@@ -1866,6 +1875,14 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
             "s3://airflow-serp-evidence/serp-evals/"
             f"{plan.payload['operation_id']}/airflow-plan.json"
         ),
+        "benchmark_catalog": (
+            "s3://airflow-serp-evidence/serp-evals/"
+            f"{plan.payload['operation_id']}/benchmark-catalog.json"
+        ),
+        "benchmark_catalog_receipt": (
+            "s3://airflow-serp-evidence/serp-evals/"
+            f"{plan.payload['operation_id']}/benchmark-catalog-materialization-receipt.json"
+        ),
         "improvement_spec": (
             "s3://airflow-serp-evidence/serp-evals/"
             f"{plan.payload['operation_id']}/improvement-spec.json"
@@ -1881,6 +1898,8 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
     }
     assert [task["task_id"] for task in plan.payload["tasks"]] == [
         "validate_benchmark_improvement_wave_plan",
+        "materialize_live_benchmark_catalog",
+        "load_materialized_benchmark_catalog",
         "write_improvement_spec",
         "write_paired_eval_request",
         "run_paired_benchmark_evaluation",
@@ -1943,7 +1962,10 @@ def test_paired_eval_request_derives_canonical_catalog_bindings_as_worm_evidence
         "write_immutable_evidence_snapshot",
         snapshot_writer,
     )
-    request_artifact = write_paired_eval_request_artifact(plan.to_canonical_json())
+    request_artifact = write_paired_eval_request_artifact(
+        plan.to_canonical_json(),
+        _d19_catalog_snapshot(plan),
+    )
     request = request_artifact["payload"]
 
     assert request["selectedSuiteIds"] == list(MANDATORY_SERP_BENCHMARK_SUITES)
@@ -1951,6 +1973,15 @@ def test_paired_eval_request_derives_canonical_catalog_bindings_as_worm_evidence
     assert [item["suiteId"] for item in request["suiteBindings"]] == list(
         MANDATORY_SERP_BENCHMARK_SUITES
     )
+    assert request["catalogEvidence"] == {
+        "catalogArtifactPath": plan.payload["artifact_paths"]["benchmark_catalog"],
+        "catalogArtifactSha256": "sha256:" + "a" * 64,
+        "catalogArtifactVersionId": "catalog-version-001",
+        "catalogReceiptPath": plan.payload["artifact_paths"]["benchmark_catalog_receipt"],
+        "catalogReceiptSha256": "sha256:" + "b" * 64,
+        "catalogReceiptVersionId": "catalog-receipt-version-001",
+        "catalogStatus": "blocked",
+    }
     assert "Score" not in json.dumps(request)
     assert snapshots == [
         {
@@ -1968,6 +1999,8 @@ def test_build_paired_benchmark_plan_exposes_only_version_bound_request_and_rece
 
     assert set(plan.payload["artifact_paths"]) == {
         "airflow_plan",
+        "benchmark_catalog",
+        "benchmark_catalog_receipt",
         "improvement_spec",
         "paired_eval_request",
         "paired_eval_receipt",
@@ -4892,6 +4925,8 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
             "serp_benchmark_improvement_wave",
             [
                 "validate_benchmark_improvement_wave_plan",
+                "materialize_live_benchmark_catalog",
+                "load_materialized_benchmark_catalog",
                 "write_improvement_spec",
                 "write_paired_eval_request",
                 "run_paired_benchmark_evaluation",
@@ -4946,11 +4981,13 @@ def test_serp_dag_files_declare_expected_airflow_contracts(
         assert _keyword_values(tree, "PythonOperator", "task_id") == [
             "validate_benchmark_improvement_wave_plan",
             "write_improvement_spec",
+            "load_materialized_benchmark_catalog",
             "write_paired_eval_request",
             "notify_governance_eval_surfaces",
         ]
         assert _keyword_values(tree, "KubernetesPodOperator", "task_id") == [
-            "run_paired_benchmark_evaluation"
+            "materialize_live_benchmark_catalog",
+            "run_paired_benchmark_evaluation",
         ]
     elif dag_id == "serp_nightly_regression_suite":
         assert _keyword_values(tree, "PythonOperator", "task_id") == [
@@ -5819,6 +5856,31 @@ def _improvement_wave_conf() -> dict[str, object]:
         "rollback_policy_ref": "policy://rollback/last-validated-baseline@v1",
         "selected_suite_ids": list(MANDATORY_SERP_BENCHMARK_SUITES),
         "tenant_id": TENANT_ID,
+    }
+
+
+def _d19_catalog_snapshot(plan: Any) -> dict[str, object]:
+    return {
+        "artifactPath": plan.payload["artifact_paths"]["benchmark_catalog"],
+        "artifactSha256": "a" * 64,
+        "artifactVersionId": "catalog-version-001",
+        "blockingSuiteIds": [
+            suite_id for suite_id in MANDATORY_SERP_BENCHMARK_SUITES if suite_id != "BEIR"
+        ],
+        "catalogReceiptPath": plan.payload["artifact_paths"]["benchmark_catalog_receipt"],
+        "catalogReceiptSha256": "b" * 64,
+        "catalogReceiptVersionId": "catalog-receipt-version-001",
+        "catalogStatus": "blocked",
+        "objectLockMode": "COMPLIANCE",
+        "suiteSummary": [
+            {
+                "distributionRule": "internal-only",
+                "executionStatus": "ready" if suite_id == "BEIR" else "adapter-unavailable",
+                "rightsStatus": "attested",
+                "suiteId": suite_id,
+            }
+            for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+        ],
     }
 
 
