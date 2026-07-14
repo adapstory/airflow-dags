@@ -245,7 +245,7 @@ evaluate_scifact = KubernetesPodOperator(
     ],
     env_vars=pipeline_runner_runtime_env_vars(),
     service_account_name=SCIFACT_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT,
-    automount_service_account_token=True,
+    automount_service_account_token=False,
     labels=SCIFACT_EVALUATOR_WORKLOAD_LABELS,
     container_resources=SERP_PIPELINE_RUNNER_RESOURCES,
     container_security_context=k8s.V1SecurityContext(

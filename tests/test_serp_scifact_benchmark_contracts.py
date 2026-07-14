@@ -85,7 +85,7 @@ def test_scifact_kubernetes_tasks_use_separate_acquisition_and_evaluation_identi
     assert "service_account_name=SCIFACT_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT" in source
 
 
-def test_scifact_workloads_mount_projected_service_account_tokens() -> None:
+def test_scifact_evaluator_omits_an_unused_projected_service_account_token() -> None:
     source = (
         Path(__file__).resolve().parents[1] / "dags" / "serp_beir_scifact_live_benchmark.py"
     ).read_text(encoding="utf-8")
@@ -119,14 +119,21 @@ def test_scifact_workloads_mount_projected_service_account_tokens() -> None:
         and isinstance(call.func, ast.Name)
         and call.func.id == "KubernetesPodOperator"
     }
-    for task_id in ("index_scifact_live_dataset", "evaluate_scifact_live_gateway"):
-        automount = next(
-            keyword.value
-            for keyword in kubernetes_tasks[task_id].keywords
-            if keyword.arg == "automount_service_account_token"
-        )
-        assert isinstance(automount, ast.Constant)
-        assert automount.value is True
+    acquisition_automount = next(
+        keyword.value
+        for keyword in kubernetes_tasks["index_scifact_live_dataset"].keywords
+        if keyword.arg == "automount_service_account_token"
+    )
+    assert isinstance(acquisition_automount, ast.Constant)
+    assert acquisition_automount.value is True
+
+    evaluator_automount = next(
+        keyword.value
+        for keyword in kubernetes_tasks["evaluate_scifact_live_gateway"].keywords
+        if keyword.arg == "automount_service_account_token"
+    )
+    assert isinstance(evaluator_automount, ast.Constant)
+    assert evaluator_automount.value is False
 
 
 def test_scifact_archive_materialization_binds_bytes_and_s3_version_before_indexing() -> None:
