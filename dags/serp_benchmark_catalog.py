@@ -337,6 +337,20 @@ def build_live_benchmark_catalog_evidence(
     }
 
 
+def mandatory_benchmark_adapters_ready() -> bool:
+    """Return whether D6 can run without a synthetic or missing suite adapter.
+
+    Scheduling is a production promise.  The nightly DAG stays unscheduled
+    until every mandatory suite has a canonical executable adapter; legal
+    catalog snapshots continue independently while that prerequisite is not
+    satisfied.
+    """
+
+    return all(
+        entry.execution_status == _READY for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+    )
+
+
 def _fetch(url: str, fetch_bytes: Callable[[str], bytes]) -> bytes:
     payload = fetch_bytes(url)
     if not isinstance(payload, bytes) or not payload:

@@ -36,17 +36,18 @@ SERP eval DAG contracts:
   | D16 `serp_policy_rollout_canary` | Planned gap | Policy rollout canary DAG is not implemented yet. |
   | D17 `serp_model_catalog_promotion` | Planned gap | Model promotion/deprecation DAG is not implemented yet. |
   | D18 `serp_chaos_restore_game_day` | Planned gap | Restore/game-day DAG is not implemented yet. |
-  | D19 `serp_benchmark_improvement_wave` | Fail-closed executable-evaluation contract in current source | It accepts only externally executed candidate evidence with immutable dataset, baseline/candidate, per-suite, and auxiliary evidence provenance; Airflow delegates evaluation, keep/discard, and scoreboard assembly to the gateway CLI. It must not be described as a validated improvement until a provisioned adapter has produced live evidence. |
+  | D19 `serp_benchmark_improvement_wave` | Executor-owned paired-evaluation contract in current source | Airflow rejects caller-supplied candidate scores, writes a scoreless request using the canonical ordered suite catalog, and invokes the pipeline paired-eval executor. The executor persists a version-bound receipt separately from its control record; `blocked` never reaches keep/discard, scoreboard, or rollout. It must not be described as a validated improvement until every provisioned adapter has produced all-nine immutable paired evidence. |
   | D20 `serp_web_seed_crawl_refresh` | Implemented scheduled pipeline CLI bridge in current source | Uses a default stack-inventory anchored seed registry when no `dag_run.conf` is supplied, expands approved website `frontier_urls` into deterministic per-page fetch requests, selects due seeds from `refresh_policy` and optional `freshness_state`, writes deterministic seed/refresh artifacts, runs the packaged SERP pipeline CLI bridge only when sources are due, and emits a governed D5 trigger-conf artifact once indexed D20 evidence exists. The D5 trigger-conf carries `ADAPSTORY_SERP_BC21_BASE_URL` when the runtime env provides it, but approvals, evidence seal, benchmark gate, and idempotency remain required. Live robots/sitemap discovery, D4 child dispatch, and deployed GitOps image refresh remain planned; publish activation is handled by D5. |
 
 - `serp_nightly_regression_suite` is the D6 contract DAG. Its `dag_run.conf`
   must provide tenant id, pack version ids, retrieval/reranker profile versions,
   registry resource identity, approved actor id, generated timestamp, and every
-  mandatory SERP benchmark suite id and a `benchmark_suite_inputs` entry for
-  every suite. Each input is adapter-produced and must carry immutable MinIO
+  mandatory SERP benchmark suite id. It rejects a `benchmark_suite_inputs` entry
+  from a caller; canonical live adapters must produce each suite input after
+  catalog materialization. Each produced input carries immutable MinIO
   dataset-manifest and execution-evidence URIs/digests, pinned adapter source
   revision and image digest, attested license/distribution rule, and reference
-  provenance. Every input carries the same immutable, SHA-256-pinned
+  provenance. Every produced input carries the same immutable, SHA-256-pinned
   `metric_compatibility` matrix; D6 gates exactly the policy-required rows for
   that suite rather than manufacturing unrelated metric families. The DAG
   never manufactures ranked chunks, aggregate observations, or reference
@@ -90,31 +91,21 @@ SERP eval DAG contracts:
   submissions for the same rollup. Its plan state is
   `ready_for_po_capacity_approval`; it is not a 1M production approval.
 - `serp_benchmark_improvement_wave` is the D19 fail-closed improvement
-  contract DAG. Its
-  `dag_run.conf` must provide tenant id, improvement spec id, baseline run id,
-  candidate id, registry resource identity, approved actor id, generated
-  timestamp, rollback policy ref, positive max benchmark run budget, every
-  mandatory SERP benchmark suite id, replay profile versions, judge
-  model/template versions, feature flags, policy/guardrail bundle versions, and
-  provider/model-catalog route ids, plus `candidate_evaluation`. The candidate
-  evaluation is produced by a versioned external adapter and includes its
-  immutable metric-compatibility matrix, per-suite dataset manifest,
-  baseline/candidate execution evidence, adapter/source/license/distribution
-  provenance, reference provenance, and immutable benchmark/diff/regression/
-  cost artifacts. It must also provide `artifact_root_path`
-  or rely on the runtime default `ADAPSTORY_AIRFLOW_ARTIFACT_ROOT`; artifact
-  locations may be absolute local paths or `s3://bucket/prefix` URIs. The DAG
-  derives `airflow-plan.json`,
-  `improvement-spec.json`, `candidate-eval-report.json`,
-  `keep-discard-decision.json`, and `improvement-scoreboard.json` under a
-  deterministic operation directory. D19 writes `improvement-spec.json`, then
-  invokes the packaged `adapstory_serp_mcp_gateway.airflow_eval_cli` for the
-  candidate-eval, keep/discard, and scoreboard stages. Every stage validates
-  the external evidence contract and digest-addressed MinIO references.
-  Missing suites, unbounded budgets, missing replay/model-governance metadata,
-  raw secrets, malformed provenance, or non-passing candidate metrics result
-  in a fail-closed discard decision; only evidence-backed improvements can be
-  retained.
+  contract DAG. Its `dag_run.conf` provides tenant id, improvement spec id,
+  baseline/candidate run ids, registry resource identity, approved actor id,
+  generated timestamp, rollback policy ref, positive max benchmark run budget,
+  every mandatory suite id, replay profile versions, judge model/template
+  versions, feature flags, policy/guardrail bundle versions, and provider/model
+  route ids. It rejects every `candidate_evaluation` score/result payload.
+  The DAG derives `airflow-plan.json`, `improvement-spec.json`, a scoreless
+  `paired-eval-request.json`, an executor-written version-bound
+  `paired-eval-receipt.json`, and a separate `paired-eval-control.json` under a
+  deterministic operation directory. The packaged pipeline evaluator is the
+  sole result authority; its immutable receipt cannot share or be overwritten
+  by the Airflow stdout control artifact. Unavailable adapters, missing pinned
+  provenance, missing rights, or incomplete all-nine coverage are `blocked`.
+  A blocked receipt cannot emit a score, keep/discard decision, scoreboard, or
+  rollout.
 - `serp_mandatory_benchmark_dataset_evidence_snapshot` persists source, raw
   dataset, and licensing bytes for every mandatory suite before D6 can consume
   an adapter result. Hugging Face revision-pinned `resolve` artifacts are

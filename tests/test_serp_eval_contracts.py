@@ -24,10 +24,7 @@ from dags.serp_eval_contracts import (
     MANDATORY_SERP_BENCHMARK_SUITES,
     SERP_NORMALIZED_GATE_FLOOR,
     _fetch_public_docs_crawler_response,
-    build_benchmark_improvement_decision_cli_spec,
-    build_benchmark_improvement_scoreboard_cli_spec,
     build_benchmark_improvement_wave_plan,
-    build_improvement_candidate_eval_cli_spec,
     build_mandatory_benchmark_dataset_evidence_plan,
     build_nightly_benchmark_export_cli_spec,
     build_nightly_registry_cli_spec,
@@ -37,6 +34,7 @@ from dags.serp_eval_contracts import (
     build_online_eval_registry_cli_spec,
     build_online_eval_rollup_cli_spec,
     build_online_eval_rollup_plan,
+    build_paired_eval_executor_cli_spec,
     build_public_docs_publish_activation_cli_spec,
     build_public_docs_publish_activation_plan,
     build_public_docs_publish_activation_submit_cli_spec,
@@ -59,6 +57,7 @@ from dags.serp_eval_contracts import (
     write_improvement_spec_artifact,
     write_nightly_suite_plan_artifact,
     write_online_eval_rollup_plan_artifact,
+    write_paired_eval_request_artifact,
     write_public_docs_coverage_proof_artifact,
     write_public_docs_crawl_state_artifact,
     write_public_docs_post_activation_rollback_artifact,
@@ -1344,6 +1343,88 @@ def test_execute_pipeline_cli_spec_materializes_s3_inputs_and_uploads_stdout(
     )
 
 
+def test_execute_pipeline_cli_spec_preserves_pipeline_owned_immutable_evidence_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_path = "s3://airflow-serp-artifacts/serp-evals/op/paired-eval-request.json"
+    receipt_path = "s3://airflow-serp-evidence/serp-evals/op/paired-eval-receipt.json"
+    control_path = "s3://airflow-serp-artifacts/serp-evals/op/paired-eval-control.json"
+    storage = {("airflow-serp-artifacts", "serp-evals/op/paired-eval-request.json"): b"{}"}
+    put_calls: list[tuple[str, str, str]] = []
+
+    class FakeS3Client:
+        def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
+            return {"Body": io.BytesIO(storage[(Bucket, Key)])}
+
+        def put_object(
+            self,
+            *,
+            Bucket: str,
+            Key: str,
+            Body: bytes,
+            ContentType: str,
+        ) -> None:
+            assert ContentType == "application/json"
+            put_calls.append((Bucket, Key, Body.decode("utf-8")))
+
+    def fake_run(argv: list[str], **_: object) -> object:
+        assert Path(argv[argv.index("--paired-eval-request") + 1]).is_file()
+        assert argv[argv.index("--evidence-output") + 1] == receipt_path
+
+        class Result:
+            returncode = 0
+            stdout = json.dumps(
+                {
+                    "blockingSuiteIds": ["APIBench"],
+                    "receiptEvidence": {
+                        "artifactPath": receipt_path,
+                        "artifactVersionId": "version-001",
+                        "objectLockMode": "COMPLIANCE",
+                    },
+                    "receiptStatus": "blocked",
+                }
+            )
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr("dags.serp_eval_contracts._s3_client", lambda: FakeS3Client())
+    monkeypatch.setattr("dags.serp_eval_contracts.subprocess.run", fake_run)
+
+    result = execute_pipeline_cli_spec(
+        {
+            "argv": [
+                "python",
+                "-m",
+                "adapstory_serp_pipeline.orchestration.paired_eval_receipt",
+                "--paired-eval-request",
+                request_path,
+                "--evidence-output",
+                receipt_path,
+            ],
+            "contract_version": "serp-airflow-pipeline-cli-bridge/v1",
+            "dag_id": "serp_benchmark_improvement_wave",
+            "evidence_output_owner": "pipeline",
+            "evidence_output_path": receipt_path,
+            "input_paths": [request_path],
+            "operation_id": "op-1",
+            "status": "ready_for_pipeline_cli_runner",
+            "stdout_path": control_path,
+            "task_id": "run_paired_benchmark_evaluation",
+            "tenant_id": TENANT_ID,
+        }
+    )
+
+    assert result["payload"]["receiptStatus"] == "blocked"
+    assert put_calls == [
+        (
+            "airflow-serp-artifacts",
+            "serp-evals/op/paired-eval-control.json",
+            json.dumps(result["payload"], ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+        )
+    ]
+
+
 def test_dispatch_public_docs_seed_refresh_handoff_preserves_s3_artifact_root_uri() -> None:
     conf = _public_docs_seed_refresh_conf()
     conf["artifact_root_path"] = "s3://airflow-serp-artifacts/serp-evals"
@@ -1610,27 +1691,27 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
         "airflow_plan": (
             f"/var/opt/adapstory/serp-evals/{plan.payload['operation_id']}/airflow-plan.json"
         ),
-        "candidate_eval_report": (
-            "/var/opt/adapstory/serp-evals/"
-            f"{plan.payload['operation_id']}/candidate-eval-report.json"
-        ),
-        "improvement_scoreboard": (
-            "/var/opt/adapstory/serp-evals/"
-            f"{plan.payload['operation_id']}/improvement-scoreboard.json"
-        ),
         "improvement_spec": (
-            f"/var/opt/adapstory/serp-evals/{plan.payload['operation_id']}/improvement-spec.json"
-        ),
-        "keep_discard_decision": (
             "/var/opt/adapstory/serp-evals/"
-            f"{plan.payload['operation_id']}/keep-discard-decision.json"
+            f"{plan.payload['operation_id']}/improvement-spec.json"
+        ),
+        "paired_eval_control": (
+            "/var/opt/adapstory/serp-evals/"
+            f"{plan.payload['operation_id']}/paired-eval-control.json"
+        ),
+        "paired_eval_receipt": (
+            f"/var/opt/adapstory/serp-evals/{plan.payload['operation_id']}/paired-eval-receipt.json"
+        ),
+        "paired_eval_request": (
+            "/var/opt/adapstory/serp-evals/"
+            f"{plan.payload['operation_id']}/paired-eval-request.json"
         ),
     }
     assert [task["task_id"] for task in plan.payload["tasks"]] == [
         "validate_benchmark_improvement_wave_plan",
-        "run_targeted_benchmark_eval_harness",
-        "decide_keep_or_discard_candidate",
-        "publish_improvement_scoreboard",
+        "write_improvement_spec",
+        "write_paired_eval_request",
+        "run_paired_benchmark_evaluation",
         "notify_governance_eval_surfaces",
     ]
 
@@ -1645,105 +1726,49 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
         build_benchmark_improvement_wave_plan(unbounded_budget_conf)
 
 
-def test_build_benchmark_improvement_wave_plan_requires_executable_candidate_evidence() -> None:
+def test_build_benchmark_improvement_wave_plan_rejects_caller_supplied_candidate_scores() -> None:
     conf = _improvement_wave_conf()
-    conf.pop("candidate_evaluation")
+    conf["candidate_evaluation"] = {"candidateScore": "0.8"}
 
-    with pytest.raises(ValueError, match="candidate_evaluation"):
+    with pytest.raises(ValueError, match="executor receipts"):
         build_benchmark_improvement_wave_plan(conf)
 
 
-def test_build_benchmark_improvement_wave_plan_requires_versioned_paired_retrieval_evidence() -> (
-    None
-):
+def test_paired_eval_request_derives_canonical_catalog_bindings(tmp_path: Path) -> None:
     conf = _improvement_wave_conf()
-    candidate = cast(dict[str, Any], conf["candidate_evaluation"])
-    retrieval_result = next(
-        suite
-        for suite in cast(list[dict[str, Any]], candidate["suiteResults"])
-        if suite["metricFamily"] == "retrieval"
-    )
-    retrieval_metric = cast(list[dict[str, Any]], retrieval_result["metricResults"])[0]
-    retrieval_metric.pop("pairedRunScores")
-
-    with pytest.raises(ValueError, match="pairedRunScores"):
-        build_benchmark_improvement_wave_plan(conf)
-
-
-def test_improvement_plan_uses_policy_declared_metric_families() -> None:
-    conf = _improvement_wave_conf()
-    candidate = cast(dict[str, Any], conf["candidate_evaluation"])
-    candidate["metricCompatibility"] = _improvement_metric_compatibility(
-        metric_families=("retrieval",)
-    )
-    candidate["suiteResults"] = [
-        item
-        for item in cast(list[dict[str, Any]], candidate["suiteResults"])
-        if item["metricFamily"] == "retrieval"
-    ]
-
+    conf["artifact_root_path"] = str(tmp_path)
     plan = build_benchmark_improvement_wave_plan(conf)
+    request = write_paired_eval_request_artifact(
+        write_airflow_plan_artifact(plan)
+    )["payload"]
 
-    assert [
-        (item["suiteCode"], item["metricFamily"])
-        for item in plan.payload["candidate_evaluation"]["suiteResults"]
-    ] == [(suite_id, "retrieval") for suite_id in MANDATORY_SERP_BENCHMARK_SUITES]
+    assert request["selectedSuiteIds"] == list(MANDATORY_SERP_BENCHMARK_SUITES)
+    assert request["metricDefinitionAuthority"] == "executor-pinned-metric-definition-profile"
+    assert [item["suiteId"] for item in request["suiteBindings"]] == list(
+        MANDATORY_SERP_BENCHMARK_SUITES
+    )
+    assert "Score" not in json.dumps(request)
 
 
-def test_build_benchmark_improvement_gateway_cli_specs_are_file_based_and_deterministic() -> None:
+def test_build_paired_benchmark_executor_cli_spec_is_file_based_and_deterministic() -> None:
     plan = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
-    candidate_eval = build_improvement_candidate_eval_cli_spec(plan.to_canonical_json())
-    decision = build_benchmark_improvement_decision_cli_spec(plan.to_canonical_json())
-    scoreboard = build_benchmark_improvement_scoreboard_cli_spec(plan.to_canonical_json())
+    executor = build_paired_eval_executor_cli_spec(plan.to_canonical_json())
 
-    assert candidate_eval["status"] == "ready_for_gateway_cli_runner"
-    assert candidate_eval["task_id"] == "run_targeted_benchmark_eval_harness"
-    assert candidate_eval["argv"] == [
+    assert executor["status"] == "ready_for_pipeline_cli_runner"
+    assert executor["task_id"] == "run_paired_benchmark_evaluation"
+    assert executor["argv"] == [
         "python",
         "-m",
-        "adapstory_serp_mcp_gateway.airflow_eval_cli",
-        "benchmark-improvement-candidate-eval",
-        "--airflow-plan",
-        plan.payload["artifact_paths"]["airflow_plan"],
-        "--improvement-spec",
-        plan.payload["artifact_paths"]["improvement_spec"],
+        "adapstory_serp_pipeline.orchestration.paired_eval_receipt",
+        "--paired-eval-request",
+        plan.payload["artifact_paths"]["paired_eval_request"],
+        "--evidence-output",
+        plan.payload["artifact_paths"]["paired_eval_receipt"],
     ]
-    assert candidate_eval["stdout_path"] == plan.payload["artifact_paths"]["candidate_eval_report"]
-
-    assert decision["status"] == "ready_for_gateway_cli_runner"
-    assert decision["task_id"] == "decide_keep_or_discard_candidate"
-    assert decision["argv"] == [
-        "python",
-        "-m",
-        "adapstory_serp_mcp_gateway.airflow_eval_cli",
-        "benchmark-improvement-decision",
-        "--airflow-plan",
-        plan.payload["artifact_paths"]["airflow_plan"],
-        "--improvement-spec",
-        plan.payload["artifact_paths"]["improvement_spec"],
-        "--candidate-eval-report",
-        plan.payload["artifact_paths"]["candidate_eval_report"],
-    ]
-    assert decision["stdout_path"] == plan.payload["artifact_paths"]["keep_discard_decision"]
-
-    assert scoreboard["status"] == "ready_for_gateway_cli_runner"
-    assert scoreboard["task_id"] == "publish_improvement_scoreboard"
-    assert scoreboard["argv"] == [
-        "python",
-        "-m",
-        "adapstory_serp_mcp_gateway.airflow_eval_cli",
-        "benchmark-improvement-scoreboard",
-        "--airflow-plan",
-        plan.payload["artifact_paths"]["airflow_plan"],
-        "--candidate-eval-report",
-        plan.payload["artifact_paths"]["candidate_eval_report"],
-        "--keep-discard-decision",
-        plan.payload["artifact_paths"]["keep_discard_decision"],
-    ]
-    assert scoreboard["stdout_path"] == plan.payload["artifact_paths"]["improvement_scoreboard"]
+    assert executor["stdout_path"] == plan.payload["artifact_paths"]["paired_eval_control"]
 
 
-def test_write_benchmark_improvement_spec_persists_external_candidate_evaluation(
+def test_write_benchmark_improvement_spec_never_persists_external_candidate_evaluation(
     tmp_path: Path,
 ) -> None:
     conf = _improvement_wave_conf()
@@ -1756,7 +1781,7 @@ def test_write_benchmark_improvement_spec_persists_external_candidate_evaluation
     spec_path = Path(str(spec_artifact["artifactPath"]))
 
     assert spec_path.exists()
-    assert spec_artifact["payload"]["status"] == "ready-for-executable-evaluation"
+    assert spec_artifact["payload"]["status"] == "awaiting-executor-derived-metrics"
     assert spec_artifact["payload"]["dryRun"] is False
     assert spec_artifact["payload"]["baseline"]["beatCondition"] == {
         "bootstrapConfidenceLevel": "0.95",
@@ -1765,12 +1790,8 @@ def test_write_benchmark_improvement_spec_persists_external_candidate_evaluation
         "rule": "all_required_primary_accuracy_metrics_meet_multiplier",
     }
     assert spec_artifact["payload"]["objective"] == {
-        "metricUpperBounds": {"MRR@10": "1.0", "nDCG@10": "1.0"},
         "optimizationDirection": "maximize",
-        "primaryAccuracyMetrics": {
-            suite_id: {"retrieval": ["nDCG@10", "MRR@10"]}
-            for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
-        },
+        "primaryMetricAuthority": "executor-pinned-metric-definition-profile",
         "type": "benchmark-ratchet",
     }
     assert spec_artifact["payload"]["replay"] == {
@@ -1796,7 +1817,12 @@ def test_write_benchmark_improvement_spec_persists_external_candidate_evaluation
         "providerRouteId": conf["provider_route_id"],
         "status": "approved-for-eval-dry-run",
     }
-    assert spec_artifact["payload"]["candidateEvaluation"] == conf["candidate_evaluation"]
+    assert spec_artifact["payload"]["candidate"] == {
+        "id": conf["candidate_id"],
+        "runId": conf["candidate_run_id"],
+        "scoreAuthority": "executor-receipt-only",
+    }
+    assert "candidateEvaluation" not in spec_artifact["payload"]
 
 
 def test_build_benchmark_improvement_wave_plan_requires_replay_metadata() -> None:
@@ -4654,9 +4680,9 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
             "serp_benchmark_improvement_wave",
             [
                 "validate_benchmark_improvement_wave_plan",
-                "run_targeted_benchmark_eval_harness",
-                "decide_keep_or_discard_candidate",
-                "publish_improvement_scoreboard",
+                "write_improvement_spec",
+                "write_paired_eval_request",
+                "run_paired_benchmark_evaluation",
                 "notify_governance_eval_surfaces",
             ],
         ),
@@ -4740,6 +4766,13 @@ def test_serp_nightly_dag_uses_live_gateway_cli_for_d6_path() -> None:
     assert "build_nightly_registry_submit_cli_spec" in source
     assert "write_nightly_report_artifact" not in source
     assert "write_nightly_registry_receipts_artifact" not in source
+
+
+def test_serp_nightly_dag_schedules_only_after_all_adapters_are_ready() -> None:
+    source = (REPO_ROOT / "dags" / "serp_nightly_regression_suite.py").read_text(encoding="utf-8")
+
+    assert "mandatory_benchmark_adapters_ready" in source
+    assert 'schedule="@daily" if mandatory_benchmark_adapters_ready() else None' in source
 
 
 def test_serp_public_docs_dag_runs_default_seed_registry_pipeline_path() -> None:
@@ -5187,16 +5220,17 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setitem(sys.modules, name, module)
 
 
-def test_serp_improvement_dag_uses_gateway_runner_for_d19_path() -> None:
+def test_serp_improvement_dag_uses_pipeline_executor_for_d19_path() -> None:
     source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(encoding="utf-8")
 
     assert "write_improvement_spec_artifact" in source
     assert "write_improvement_candidate_eval_artifact" not in source
     assert "write_benchmark_improvement_decision_artifact" not in source
     assert "write_benchmark_improvement_scoreboard_artifact" not in source
-    assert "build_improvement_candidate_eval_cli_spec" in source
-    assert "build_benchmark_improvement_decision_cli_spec" in source
-    assert "build_benchmark_improvement_scoreboard_cli_spec" in source
+    assert "write_paired_eval_request_artifact" in source
+    assert "build_paired_eval_executor_cli_spec" in source
+    assert "execute_pipeline_cli_spec" in source
+    assert "execute_gateway_cli_spec" not in source
 
 
 def test_airflowignore_excludes_non_dag_test_modules() -> None:
@@ -5493,7 +5527,7 @@ def _improvement_wave_conf() -> dict[str, object]:
         "artifact_root_path": "/var/opt/adapstory/serp-evals",
         "baseline_run_id": "evalrun_public_reranker_baseline_001",
         "candidate_id": "candidate-reranker-v2",
-        "candidate_evaluation": _improvement_candidate_evaluation(),
+        "candidate_run_id": "candidate-reranker-v2-run-001",
         "feature_flags": ["serp.reranker.v2", "serp.d19.dry_run"],
         "generated_at": "2026-07-05T21:00:00Z",
         "guardrail_bundle_version": "guardrails@2026.07.1",
@@ -5514,147 +5548,6 @@ def _improvement_wave_conf() -> dict[str, object]:
         "tenant_id": TENANT_ID,
     }
 
-
-def _improvement_candidate_evaluation() -> dict[str, object]:
-    candidate_run_id = "candidate-reranker-v2-run-001"
-    return {
-        "baselineRunId": "evalrun_public_reranker_baseline_001",
-        "candidateId": "candidate-reranker-v2",
-        "candidateRunId": candidate_run_id,
-        "constraintResults": [
-            {"name": "Policy Compliance Rate", "status": "passed"},
-            {"name": "Citation Accuracy", "status": "passed"},
-            {"name": "Evidence Completeness", "status": "passed"},
-        ],
-        "evidence": {
-            "candidateDiffSummaryUri": "s3://airflow-serp-artifacts/fixtures/diff.json",
-            "candidateDiffSummarySha256": "sha256:" + "1" * 64,
-            "benchmarkReportUri": "s3://airflow-serp-artifacts/fixtures/benchmark.json",
-            "benchmarkReportSha256": "sha256:" + "2" * 64,
-            "regressionReportUri": "s3://airflow-serp-artifacts/fixtures/regression.json",
-            "regressionReportSha256": "sha256:" + "3" * 64,
-            "costReportUri": "s3://airflow-serp-artifacts/fixtures/cost.json",
-            "costReportSha256": "sha256:" + "4" * 64,
-        },
-        "metricCompatibility": _improvement_metric_compatibility(),
-        "scope": {"changedComponents": ["reranker-profile-public-docs"]},
-        "suiteResults": [
-            _improvement_suite_evidence(suite_id, metric_family)
-            for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
-            for metric_family in ("retrieval", "answer-quality", "citation", "policy")
-        ],
-    }
-
-
-def _improvement_suite_evidence(suite_id: str, metric_family: str) -> dict[str, object]:
-    metric_results: list[dict[str, object]]
-    if metric_family == "retrieval":
-        metric_results = [
-            {
-                "baselineScore": "0.3800",
-                "candidateScore": "0.7600",
-                "metric": "nDCG@10",
-                "metricFamily": metric_family,
-                "normalizedScore": "0.7600",
-                "pairedRunScores": _improvement_paired_run_scores(suite_id, "ndcg"),
-            },
-            {
-                "baselineScore": "0.3800",
-                "candidateScore": "0.7600",
-                "metric": "MRR@10",
-                "metricFamily": metric_family,
-                "normalizedScore": "0.7600",
-                "pairedRunScores": _improvement_paired_run_scores(suite_id, "mrr"),
-            },
-        ]
-    else:
-        metric_results = [
-            {
-                "baselineScore": "0.9600",
-                "candidateScore": "0.9600",
-                "metric": f"{metric_family}:golden",
-                "metricFamily": metric_family,
-                "normalizedScore": "0.9600",
-            }
-        ]
-    return {
-        "executionEvidenceSha256": "sha256:" + "f" * 64,
-        "executionEvidenceUri": f"s3://airflow-serp-artifacts/fixtures/{suite_id}/{metric_family}.json",
-        "executionEvidenceVersionId": f"fixture-{suite_id}-{metric_family}-execution-v1",
-        "gateStatus": "passed",
-        "metricFamily": metric_family,
-        "metricResults": metric_results,
-        "provenance": {
-            "adapterId": f"fixture-{suite_id.casefold().replace(' ', '-')}-adapter",
-            "adapterVersion": "fixture@2026.07.3",
-            "adapterSourceUri": "https://github.com/adapstory/serp-benchmark-adapters",
-            "adapterSourceRevision": "a" * 40,
-            "adapterImageDigest": "sha256:" + "b" * 64,
-            "baselineEvidenceUri": f"s3://airflow-serp-artifacts/fixtures/{suite_id}/baseline.json",
-            "baselineEvidenceSha256": "sha256:" + "c" * 64,
-            "baselineEvidenceVersionId": f"fixture-{suite_id}-baseline-v1",
-            "candidateEvidenceUri": f"s3://airflow-serp-artifacts/fixtures/{suite_id}/candidate.json",
-            "candidateEvidenceSha256": "sha256:" + "d" * 64,
-            "candidateEvidenceVersionId": f"fixture-{suite_id}-candidate-v1",
-            "datasetDistributionRule": "snippets-only",
-            "datasetLicenseId": "Apache-2.0",
-            "datasetRightsStatus": "attested",
-            "datasetManifestUri": f"s3://airflow-serp-artifacts/fixtures/{suite_id}/dataset.json",
-            "datasetManifestSha256": "sha256:" + "e" * 64,
-            "datasetManifestVersionId": f"fixture-{suite_id}-dataset-v1",
-            "referenceSourceUri": "https://example.com/benchmark-reference",
-            "comparisonEnvelope": {
-                "evaluatorImageDigest": "sha256:" + "a" * 64,
-                "packVersionIds": ["fixture-pack-v1"],
-                "policyBundleVersion": "policy@fixture-v1",
-                "qrelsSha256": "sha256:" + "b" * 64,
-                "querySetSha256": "sha256:" + "c" * 64,
-                "rerankerProfileVersion": "reranker@fixture-v2",
-                "retrievalProfileVersion": "hybrid@fixture-v1",
-                "sampleManifestSha256": "sha256:" + "d" * 64,
-            },
-        },
-        "suiteCode": suite_id,
-        "suiteContractVersion": "2026.07.3",
-        "suiteVersion": "fixture@2026.07.3",
-    }
-
-
-def _improvement_paired_run_scores(suite_id: str, metric_key: str) -> list[dict[str, str]]:
-    return [
-        {
-            "baselineEvidenceSha256": "sha256:" + f"{index}" * 64,
-            "baselineEvidenceUri": (
-                f"s3://airflow-serp-artifacts/fixtures/{suite_id}/{metric_key}/"
-                f"baseline-{index}.json"
-            ),
-            "baselineEvidenceVersionId": f"fixture-{suite_id}-{metric_key}-baseline-{index}",
-            "baselineRawScore": "0.3800",
-            "candidateEvidenceSha256": "sha256:" + f"{index + 5}" * 64,
-            "candidateEvidenceUri": (
-                f"s3://airflow-serp-artifacts/fixtures/{suite_id}/{metric_key}/"
-                f"candidate-{index}.json"
-            ),
-            "candidateEvidenceVersionId": f"fixture-{suite_id}-{metric_key}-candidate-{index}",
-            "candidateRawScore": "0.7600",
-        }
-        for index in range(5)
-    ]
-
-
-def _improvement_metric_compatibility(
-    *, metric_families: tuple[str, ...] = ("retrieval", "answer-quality", "citation", "policy")
-) -> dict[str, object]:
-    return {
-        "contractVersion": "serp-suite-metric-compatibility/v1",
-        "matrixSha256": "sha256:" + "9" * 64,
-        "matrixUri": "s3://airflow-serp-artifacts/fixtures/metric-compatibility.json",
-        "matrixVersionId": "fixture-metric-compatibility-version",
-        "requirements": [
-            {"metricFamilies": list(metric_families), "suiteCode": suite_id}
-            for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
-        ],
-    }
 
 
 def _public_docs_seed_refresh_conf() -> dict[str, Any]:

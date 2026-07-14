@@ -6,6 +6,7 @@ from typing import Any
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
 
+from dags.serp_benchmark_catalog import mandatory_benchmark_adapters_ready
 from dags.serp_eval_contracts import (
     build_nightly_benchmark_export_cli_spec,
     build_nightly_registry_cli_spec,
@@ -52,7 +53,7 @@ dag = DAG(
     "serp_nightly_regression_suite",
     default_args=default_args,
     description="SERP D6 nightly benchmark regression gate contract",
-    schedule="@daily",
+    schedule="@daily" if mandatory_benchmark_adapters_ready() else None,
     catchup=False,
     render_template_as_native_obj=True,
     tags=["serp", "evals", "benchmark", "bc21"],

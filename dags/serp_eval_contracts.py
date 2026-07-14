@@ -49,6 +49,7 @@ PIPELINE_PUBLISH_ACTIVATION_CLI_MODULE = "adapstory_serp_pipeline.registry.publi
 PIPELINE_RETIRED_PACK_CLEANUP_CLI_MODULE = (
     "adapstory_serp_pipeline.orchestration.retired_pack_cleanup_cli"
 )
+PIPELINE_PAIRED_EVAL_CLI_MODULE = "adapstory_serp_pipeline.orchestration.paired_eval_receipt"
 
 _RESOURCE_TYPES = frozenset({"pack", "tenant", "workflow"})
 _GATEWAY_CLI_CONTRACT_VERSION = "serp-airflow-gateway-cli-bridge/v1"
@@ -677,6 +678,10 @@ def build_online_eval_rollup_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
 def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
     payload = _payload(conf)
     _reject_raw_secrets(payload)
+    if "candidate_evaluation" in payload:
+        raise ValueError(
+            "candidate_evaluation is forbidden: D19 derives results from executor receipts"
+        )
     selected_suite_ids = tuple(_required_str_list(payload, "selected_suite_ids"))
     if selected_suite_ids != MANDATORY_SERP_BENCHMARK_SUITES:
         raise ValueError("selected_suite_ids must include every mandatory suite")
@@ -687,18 +692,13 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
     improvement_spec_id = _required_str(payload, "improvement_spec_id")
     baseline_run_id = _required_str(payload, "baseline_run_id")
     candidate_id = _required_str(payload, "candidate_id")
-    candidate_evaluation = _required_improvement_candidate_evaluation(
-        payload,
-        baseline_run_id=baseline_run_id,
-        candidate_id=candidate_id,
-        selected_suite_ids=selected_suite_ids,
-    )
+    candidate_run_id = _required_str(payload, "candidate_run_id")
     max_benchmark_runs = _required_positive_int(payload, "max_benchmark_runs")
     rollback_policy_ref = _required_str(payload, "rollback_policy_ref")
     replay_context = _improvement_replay_context(
         payload,
         baseline_run_id,
-        _required_str(candidate_evaluation, "candidateRunId"),
+        candidate_run_id,
     )
     model_governance = _improvement_model_governance(payload)
     artifact_root_path = _required_artifact_root_path(payload)
@@ -720,14 +720,14 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
             (
                 ("airflow_plan", "airflow-plan.json"),
                 ("improvement_spec", "improvement-spec.json"),
-                ("candidate_eval_report", "candidate-eval-report.json"),
-                ("keep_discard_decision", "keep-discard-decision.json"),
-                ("improvement_scoreboard", "improvement-scoreboard.json"),
+                ("paired_eval_request", "paired-eval-request.json"),
+                ("paired_eval_receipt", "paired-eval-receipt.json"),
+                ("paired_eval_control", "paired-eval-control.json"),
             ),
         ),
         "baseline_run_id": baseline_run_id,
         "candidate_id": candidate_id,
-        "candidate_evaluation": candidate_evaluation,
+        "candidate_run_id": candidate_run_id,
         "dag_id": "serp_benchmark_improvement_wave",
         "generated_at": generated_at,
         "improvement_spec_id": improvement_spec_id,
@@ -743,9 +743,9 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
         "tasks": _tasks(
             (
                 "validate_benchmark_improvement_wave_plan",
-                "run_targeted_benchmark_eval_harness",
-                "decide_keep_or_discard_candidate",
-                "publish_improvement_scoreboard",
+                "write_improvement_spec",
+                "write_paired_eval_request",
+                "run_paired_benchmark_evaluation",
                 "notify_governance_eval_surfaces",
             )
         ),
@@ -2515,12 +2515,14 @@ def execute_pipeline_cli_spec(cli_spec: Mapping[str, Any] | str) -> dict[str, An
         raise ValueError("pipeline cli spec argv must not contain shell operators")
     input_paths = _required_str_list(spec, "input_paths")
     stdout_path = _artifact_path("stdout_path", _required_str(spec, "stdout_path"))
+    pipeline_owns_evidence_output = _pipeline_owns_evidence_output(spec, argv)
     with TemporaryDirectory(prefix="airflow-pipeline-artifacts-") as temp_dir:
         argv = _materialize_pipeline_cli_argv(
             argv,
             input_paths,
             stdout_path=stdout_path,
             temp_dir=temp_dir,
+            preserve_evidence_output=pipeline_owns_evidence_output,
         )
         completed = subprocess.run(
             argv,
@@ -2833,9 +2835,9 @@ def write_improvement_spec_artifact(
         (
             "airflow_plan",
             "improvement_spec",
-            "candidate_eval_report",
-            "keep_discard_decision",
-            "improvement_scoreboard",
+            "paired_eval_request",
+            "paired_eval_receipt",
+            "paired_eval_control",
         ),
     )
     artifact_paths = _required_mapping(plan, "artifact_paths")
@@ -2845,6 +2847,27 @@ def write_improvement_spec_artifact(
     return _artifact_result(
         artifact_path,
         artifact_type="improvement_spec",
+        operation_id=_required_str(plan, "operation_id"),
+        payload=payload,
+    )
+
+
+def write_paired_eval_request_artifact(
+    plan_json: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    """Persist the scoreless D19 request consumed by the paired evaluator."""
+
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != "serp_benchmark_improvement_wave":
+        raise ValueError("plan dag_id does not match paired-eval request writer")
+    artifact_paths = _required_artifact_paths(plan, ("paired_eval_request",))
+    payload = _paired_eval_request_payload(plan)
+    artifact_path = artifact_paths["paired_eval_request"]
+    _write_json_artifact(artifact_path, payload)
+    return _artifact_result(
+        artifact_path,
+        artifact_type="paired_eval_request",
         operation_id=_required_str(plan, "operation_id"),
         payload=payload,
     )
@@ -2950,52 +2973,41 @@ def build_online_eval_registry_cli_spec(plan_json: str) -> dict[str, Any]:
     )
 
 
-def build_improvement_candidate_eval_cli_spec(plan_json: str) -> dict[str, Any]:
-    return _gateway_cli_spec(
-        plan_json,
-        dag_id="serp_benchmark_improvement_wave",
-        task_id="run_targeted_benchmark_eval_harness",
-        command="benchmark-improvement-candidate-eval",
-        input_path_keys=("airflow_plan", "improvement_spec"),
-        output_path_key="candidate_eval_report",
-        option_names=("--airflow-plan", "--improvement-spec"),
+def build_paired_eval_executor_cli_spec(plan_json: str) -> dict[str, Any]:
+    """Build the D19 executor bridge without exposing a caller score path."""
+
+    plan = _json_object(plan_json, "plan_json")
+    if _required_str(plan, "dag_id") != "serp_benchmark_improvement_wave":
+        raise ValueError("plan dag_id does not match paired benchmark evaluator")
+    artifact_paths = _required_artifact_paths(
+        plan,
+        ("paired_eval_request", "paired_eval_receipt", "paired_eval_control"),
     )
+    request_path = artifact_paths["paired_eval_request"]
+    receipt_path = artifact_paths["paired_eval_receipt"]
+    return {
+        "argv": [
+            GATEWAY_CLI_PYTHON,
+            "-m",
+            PIPELINE_PAIRED_EVAL_CLI_MODULE,
+            "--paired-eval-request",
+            request_path,
+            "--evidence-output",
+            receipt_path,
+        ],
+        "contract_version": _PIPELINE_CLI_CONTRACT_VERSION,
+        "dag_id": "serp_benchmark_improvement_wave",
+        "evidence_output_owner": "pipeline",
+        "evidence_output_path": receipt_path,
+        "input_paths": [request_path],
+        "operation_id": _required_str(plan, "operation_id"),
+        "plan_sha256": sha256(_canonical_json(plan).encode("utf-8")).hexdigest(),
+        "status": "ready_for_pipeline_cli_runner",
+        "stdout_path": artifact_paths["paired_eval_control"],
+        "task_id": "run_paired_benchmark_evaluation",
+        "tenant_id": _required_str(plan, "tenant_id"),
+    }
 
-
-def build_benchmark_improvement_decision_cli_spec(plan_json: str) -> dict[str, Any]:
-    return _gateway_cli_spec(
-        plan_json,
-        dag_id="serp_benchmark_improvement_wave",
-        task_id="decide_keep_or_discard_candidate",
-        command="benchmark-improvement-decision",
-        input_path_keys=("airflow_plan", "improvement_spec", "candidate_eval_report"),
-        output_path_key="keep_discard_decision",
-        option_names=(
-            "--airflow-plan",
-            "--improvement-spec",
-            "--candidate-eval-report",
-        ),
-    )
-
-
-def build_benchmark_improvement_scoreboard_cli_spec(plan_json: str) -> dict[str, Any]:
-    return _gateway_cli_spec(
-        plan_json,
-        dag_id="serp_benchmark_improvement_wave",
-        task_id="publish_improvement_scoreboard",
-        command="benchmark-improvement-scoreboard",
-        input_path_keys=(
-            "airflow_plan",
-            "candidate_eval_report",
-            "keep_discard_decision",
-        ),
-        output_path_key="improvement_scoreboard",
-        option_names=(
-            "--airflow-plan",
-            "--candidate-eval-report",
-            "--keep-discard-decision",
-        ),
-    )
 
 
 def evaluate_nightly_regression_gate(report: Mapping[str, Any]) -> dict[str, Any]:
@@ -4990,212 +5002,6 @@ def _validate_benchmark_export_payload(payload: Mapping[str, Any]) -> None:
             raise ValueError("benchmark export normalized score is below gate floor")
 
 
-def _required_improvement_candidate_evaluation(
-    payload: Mapping[str, Any],
-    *,
-    baseline_run_id: str,
-    candidate_id: str,
-    selected_suite_ids: Sequence[str],
-) -> dict[str, Any]:
-    """Accept only externally executed, immutable D19 candidate evidence.
-
-    The Airflow contract must never manufacture an improvement candidate,
-    benchmark score, or a passing governance result.  A versioned adapter
-    runner supplies the candidate report and stores every input/output in
-    immutable MinIO evidence before D19 decides whether to keep or discard it.
-    """
-
-    candidate = dict(_required_mapping(payload, "candidate_evaluation"))
-    _reject_raw_secrets(candidate)
-    if _required_str(candidate, "baselineRunId") != baseline_run_id:
-        raise ValueError("candidate_evaluation baselineRunId does not match baseline_run_id")
-    if _required_str(candidate, "candidateId") != candidate_id:
-        raise ValueError("candidate_evaluation candidateId does not match candidate_id")
-    _required_str(candidate, "candidateRunId")
-    _required_mapping(candidate, "scope")
-    metric_compatibility = _required_metric_compatibility(
-        _required_mapping(candidate, "metricCompatibility"),
-        selected_suite_ids=selected_suite_ids,
-        contract_version_field="contractVersion",
-        matrix_uri_field="matrixUri",
-        matrix_sha256_field="matrixSha256",
-        matrix_version_id_field="matrixVersionId",
-        suite_id_field="suiteCode",
-        metric_families_field="metricFamilies",
-    )
-
-    _required_object_list(candidate, "constraintResults")
-    evidence = _required_mapping(candidate, "evidence")
-    for artifact_name in (
-        "candidateDiffSummary",
-        "benchmarkReport",
-        "regressionReport",
-        "costReport",
-    ):
-        uri_field = f"{artifact_name}Uri"
-        sha_field = f"{artifact_name}Sha256"
-        if _artifact_ref(uri_field, _required_str(evidence, uri_field)).kind != "s3":
-            raise ValueError(
-                f"candidate_evaluation.evidence {uri_field} must be an s3:// immutable artifact"
-            )
-        if not re.fullmatch(r"sha256:[0-9a-f]{64}", _required_str(evidence, sha_field)):
-            raise ValueError(f"candidate_evaluation.evidence {sha_field} must be a sha256 digest")
-    expected_cells = {
-        (suite_id, metric_family)
-        for suite_id, metric_families in _metric_compatibility_requirement_pairs(
-            metric_compatibility
-        )
-        for metric_family in metric_families
-    }
-    observed_cells: set[tuple[str, str]] = set()
-    for suite in _required_object_list(candidate, "suiteResults"):
-        suite_id = _required_str(suite, "suiteCode")
-        metric_family = _required_str(suite, "metricFamily")
-        cell = (suite_id, metric_family)
-        if cell in observed_cells:
-            raise ValueError(
-                f"candidate_evaluation duplicate suite result {suite_id}/{metric_family}"
-            )
-        observed_cells.add(cell)
-        if _required_str(suite, "suiteContractVersion") != _BENCHMARK_SUITE_CONTRACT_VERSION:
-            raise ValueError("candidate_evaluation has unsupported suiteContractVersion")
-        _required_str(suite, "suiteVersion")
-        if _required_str(suite, "gateStatus") not in {"passed", "blocked"}:
-            raise ValueError("candidate_evaluation gateStatus must be passed or blocked")
-        _validate_improvement_suite_provenance(
-            _required_mapping(suite, "provenance"),
-            suite_id=suite_id,
-        )
-        if (
-            _artifact_ref("executionEvidenceUri", _required_str(suite, "executionEvidenceUri")).kind
-            != "s3"
-        ):
-            raise ValueError(
-                "candidate_evaluation executionEvidenceUri must be an s3:// immutable artifact"
-            )
-        if not re.fullmatch(
-            r"sha256:[0-9a-f]{64}", _required_str(suite, "executionEvidenceSha256")
-        ):
-            raise ValueError("candidate_evaluation executionEvidenceSha256 must be a sha256 digest")
-        _required_str(suite, "executionEvidenceVersionId")
-        for metric in _required_object_list(suite, "metricResults"):
-            metric_name = _required_str(metric, "metric")
-            if _required_str(metric, "metricFamily") != metric_family:
-                raise ValueError("candidate_evaluation metricFamily must match its suite result")
-            _required_number_from_string(metric, "baselineScore")
-            _required_number_from_string(metric, "candidateScore")
-            _required_number_from_string(metric, "normalizedScore")
-            if metric_family == "retrieval" and metric_name in _STRICT_PRIMARY_RETRIEVAL_METRICS:
-                _validate_paired_retrieval_evidence(
-                    metric,
-                    suite_id=suite_id,
-                    metric_name=metric_name,
-                )
-    if observed_cells != expected_cells:
-        raise ValueError(
-            "candidate_evaluation must include every metric_compatibility suite and metric family"
-        )
-    return candidate
-
-
-def _validate_improvement_suite_provenance(
-    provenance: Mapping[str, Any],
-    *,
-    suite_id: str,
-) -> None:
-    for field_name in (
-        "adapterId",
-        "adapterVersion",
-        "adapterSourceUri",
-        "adapterSourceRevision",
-        "adapterImageDigest",
-        "datasetLicenseId",
-        "datasetDistributionRule",
-        "datasetRightsStatus",
-        "datasetManifestUri",
-        "datasetManifestSha256",
-        "datasetManifestVersionId",
-        "baselineEvidenceUri",
-        "baselineEvidenceSha256",
-        "baselineEvidenceVersionId",
-        "candidateEvidenceUri",
-        "candidateEvidenceSha256",
-        "candidateEvidenceVersionId",
-        "referenceSourceUri",
-    ):
-        _required_str(provenance, field_name)
-    for field_name in ("adapterSourceUri", "referenceSourceUri"):
-        parsed = urlparse(_required_str(provenance, field_name))
-        if parsed.scheme != "https" or not parsed.hostname:
-            raise ValueError(f"{suite_id} {field_name} must be an https URL")
-    envelope = _required_mapping(provenance, "comparisonEnvelope")
-    for field_name in (
-        "evaluatorImageDigest",
-        "policyBundleVersion",
-        "rerankerProfileVersion",
-        "retrievalProfileVersion",
-    ):
-        _required_str(envelope, field_name)
-    for field_name in (
-        "evaluatorImageDigest",
-        "qrelsSha256",
-        "querySetSha256",
-        "sampleManifestSha256",
-    ):
-        _required_sha256_prefixed(envelope, field_name)
-    _required_str_list(envelope, "packVersionIds")
-    if not re.fullmatch(r"[0-9a-f]{40}", _required_str(provenance, "adapterSourceRevision")):
-        raise ValueError(f"{suite_id} adapterSourceRevision must be a 40-character SHA")
-    for field_name in (
-        "adapterImageDigest",
-        "datasetManifestSha256",
-        "baselineEvidenceSha256",
-        "candidateEvidenceSha256",
-    ):
-        if not re.fullmatch(r"sha256:[0-9a-f]{64}", _required_str(provenance, field_name)):
-            raise ValueError(f"{suite_id} {field_name} must be a sha256 digest")
-    for field_name in ("datasetManifestUri", "baselineEvidenceUri", "candidateEvidenceUri"):
-        if _artifact_ref(field_name, _required_str(provenance, field_name)).kind != "s3":
-            raise ValueError(f"{suite_id} {field_name} must be an s3:// immutable artifact")
-    _validate_dataset_rights(
-        license_id=_required_str(provenance, "datasetLicenseId"),
-        distribution_rule=_required_str(provenance, "datasetDistributionRule"),
-        rights_status=_required_str(provenance, "datasetRightsStatus"),
-        error_prefix=suite_id,
-    )
-
-
-def _validate_paired_retrieval_evidence(
-    metric_result: Mapping[str, Any],
-    *,
-    suite_id: str,
-    metric_name: str,
-) -> None:
-    paired_runs = _required_object_list(metric_result, "pairedRunScores")
-    if len(paired_runs) != _STRICT_PAIRED_RUN_COUNT:
-        raise ValueError("pairedRunScores must contain exactly five paired runs")
-    observed_evidence_versions: set[tuple[str, str]] = set()
-    for paired_run in paired_runs:
-        for evidence_name in ("baselineEvidence", "candidateEvidence"):
-            uri_field = f"{evidence_name}Uri"
-            sha_field = f"{evidence_name}Sha256"
-            version_field = f"{evidence_name}VersionId"
-            if _artifact_ref(uri_field, _required_str(paired_run, uri_field)).kind != "s3":
-                raise ValueError(f"pairedRunScores {uri_field} must be an s3:// immutable artifact")
-            _required_sha256_prefixed(paired_run, sha_field)
-            _required_str(paired_run, version_field)
-        _required_number_from_string(paired_run, "baselineRawScore")
-        _required_number_from_string(paired_run, "candidateRawScore")
-        evidence_versions = (
-            _required_str(paired_run, "baselineEvidenceVersionId"),
-            _required_str(paired_run, "candidateEvidenceVersionId"),
-        )
-        if evidence_versions in observed_evidence_versions:
-            raise ValueError(
-                f"pairedRunScores evidence versions must be distinct for {suite_id}/{metric_name}"
-            )
-        observed_evidence_versions.add(evidence_versions)
-
 
 def _improvement_replay_context(
     payload: Mapping[str, Any], baseline_run_id: str, candidate_run_id: str
@@ -5266,6 +5072,34 @@ def _improvement_model_governance(payload: Mapping[str, Any]) -> dict[str, str]:
     }
 
 
+def _paired_eval_request_payload(plan: Mapping[str, Any]) -> dict[str, Any]:
+    """Build a canonical, scoreless request from the authoritative suite catalog."""
+
+    from dags.serp_benchmark_catalog import MANDATORY_BENCHMARK_SUITE_CATALOG
+
+    selected_suite_ids = _required_str_list(plan, "selected_suite_ids")
+    catalog_suite_ids = [entry.suite_id for entry in MANDATORY_BENCHMARK_SUITE_CATALOG]
+    if selected_suite_ids != catalog_suite_ids:
+        raise ValueError("paired evaluator request must use the canonical suite catalog order")
+    return {
+        "baselineRunId": _required_str(plan, "baseline_run_id"),
+        "candidateId": _required_str(plan, "candidate_id"),
+        "candidateRunId": _required_str(plan, "candidate_run_id"),
+        "improvementSpecId": _required_str(plan, "improvement_spec_id"),
+        "metricDefinitionAuthority": "executor-pinned-metric-definition-profile",
+        "requestId": _required_str(plan, "operation_id"),
+        "selectedSuiteIds": selected_suite_ids,
+        "suiteBindings": [
+            {
+                "adapterId": f"catalog:{entry.suite_id}@{entry.dataset_revision}",
+                "executionStatus": entry.execution_status,
+                "suiteId": entry.suite_id,
+            }
+            for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+        ],
+    }
+
+
 def _improvement_spec_payload(
     plan: Mapping[str, Any], artifact_paths: Mapping[str, str]
 ) -> dict[str, Any]:
@@ -5296,7 +5130,11 @@ def _improvement_spec_payload(
             "maxCostUsdEquivalent": 50,
             "wallClockBudgetMinutes": 180,
         },
-        "candidateEvaluation": dict(_required_mapping(plan, "candidate_evaluation")),
+        "candidate": {
+            "id": _required_str(plan, "candidate_id"),
+            "runId": _required_str(plan, "candidate_run_id"),
+            "scoreAuthority": "executor-receipt-only",
+        },
         "dryRun": False,
         "constraints": {
             "mustHold": [
@@ -5323,11 +5161,8 @@ def _improvement_spec_payload(
         },
         "modelGovernance": dict(_required_mapping(plan, "model_governance")),
         "objective": {
-            "metricUpperBounds": {"MRR@10": "1.0", "nDCG@10": "1.0"},
             "optimizationDirection": "maximize",
-            "primaryAccuracyMetrics": {
-                suite_id: {"retrieval": ["nDCG@10", "MRR@10"]} for suite_id in selected_suite_ids
-            },
+            "primaryMetricAuthority": "executor-pinned-metric-definition-profile",
             "type": "benchmark-ratchet",
         },
         "operationId": _required_str(plan, "operation_id"),
@@ -5357,7 +5192,7 @@ def _improvement_spec_payload(
             "kind": "bounded",
         },
         "selectedSuiteIds": selected_suite_ids,
-        "status": "ready-for-executable-evaluation",
+        "status": "awaiting-executor-derived-metrics",
         "tenantId": _required_str(plan, "tenant_id"),
     }
 
@@ -6986,6 +6821,7 @@ def _materialize_pipeline_cli_argv(
     *,
     stdout_path: str,
     temp_dir: str,
+    preserve_evidence_output: bool = False,
 ) -> list[str]:
     materialized = _materialize_gateway_cli_argv(argv, input_paths, temp_dir=temp_dir)
     stdout_artifact = _artifact_ref("stdout_path", stdout_path)
@@ -6994,7 +6830,10 @@ def _materialize_pipeline_cli_argv(
             Path(temp_dir) / "stdout" / Path(_required_str_ref(stdout_artifact.key)).name
         )
         local_stdout_path.parent.mkdir(parents=True, exist_ok=True)
-        for output_option in ("--evidence-output", "--activation-receipt-output"):
+        output_options = ["--activation-receipt-output"]
+        if not preserve_evidence_output:
+            output_options.append("--evidence-output")
+        for output_option in output_options:
             if output_option in materialized:
                 materialized = _replace_cli_option_value(
                     materialized,
@@ -7012,6 +6851,25 @@ def _materialize_pipeline_cli_argv(
                 str(local_artifact_root),
             )
     return materialized
+
+
+def _pipeline_owns_evidence_output(spec: Mapping[str, Any], argv: Sequence[str]) -> bool:
+    owner = spec.get("evidence_output_owner")
+    if owner is None:
+        return False
+    if owner != "pipeline":
+        raise ValueError("evidence_output_owner must be pipeline when declared")
+    evidence_output_path = _artifact_path(
+        "evidence_output_path", _required_str(spec, "evidence_output_path")
+    )
+    if "--evidence-output" not in argv:
+        raise ValueError("pipeline-owned evidence output requires --evidence-output")
+    supplied_path = argv[argv.index("--evidence-output") + 1]
+    if supplied_path != evidence_output_path:
+        raise ValueError("pipeline-owned evidence output must match evidence_output_path")
+    if evidence_output_path == _artifact_path("stdout_path", _required_str(spec, "stdout_path")):
+        raise ValueError("pipeline-owned evidence output must not share stdout_path")
+    return True
 
 
 @lru_cache(maxsize=1)

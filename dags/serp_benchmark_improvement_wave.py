@@ -7,14 +7,13 @@ from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
 
 from dags.serp_eval_contracts import (
-    build_benchmark_improvement_decision_cli_spec,
-    build_benchmark_improvement_scoreboard_cli_spec,
     build_benchmark_improvement_wave_plan,
-    build_improvement_candidate_eval_cli_spec,
-    execute_gateway_cli_spec,
+    build_paired_eval_executor_cli_spec,
+    execute_pipeline_cli_spec,
     governance_notification_pending,
     write_airflow_plan_artifact,
     write_improvement_spec_artifact,
+    write_paired_eval_request_artifact,
 )
 
 
@@ -24,17 +23,16 @@ def validate_benchmark_improvement_wave_plan(**context: Any) -> str:
     return write_airflow_plan_artifact(build_benchmark_improvement_wave_plan(conf))
 
 
-def write_improvement_spec_and_candidate_eval(plan_json: str) -> dict[str, Any]:
-    write_improvement_spec_artifact(plan_json)
-    return execute_gateway_cli_spec(build_improvement_candidate_eval_cli_spec(plan_json))
+def write_improvement_spec(plan_json: str) -> dict[str, Any]:
+    return write_improvement_spec_artifact(plan_json)
 
 
-def decide_keep_or_discard_candidate(plan_json: str) -> dict[str, Any]:
-    return execute_gateway_cli_spec(build_benchmark_improvement_decision_cli_spec(plan_json))
+def write_paired_eval_request(plan_json: str) -> dict[str, Any]:
+    return write_paired_eval_request_artifact(plan_json)
 
 
-def publish_improvement_scoreboard(plan_json: str) -> dict[str, Any]:
-    return execute_gateway_cli_spec(build_benchmark_improvement_scoreboard_cli_spec(plan_json))
+def run_paired_benchmark_evaluation(plan_json: str) -> dict[str, Any]:
+    return execute_pipeline_cli_spec(build_paired_eval_executor_cli_spec(plan_json))
 
 
 default_args = {
@@ -58,23 +56,23 @@ validate_plan = PythonOperator(
     dag=dag,
 )
 
-run_candidate_eval = PythonOperator(
-    task_id="run_targeted_benchmark_eval_harness",
-    python_callable=write_improvement_spec_and_candidate_eval,
+write_spec = PythonOperator(
+    task_id="write_improvement_spec",
+    python_callable=write_improvement_spec,
     op_args=["{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') }}"],
     dag=dag,
 )
 
-decide_candidate = PythonOperator(
-    task_id="decide_keep_or_discard_candidate",
-    python_callable=decide_keep_or_discard_candidate,
+write_request = PythonOperator(
+    task_id="write_paired_eval_request",
+    python_callable=write_paired_eval_request,
     op_args=["{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') }}"],
     dag=dag,
 )
 
-publish_scoreboard = PythonOperator(
-    task_id="publish_improvement_scoreboard",
-    python_callable=publish_improvement_scoreboard,
+run_paired_evaluation = PythonOperator(
+    task_id="run_paired_benchmark_evaluation",
+    python_callable=run_paired_benchmark_evaluation,
     op_args=["{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') }}"],
     dag=dag,
 )
@@ -86,4 +84,4 @@ notify_governance = PythonOperator(
     dag=dag,
 )
 
-(validate_plan >> run_candidate_eval >> decide_candidate >> publish_scoreboard >> notify_governance)
+validate_plan >> write_spec >> write_request >> run_paired_evaluation >> notify_governance

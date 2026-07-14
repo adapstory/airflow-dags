@@ -11,6 +11,7 @@ from dags.serp_benchmark_catalog import (
     BENCHMARK_CATALOG_CONTRACT_VERSION,
     MANDATORY_BENCHMARK_SUITE_CATALOG,
     build_live_benchmark_catalog_evidence,
+    mandatory_benchmark_adapters_ready,
 )
 from dags.serp_eval_contracts import (
     MANDATORY_SERP_BENCHMARK_SUITES,
@@ -124,6 +125,12 @@ def test_catalog_covers_every_mandatory_suite_with_explicit_licensing_boundary()
         for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
     )
     assert all(entry.distribution_rule for entry in MANDATORY_BENCHMARK_SUITE_CATALOG)
+
+
+def test_catalog_exposes_fail_closed_d6_schedule_readiness() -> None:
+    """D6 cannot be scheduled until every mandatory adapter is executable."""
+
+    assert mandatory_benchmark_adapters_ready() is False
 
 
 def test_catalog_pins_each_upstream_dataset_to_an_immutable_revision() -> None:
