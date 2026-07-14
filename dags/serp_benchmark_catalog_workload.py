@@ -7,6 +7,12 @@ from json import dumps
 
 from kubernetes.client import models as k8s
 
+from dags.serp_evidence_workload_identity import (
+    minio_web_identity_env_vars,
+    minio_web_identity_volume_mounts,
+    minio_web_identity_volumes,
+)
+
 BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-benchmark-acquisition"
 BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_LABELS = {
     "adapstory.com/serp-evidence-workload": "true",
@@ -24,11 +30,13 @@ BENCHMARK_CATALOG_ACQUISITION_RESOURCES = k8s.V1ResourceRequirements(
 )
 BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS = 90
 _BENCHMARK_CATALOG_ACQUISITION_ENV_NAMES = (
-    "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT",
     "ADAPSTORY_AIRFLOW_ARTIFACT_S3_PATH_STYLE",
-    "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION",
     "ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS",
     "ADAPSTORY_SERP_SOURCE_PROXY_URL",
+)
+_BENCHMARK_CATALOG_ACQUISITION_WEB_IDENTITY_ENV_NAMES = (
+    "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT",
+    "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION",
 )
 _BENCHMARK_CATALOG_ACQUISITION_NO_PROXY_HOSTS = (
     "localhost",
@@ -39,9 +47,9 @@ _BENCHMARK_CATALOG_ACQUISITION_NO_PROXY_HOSTS = (
 
 
 def benchmark_catalog_acquisition_env_vars() -> list[k8s.V1EnvVar]:
-    """Return only proxy and evidence-store dependencies for catalog acquisition."""
+    """Return proxy settings plus projected MinIO STS identity for acquisition."""
 
-    values: list[k8s.V1EnvVar] = []
+    values = minio_web_identity_env_vars(_BENCHMARK_CATALOG_ACQUISITION_WEB_IDENTITY_ENV_NAMES)
     for name in _BENCHMARK_CATALOG_ACQUISITION_ENV_NAMES:
         value = os.environ.get(name)
         if value is None or not value.strip():
@@ -58,29 +66,19 @@ def benchmark_catalog_acquisition_env_vars() -> list[k8s.V1EnvVar]:
             ),
         )
     )
-    values.extend(
-        (
-            k8s.V1EnvVar(
-                name="ADAPSTORY_AIRFLOW_ARTIFACT_S3_ACCESS_KEY",
-                value_from=k8s.V1EnvVarSource(
-                    secret_key_ref=k8s.V1SecretKeySelector(
-                        name="airflow-serp-evidence-store",
-                        key="access-key",
-                    )
-                ),
-            ),
-            k8s.V1EnvVar(
-                name="ADAPSTORY_AIRFLOW_ARTIFACT_S3_SECRET_KEY",
-                value_from=k8s.V1EnvVarSource(
-                    secret_key_ref=k8s.V1SecretKeySelector(
-                        name="airflow-serp-evidence-store",
-                        key="secret-key",
-                    )
-                ),
-            ),
-        )
-    )
     return values
+
+
+def benchmark_catalog_acquisition_web_identity_volumes() -> list[k8s.V1Volume]:
+    """Project the bounded MinIO audience token without an ambient API token."""
+
+    return minio_web_identity_volumes()
+
+
+def benchmark_catalog_acquisition_web_identity_volume_mounts() -> list[k8s.V1VolumeMount]:
+    """Mount the bounded MinIO identity token read-only."""
+
+    return minio_web_identity_volume_mounts()
 
 
 def benchmark_catalog_acquisition_pod_security_context() -> k8s.V1PodSecurityContext:

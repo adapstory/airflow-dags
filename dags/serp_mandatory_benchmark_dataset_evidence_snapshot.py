@@ -19,6 +19,8 @@ from dags.serp_benchmark_catalog_workload import (
     benchmark_catalog_acquisition_container_security_context,
     benchmark_catalog_acquisition_env_vars,
     benchmark_catalog_acquisition_pod_security_context,
+    benchmark_catalog_acquisition_web_identity_volume_mounts,
+    benchmark_catalog_acquisition_web_identity_volumes,
 )
 from dags.serp_eval_contracts import (
     build_mandatory_benchmark_dataset_evidence_plan,
@@ -84,6 +86,8 @@ materialize_evidence = KubernetesPodOperator(
     env_vars=benchmark_catalog_acquisition_env_vars(),
     service_account_name=BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT,
     automount_service_account_token=False,
+    volumes=benchmark_catalog_acquisition_web_identity_volumes(),
+    volume_mounts=benchmark_catalog_acquisition_web_identity_volume_mounts(),
     labels=BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_LABELS,
     container_resources=BENCHMARK_CATALOG_ACQUISITION_RESOURCES,
     security_context=benchmark_catalog_acquisition_pod_security_context(),

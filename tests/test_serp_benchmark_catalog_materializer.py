@@ -1,12 +1,26 @@
 from __future__ import annotations
 
+import sys
 from collections.abc import Mapping
+from types import ModuleType
 from typing import Any
 
-from dags.serp_benchmark_catalog_materializer import (
+
+def _test_literal(value: str) -> str:
+    return value
+
+
+if "airflow.sdk" not in sys.modules:
+    airflow_module = ModuleType("airflow")
+    airflow_sdk_module = ModuleType("airflow.sdk")
+    airflow_sdk_module.__dict__["literal"] = _test_literal
+    sys.modules["airflow"] = airflow_module
+    sys.modules["airflow.sdk"] = airflow_sdk_module
+
+from dags.serp_benchmark_catalog_materializer import (  # noqa: E402
     materialize_benchmark_catalog_receipt,
 )
-from dags.serp_benchmark_catalog_workload import (
+from dags.serp_benchmark_catalog_workload import (  # noqa: E402
     BENCHMARK_CATALOG_ACQUISITION_RESOURCES,
     BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS,
     BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_LABELS,
@@ -14,8 +28,17 @@ from dags.serp_benchmark_catalog_workload import (
     benchmark_catalog_acquisition_container_security_context,
     benchmark_catalog_acquisition_env_vars,
     benchmark_catalog_acquisition_pod_security_context,
+    benchmark_catalog_acquisition_web_identity_volume_mounts,
+    benchmark_catalog_acquisition_web_identity_volumes,
 )
-from dags.serp_eval_contracts import MANDATORY_SERP_BENCHMARK_SUITES
+from dags.serp_eval_contracts import MANDATORY_SERP_BENCHMARK_SUITES  # noqa: E402
+
+# This unit module deliberately imports the catalog helper without the full
+# Airflow distribution. Remove the temporary import-only modules so the DAG
+# import-contract tests can install their own isolated Airflow/Kubernetes stubs.
+sys.modules.pop("dags.serp_evidence_workload_identity", None)
+sys.modules.pop("airflow.sdk", None)
+sys.modules.pop("airflow", None)
 
 
 def test_catalog_materializer_seals_catalog_snapshot_in_immutable_receipt() -> None:
@@ -119,15 +142,15 @@ def test_catalog_acquisition_workload_has_minimal_proxy_and_evidence_contract(
     }
     assert [env_var.name for env_var in env_vars] == [
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT",
-        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_PATH_STYLE",
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION",
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_WEB_IDENTITY_TOKEN_FILE",
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_STS_DURATION_SECONDS",
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_PATH_STYLE",
         "ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS",
         "ADAPSTORY_SERP_SOURCE_PROXY_URL",
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "NO_PROXY",
-        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ACCESS_KEY",
-        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_SECRET_KEY",
     ]
     literal_env = {env_var.name: env_var.value for env_var in env_vars if env_var.value is not None}
     assert literal_env["ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT"] == (
@@ -135,6 +158,10 @@ def test_catalog_acquisition_workload_has_minimal_proxy_and_evidence_contract(
     )
     assert literal_env["ADAPSTORY_AIRFLOW_ARTIFACT_S3_PATH_STYLE"] == "true"
     assert literal_env["ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION"] == "us-east-1"
+    assert literal_env["ADAPSTORY_AIRFLOW_ARTIFACT_S3_WEB_IDENTITY_TOKEN_FILE"] == (
+        "/var/run/secrets/adapstory/minio-web-identity/token"
+    )
+    assert literal_env["ADAPSTORY_AIRFLOW_ARTIFACT_S3_STS_DURATION_SECONDS"] == "900"
     assert literal_env["ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS"] == '"365"'
     assert literal_env["ADAPSTORY_SERP_SOURCE_PROXY_URL"] == (
         "http://forward-proxy.forward-proxy.svc:3128"
@@ -142,6 +169,65 @@ def test_catalog_acquisition_workload_has_minimal_proxy_and_evidence_contract(
     assert literal_env["HTTP_PROXY"] == "http://forward-proxy.forward-proxy.svc:3128"
     assert literal_env["HTTPS_PROXY"] == "http://forward-proxy.forward-proxy.svc:3128"
     assert ".svc.cluster.local" in literal_env["NO_PROXY"]
+    assert all(env_var.value_from is None for env_var in env_vars)
+    assert benchmark_catalog_acquisition_web_identity_volumes()[0].to_dict() == {
+        "aws_elastic_block_store": None,
+        "azure_disk": None,
+        "azure_file": None,
+        "cephfs": None,
+        "cinder": None,
+        "config_map": None,
+        "csi": None,
+        "downward_api": None,
+        "empty_dir": None,
+        "ephemeral": None,
+        "fc": None,
+        "flex_volume": None,
+        "flocker": None,
+        "gce_persistent_disk": None,
+        "git_repo": None,
+        "glusterfs": None,
+        "host_path": None,
+        "image": None,
+        "iscsi": None,
+        "name": "minio-web-identity-token",
+        "nfs": None,
+        "persistent_volume_claim": None,
+        "photon_persistent_disk": None,
+        "portworx_volume": None,
+        "projected": {
+            "default_mode": None,
+            "sources": [
+                {
+                    "cluster_trust_bundle": None,
+                    "config_map": None,
+                    "downward_api": None,
+                    "pod_certificate": None,
+                    "secret": None,
+                    "service_account_token": {
+                        "audience": "minio",
+                        "expiration_seconds": 900,
+                        "path": "token",
+                    },
+                }
+            ],
+        },
+        "quobyte": None,
+        "rbd": None,
+        "scale_io": None,
+        "secret": None,
+        "storageos": None,
+        "vsphere_volume": None,
+    }
+    assert benchmark_catalog_acquisition_web_identity_volume_mounts()[0].to_dict() == {
+        "mount_path": "/var/run/secrets/adapstory/minio-web-identity",
+        "mount_propagation": None,
+        "name": "minio-web-identity-token",
+        "read_only": True,
+        "recursive_read_only": None,
+        "sub_path": None,
+        "sub_path_expr": None,
+    }
     assert BENCHMARK_CATALOG_ACQUISITION_RESOURCES.to_dict() == {
         "claims": None,
         "limits": {"cpu": "1000m", "memory": "3Gi"},
