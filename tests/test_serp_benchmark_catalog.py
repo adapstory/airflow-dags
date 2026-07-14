@@ -5,10 +5,12 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
+import dags.serp_eval_contracts as serp_eval_contracts_module
 from dags.serp_benchmark_catalog import (
     BENCHMARK_CATALOG_CONTRACT_VERSION,
     MANDATORY_BENCHMARK_SUITE_CATALOG,
@@ -105,9 +107,14 @@ def test_huggingface_dataset_artifact_uses_pinned_xet_aware_client(
         "ADAPSTORY_SERP_SOURCE_PROXY_URL",
         "http://forward-proxy.forward-proxy.svc.cluster.local:3128",
     )
-    monkeypatch.setattr("dags.serp_eval_contracts.importlib.import_module", fake_import_module)
     monkeypatch.setattr(
-        "dags.serp_eval_contracts._open_public_docs_crawler_request",
+        serp_eval_contracts_module,
+        "importlib",
+        SimpleNamespace(import_module=fake_import_module),
+    )
+    monkeypatch.setattr(
+        serp_eval_contracts_module,
+        "_open_public_docs_crawler_request",
         lambda *_args, **_kwargs: pytest.fail("Xet dataset download must not use raw urllib"),
     )
 

@@ -2990,9 +2990,14 @@ def test_d20_bc21_pipeline_state_submit_accepts_quarantined_publishable_batch(
             return FakeBC21PipelineState
         return importlib.import_module(name)
 
-    monkeypatch.setattr("dags.serp_eval_contracts.importlib.import_module", fake_import_module)
     monkeypatch.setattr(
-        "dags.serp_eval_contracts._ensure_public_docs_catalog_source",
+        serp_eval_contracts_module,
+        "importlib",
+        types.SimpleNamespace(import_module=fake_import_module),
+    )
+    monkeypatch.setattr(
+        serp_eval_contracts_module,
+        "_ensure_public_docs_catalog_source",
         lambda _plan, *, bc21_base_url: "018f5e13-2d73-7a77-a052-8d1bcbf96599",
     )
 
