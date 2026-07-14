@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import Sequence
 
+from airflow.sdk import literal
 from kubernetes.client import models as k8s
 
 MINIO_WEB_IDENTITY_TOKEN_FILE = "/var/run/secrets/adapstory/minio-web-identity/token"
@@ -30,7 +31,7 @@ def minio_web_identity_env_vars(required_names: Sequence[str]) -> list[k8s.V1Env
             ),
             k8s.V1EnvVar(
                 name="ADAPSTORY_AIRFLOW_ARTIFACT_S3_STS_DURATION_SECONDS",
-                value=str(MINIO_WEB_IDENTITY_EXPIRATION_SECONDS),
+                value=literal(str(MINIO_WEB_IDENTITY_EXPIRATION_SECONDS)),
             ),
         )
     )

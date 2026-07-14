@@ -5502,6 +5502,7 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         Any, modules["airflow.providers.cncf.kubernetes.operators.pod"]
     ).KubernetesPodOperator = FakeKubernetesPodOperator
     cast(Any, modules["airflow.sdk"]).DAG = FakeDAG
+    cast(Any, modules["airflow.sdk"]).literal = lambda value: value
     cast(Any, modules["airflow.utils.trigger_rule"]).TriggerRule = FakeTriggerRule
     models = cast(Any, modules["kubernetes.client.models"])
     models.V1Capabilities = FakeKubernetesModel
@@ -5598,6 +5599,13 @@ def test_serp_improvement_dag_passes_exact_s3_values_to_the_evaluator_pod(
             "/var/run/secrets/adapstory/minio-web-identity/token"
         ),
     }
+
+
+def test_web_identity_duration_env_is_protected_from_native_template_coercion() -> None:
+    source = (REPO_ROOT / "dags" / "serp_evidence_workload_identity.py").read_text(encoding="utf-8")
+
+    assert "from airflow.sdk import literal" in source
+    assert "value=literal(str(MINIO_WEB_IDENTITY_EXPIRATION_SECONDS))" in source
 
 
 def test_airflowignore_excludes_non_dag_test_modules() -> None:
