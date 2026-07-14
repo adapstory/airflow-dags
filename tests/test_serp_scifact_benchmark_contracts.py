@@ -121,7 +121,7 @@ def test_scifact_evaluator_gets_only_its_evidence_and_governed_search_contract()
     assert "return minio_web_identity_env_vars(_SCIFACT_EVALUATOR_ENV_NAMES)" in evaluator_contract
 
 
-def test_scifact_evaluator_omits_an_unused_projected_service_account_token() -> None:
+def test_scifact_kubernetes_tasks_use_only_their_required_projected_tokens() -> None:
     source = (
         Path(__file__).resolve().parents[1] / "dags" / "serp_beir_scifact_live_benchmark.py"
     ).read_text(encoding="utf-8")
@@ -161,7 +161,7 @@ def test_scifact_evaluator_omits_an_unused_projected_service_account_token() -> 
         if keyword.arg == "automount_service_account_token"
     )
     assert isinstance(acquisition_automount, ast.Constant)
-    assert acquisition_automount.value is True
+    assert acquisition_automount.value is False
 
     evaluator_automount = next(
         keyword.value
@@ -170,6 +170,39 @@ def test_scifact_evaluator_omits_an_unused_projected_service_account_token() -> 
     )
     assert isinstance(evaluator_automount, ast.Constant)
     assert evaluator_automount.value is False
+
+
+def test_scifact_indexer_uses_web_identity_without_static_minio_credentials() -> None:
+    source = (
+        Path(__file__).resolve().parents[1] / "dags" / "serp_beir_scifact_live_benchmark.py"
+    ).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    indexer = next(
+        call
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "KubernetesPodOperator"
+        and any(
+            keyword.arg == "task_id"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value == "index_scifact_live_dataset"
+            for keyword in call.keywords
+        )
+    )
+    indexer_env = next(keyword.value for keyword in indexer.keywords if keyword.arg == "env_vars")
+    assert isinstance(indexer_env, ast.Call)
+    assert isinstance(indexer_env.func, ast.Name)
+    assert indexer_env.func.id == "scifact_indexer_env_vars"
+    assert "volumes=SCIFACT_INDEXER_WEB_IDENTITY_VOLUMES" in source
+    assert "volume_mounts=SCIFACT_INDEXER_WEB_IDENTITY_VOLUME_MOUNTS" in source
+    indexer_contract = source.split("def scifact_indexer_env_vars()", 1)[1].split(
+        "def scifact_evaluator_env_vars()", 1
+    )[0]
+    assert "if value.name not in _SCIFACT_STATIC_EVIDENCE_CREDENTIAL_ENV_NAMES" in indexer_contract
+    assert "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ACCESS_KEY" in source
+    assert "ADAPSTORY_AIRFLOW_ARTIFACT_S3_SECRET_KEY" in source
+    assert "return [*values, *minio_web_identity_env_vars(())]" in indexer_contract
 
 
 def test_scifact_archive_materialization_binds_bytes_and_s3_version_before_indexing() -> None:

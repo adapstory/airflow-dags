@@ -93,6 +93,10 @@ _PUBLIC_DOCS_SEARCH_SERVE_SMOKE_ACTOR_ID = "00000000-0000-4000-a000-000000000202
 _PUBLIC_DOCS_DEFAULT_ARTIFACT_ROOT = "/var/opt/adapstory/serp-public-docs-refresh"
 _PUBLIC_DOCS_STACK_INVENTORY_PATH = STACK_INVENTORY_SOURCE_PATH
 _PUBLIC_DOCS_SITEMAP_FETCH_TIMEOUT_SECONDS = 8
+_HUGGINGFACE_PROXY_CONNECT_TIMEOUT_SECONDS = 30.0
+_HUGGINGFACE_PROXY_READ_TIMEOUT_SECONDS = 120.0
+_HUGGINGFACE_PROXY_WRITE_TIMEOUT_SECONDS = 30.0
+_HUGGINGFACE_PROXY_POOL_TIMEOUT_SECONDS = 30.0
 _PUBLIC_DOCS_MAX_SITEMAP_INDEX_CHILDREN = 3
 _PUBLIC_DOCS_MAX_OPTIONAL_FRONTIER_SOURCES_ENV = (
     "ADAPSTORY_SERP_PUBLIC_DOCS_MAX_OPTIONAL_FRONTIER_SOURCES"
@@ -1896,9 +1900,15 @@ def _configure_huggingface_proxy_transport(hub: Any) -> None:
         return
     httpx = importlib.import_module("httpx")
     client_class = getattr(httpx, "Client", None)
+    timeout_class = getattr(httpx, "Timeout", None)
     set_client_factory = getattr(hub, "set_client_factory", None)
     close_session = getattr(hub, "close_session", None)
-    if not (callable(client_class) and callable(set_client_factory) and callable(close_session)):
+    if not (
+        callable(client_class)
+        and callable(timeout_class)
+        and callable(set_client_factory)
+        and callable(close_session)
+    ):
         raise ValueError("huggingface_hub proxy transport configuration is unavailable")
     os.environ["HTTP_PROXY"] = proxy_url
     os.environ["HTTPS_PROXY"] = proxy_url
@@ -1907,7 +1917,13 @@ def _configure_huggingface_proxy_transport(hub: Any) -> None:
         lambda: client_class(
             follow_redirects=True,
             proxy=proxy_url,
-            timeout=None,
+            timeout=timeout_class(
+                _HUGGINGFACE_PROXY_READ_TIMEOUT_SECONDS,
+                connect=_HUGGINGFACE_PROXY_CONNECT_TIMEOUT_SECONDS,
+                read=_HUGGINGFACE_PROXY_READ_TIMEOUT_SECONDS,
+                write=_HUGGINGFACE_PROXY_WRITE_TIMEOUT_SECONDS,
+                pool=_HUGGINGFACE_PROXY_POOL_TIMEOUT_SECONDS,
+            ),
             trust_env=False,
         )
     )

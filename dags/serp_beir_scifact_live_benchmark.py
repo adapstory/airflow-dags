@@ -63,8 +63,34 @@ _SCIFACT_EVALUATOR_ENV_NAMES = (
     "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION",
     "ADAPSTORY_SERP_SEARCH_SERVE_BASE_URL",
 )
+_SCIFACT_STATIC_EVIDENCE_CREDENTIAL_ENV_NAMES = frozenset(
+    {
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ACCESS_KEY",
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_SECRET_KEY",
+    }
+)
+SCIFACT_INDEXER_WEB_IDENTITY_VOLUMES = minio_web_identity_volumes()
+SCIFACT_INDEXER_WEB_IDENTITY_VOLUME_MOUNTS = minio_web_identity_volume_mounts()
 SCIFACT_EVALUATOR_WEB_IDENTITY_VOLUMES = minio_web_identity_volumes()
 SCIFACT_EVALUATOR_WEB_IDENTITY_VOLUME_MOUNTS = minio_web_identity_volume_mounts()
+
+
+def scifact_indexer_env_vars() -> list[k8s.V1EnvVar]:
+    """Return store access plus operation-scoped MinIO web identity for indexing.
+
+    The shared public-docs runner includes a legacy static evidence credential
+    pair because non-benchmark jobs still use that contract.  The SciFact
+    indexer is an evidence workload and must instead mint a scoped STS session
+    from its projected token; retaining the static pair makes the runner fail
+    closed before it can read its version-bound archive.
+    """
+
+    values = [
+        value
+        for value in pipeline_runner_runtime_env_vars()
+        if value.name not in _SCIFACT_STATIC_EVIDENCE_CREDENTIAL_ENV_NAMES
+    ]
+    return [*values, *minio_web_identity_env_vars(())]
 
 
 def scifact_evaluator_env_vars() -> list[k8s.V1EnvVar]:
@@ -187,9 +213,11 @@ index_scifact = KubernetesPodOperator(
         "--neo4j-database",
         _store_name("ADAPSTORY_SERP_PUBLIC_DOCS_NEO4J_DATABASE"),
     ],
-    env_vars=pipeline_runner_runtime_env_vars(),
+    env_vars=scifact_indexer_env_vars(),
     service_account_name=SCIFACT_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT,
-    automount_service_account_token=True,
+    automount_service_account_token=False,
+    volumes=SCIFACT_INDEXER_WEB_IDENTITY_VOLUMES,
+    volume_mounts=SCIFACT_INDEXER_WEB_IDENTITY_VOLUME_MOUNTS,
     labels=SCIFACT_ACQUISITION_WORKLOAD_LABELS,
     container_resources=SERP_PIPELINE_RUNNER_RESOURCES,
     container_security_context=k8s.V1SecurityContext(

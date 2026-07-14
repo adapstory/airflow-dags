@@ -74,8 +74,29 @@ def test_huggingface_dataset_artifact_uses_pinned_xet_aware_client(
     calls: list[dict[str, object]] = []
     transport_events: list[str] = []
     client_kwargs: list[dict[str, object]] = []
+    timeout_calls: list[dict[str, float]] = []
 
     class Httpx:
+        class Timeout:
+            def __init__(
+                self,
+                default: float,
+                *,
+                connect: float,
+                read: float,
+                write: float,
+                pool: float,
+            ) -> None:
+                timeout_calls.append(
+                    {
+                        "default": default,
+                        "connect": connect,
+                        "read": read,
+                        "write": write,
+                        "pool": pool,
+                    }
+                )
+
         class Client:
             def __init__(self, **kwargs: object) -> None:
                 client_kwargs.append(kwargs)
@@ -135,14 +156,20 @@ def test_huggingface_dataset_artifact_uses_pinned_xet_aware_client(
         }
     ]
     assert transport_events == ["set-client-factory", "close-session"]
-    assert client_kwargs == [
+    assert timeout_calls == [
         {
-            "follow_redirects": True,
-            "proxy": "http://forward-proxy.forward-proxy.svc.cluster.local:3128",
-            "timeout": None,
-            "trust_env": False,
+            "default": 120.0,
+            "connect": 30.0,
+            "read": 120.0,
+            "write": 30.0,
+            "pool": 30.0,
         }
     ]
+    assert len(client_kwargs) == 1
+    assert client_kwargs[0]["follow_redirects"] is True
+    assert client_kwargs[0]["proxy"] == "http://forward-proxy.forward-proxy.svc.cluster.local:3128"
+    assert client_kwargs[0]["timeout"] is not None
+    assert client_kwargs[0]["trust_env"] is False
     assert os.environ["HTTP_PROXY"] == "http://forward-proxy.forward-proxy.svc.cluster.local:3128"
     assert os.environ["HTTPS_PROXY"] == "http://forward-proxy.forward-proxy.svc.cluster.local:3128"
     assert ".svc.cluster.local" in os.environ["NO_PROXY"]
