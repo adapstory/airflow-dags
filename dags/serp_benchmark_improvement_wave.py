@@ -29,6 +29,7 @@ from dags.serp_eval_contracts import (
     write_paired_eval_request_artifact,
 )
 from dags.serp_evidence_workload_identity import (
+    kubernetes_pod_launcher_executor_config,
     minio_web_identity_env_vars,
     minio_web_identity_executor_config,
     minio_web_identity_volume_mounts,
@@ -143,6 +144,7 @@ materialize_catalog = KubernetesPodOperator(
     on_finish_action="delete_pod",
     retries=1,
     retry_delay=timedelta(seconds=BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS),
+    executor_config=kubernetes_pod_launcher_executor_config(),
     dag=dag,
 )
 
@@ -204,6 +206,7 @@ run_paired_evaluation = KubernetesPodOperator(
     on_finish_action="delete_pod",
     retries=0,
     retry_delay=timedelta(seconds=5),
+    executor_config=kubernetes_pod_launcher_executor_config(),
     dag=dag,
 )
 

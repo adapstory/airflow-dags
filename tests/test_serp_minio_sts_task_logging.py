@@ -147,3 +147,23 @@ def test_airflow_logging_module_exports_the_native_remote_log_object() -> None:
     )
     assert "LOGGING_CONFIG = deepcopy(DEFAULT_LOGGING_CONFIG)" in source
     assert "REMOTE_TASK_LOG = MinioStsTaskLogIO()" in source
+
+
+def test_kubernetes_pod_launcher_executor_config_keeps_minio_sts_and_api_access_separate() -> None:
+    with _isolated_task_log_modules() as (_task_logging, workload_identity):
+        config = workload_identity.kubernetes_pod_launcher_executor_config()
+
+    pod = config["pod_override"]
+    assert pod.spec is not None
+    assert pod.spec.service_account_name == "airflow-serp-kubernetes-pod-launcher"
+    assert pod.spec.automount_service_account_token is True
+    assert pod.metadata is not None
+    assert pod.metadata.labels == {
+        "adapstory.com/serp-evidence-workload": "true",
+        "adapstory.com/serp-network-profile": "kubernetes-pod-launcher",
+        "component": "worker",
+        "release": "airflow",
+        "tier": "airflow",
+    }
+    assert pod.spec.volumes is not None
+    assert [volume.name for volume in pod.spec.volumes] == ["minio-web-identity-token"]

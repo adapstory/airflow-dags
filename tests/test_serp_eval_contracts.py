@@ -5051,6 +5051,34 @@ def test_serp_dag_files_import_helpers_from_packaged_dags_namespace() -> None:
         assert "from serp_eval_contracts import" not in source
 
 
+def test_every_kubernetes_pod_operator_uses_the_dedicated_controller_executor_identity() -> None:
+    for dag_file in (
+        "serp_benchmark_improvement_wave.py",
+        "serp_beir_scifact_live_benchmark.py",
+        "serp_mandatory_benchmark_dataset_evidence_snapshot.py",
+        "serp_nightly_regression_suite.py",
+        "serp_web_seed_crawl_refresh.py",
+    ):
+        tree = ast.parse((REPO_ROOT / "dags" / dag_file).read_text(encoding="utf-8"))
+        pod_operator_calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "KubernetesPodOperator"
+        ]
+
+        assert pod_operator_calls, dag_file
+        for call in pod_operator_calls:
+            executor_config = next(
+                (keyword.value for keyword in call.keywords if keyword.arg == "executor_config"),
+                None,
+            )
+            assert isinstance(executor_config, ast.Call), dag_file
+            assert isinstance(executor_config.func, ast.Name), dag_file
+            assert executor_config.func.id == "kubernetes_pod_launcher_executor_config", dag_file
+
+
 def test_serp_nightly_dag_uses_live_gateway_cli_for_d6_path() -> None:
     source = (REPO_ROOT / "dags" / "serp_nightly_regression_suite.py").read_text(encoding="utf-8")
 

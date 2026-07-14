@@ -14,6 +14,7 @@ from airflow.sdk import DAG
 from kubernetes.client import models as k8s
 
 from dags.serp_evidence_workload_identity import (
+    kubernetes_pod_launcher_executor_config,
     minio_web_identity_env_vars,
     minio_web_identity_executor_config,
     minio_web_identity_volume_mounts,
@@ -210,6 +211,7 @@ index_scifact = KubernetesPodOperator(
     on_finish_action="delete_pod",
     retries=1,
     retry_delay=timedelta(seconds=5),
+    executor_config=kubernetes_pod_launcher_executor_config(),
     dag=dag,
 )
 
@@ -291,6 +293,7 @@ evaluate_scifact = KubernetesPodOperator(
     on_kill_action="keep_pod",
     on_finish_action="delete_pod",
     retries=0,
+    executor_config=kubernetes_pod_launcher_executor_config(),
     dag=dag,
 )
 

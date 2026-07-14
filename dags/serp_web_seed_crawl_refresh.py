@@ -28,6 +28,7 @@ from dags.serp_eval_contracts import (
     write_public_docs_seed_registry_artifact,
 )
 from dags.serp_evidence_workload_identity import (
+    kubernetes_pod_launcher_executor_config,
     minio_web_identity_env_vars,
     minio_web_identity_executor_config,
     minio_web_identity_volume_mounts,
@@ -249,6 +250,7 @@ run_pipeline = KubernetesPodOperator(
     on_finish_action="delete_pod",
     retries=1,
     retry_delay=timedelta(seconds=5),
+    executor_config=kubernetes_pod_launcher_executor_config(),
     dag=dag,
 )
 

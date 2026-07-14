@@ -26,7 +26,10 @@ from dags.serp_eval_contracts import (
     build_mandatory_benchmark_dataset_evidence_plan,
     write_airflow_plan_artifact,
 )
-from dags.serp_evidence_workload_identity import minio_web_identity_executor_config
+from dags.serp_evidence_workload_identity import (
+    kubernetes_pod_launcher_executor_config,
+    minio_web_identity_executor_config,
+)
 from dags.serp_web_seed_crawl_refresh import current_airflow_runtime_image
 
 BENCHMARK_EVALUATOR_EXECUTOR_CONFIG = minio_web_identity_executor_config(
@@ -113,6 +116,7 @@ materialize_evidence = KubernetesPodOperator(
     on_finish_action="delete_pod",
     retries=1,
     retry_delay=timedelta(seconds=BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS),
+    executor_config=kubernetes_pod_launcher_executor_config(),
     dag=dag,
 )
 

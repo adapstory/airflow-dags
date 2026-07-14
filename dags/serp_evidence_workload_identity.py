@@ -22,6 +22,14 @@ EVIDENCE_BUCKET = "airflow-serp-evidence"
 EVIDENCE_PREFIX = "serp-evals/"
 TASK_LOG_BUCKET = "airflow-serp-artifacts"
 TASK_LOG_PREFIX = "airflow-task-logs/"
+KUBERNETES_POD_LAUNCHER_SERVICE_ACCOUNT = "airflow-serp-kubernetes-pod-launcher"
+KUBERNETES_POD_LAUNCHER_LABELS = {
+    "adapstory.com/serp-evidence-workload": "true",
+    "adapstory.com/serp-network-profile": "kubernetes-pod-launcher",
+    "component": "worker",
+    "release": "airflow",
+    "tier": "airflow",
+}
 _STATIC_CREDENTIAL_ENV_NAMES = (
     "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ACCESS_KEY",
     "ADAPSTORY_AIRFLOW_ARTIFACT_S3_SECRET_KEY",
@@ -106,6 +114,33 @@ def minio_web_identity_executor_config(
                     )
                 ],
                 service_account_name=service_account_name,
+                volumes=minio_web_identity_volumes(),
+            ),
+        )
+    }
+
+
+def kubernetes_pod_launcher_executor_config() -> dict[str, Any]:
+    """Build the sole executor override allowed to create child Kubernetes pods.
+
+    The controller receives a Kubernetes API token from its narrowly-bound
+    ServiceAccount. MinIO access remains a separate projected ``minio`` token,
+    never an ambient static credential or a Kubernetes API credential.
+    """
+
+    return {
+        "pod_override": k8s.V1Pod(
+            metadata=k8s.V1ObjectMeta(labels=dict(KUBERNETES_POD_LAUNCHER_LABELS)),
+            spec=k8s.V1PodSpec(
+                automount_service_account_token=True,
+                containers=[
+                    k8s.V1Container(
+                        name="base",
+                        env=minio_web_identity_env_vars(()),
+                        volume_mounts=minio_web_identity_volume_mounts(),
+                    )
+                ],
+                service_account_name=KUBERNETES_POD_LAUNCHER_SERVICE_ACCOUNT,
                 volumes=minio_web_identity_volumes(),
             ),
         )
