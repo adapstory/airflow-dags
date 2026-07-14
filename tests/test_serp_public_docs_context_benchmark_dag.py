@@ -45,3 +45,55 @@ def test_context_benchmark_dag_is_scheduled_in_cluster_and_never_dispatches_to_g
         "publish_context_benchmark_github_status",
         "enforce_context_benchmark_gate",
     ]
+
+
+def test_context_benchmark_scopes_github_status_token_to_its_single_task() -> None:
+    source = DAG_FILE.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(DAG_FILE))
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+
+    config = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "GITHUB_STATUS_EXECUTOR_CONFIG"
+            for target in node.targets
+        )
+    )
+    assert isinstance(config.value, ast.Call)
+    assert isinstance(config.value.func, ast.Name)
+    assert config.value.func.id == "task_secret_executor_config"
+    config_keywords = {keyword.arg: keyword.value for keyword in config.value.keywords}
+    assert isinstance(config_keywords["name"], ast.Constant)
+    assert config_keywords["name"].value == "ADAPSTORY_SERP_CONTEXT_BENCHMARK_GITHUB_TOKEN"
+    assert isinstance(config_keywords["secret_name"], ast.Constant)
+    assert config_keywords["secret_name"].value == "airflow-serp-github-status"
+    assert isinstance(config_keywords["secret_key"], ast.Constant)
+    assert config_keywords["secret_key"].value == "token"
+
+    publish_call = next(
+        call
+        for call in calls
+        if isinstance(call.func, ast.Name)
+        and call.func.id == "PythonOperator"
+        and any(
+            keyword.arg == "task_id"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value == "publish_context_benchmark_github_status"
+            for keyword in call.keywords
+        )
+    )
+    publish_keywords = {keyword.arg: keyword.value for keyword in publish_call.keywords}
+    assert isinstance(publish_keywords["executor_config"], ast.Name)
+    assert publish_keywords["executor_config"].id == "GITHUB_STATUS_EXECUTOR_CONFIG"
+
+    for call in calls:
+        if not (isinstance(call.func, ast.Name) and call.func.id == "PythonOperator"):
+            continue
+        keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+        task_id = keywords.get("task_id")
+        if not isinstance(task_id, ast.Constant) or not isinstance(task_id.value, str):
+            continue
+        if task_id.value != "publish_context_benchmark_github_status":
+            assert "executor_config" not in keywords

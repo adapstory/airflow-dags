@@ -6,12 +6,19 @@ from typing import Any
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
 
+from dags.serp_kubernetes_executor import task_secret_executor_config
 from dags.serp_public_docs_context_benchmark_contracts import (
     enforce_context_benchmark_gate,
     execute_context_benchmark,
     publish_context_benchmark_github_status,
     submit_context_benchmark_bc21_runs,
     write_context_benchmark_plan,
+)
+
+GITHUB_STATUS_EXECUTOR_CONFIG = task_secret_executor_config(
+    name="ADAPSTORY_SERP_CONTEXT_BENCHMARK_GITHUB_TOKEN",
+    secret_name="airflow-serp-github-status",
+    secret_key="token",
 )
 
 
@@ -71,6 +78,7 @@ publish_github_status = PythonOperator(
         "{{ ti.xcom_pull(task_ids='execute_context_benchmark') }}",
         "{{ ti.xcom_pull(task_ids='submit_context_benchmark_bc21_runs') }}",
     ],
+    executor_config=GITHUB_STATUS_EXECUTOR_CONFIG,
     dag=dag,
 )
 
