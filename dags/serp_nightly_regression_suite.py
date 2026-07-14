@@ -1,34 +1,75 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from airflow.configuration import conf
+from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
+from kubernetes.client import models as k8s
 
 from dags.serp_benchmark_catalog import mandatory_benchmark_adapters_ready
+from dags.serp_benchmark_catalog_workload import (
+    BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_LABELS,
+    BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT,
+    benchmark_catalog_acquisition_env_vars,
+)
 from dags.serp_eval_contracts import (
+    MANDATORY_SERP_BENCHMARK_SUITES,
     build_nightly_benchmark_export_cli_spec,
     build_nightly_registry_cli_spec,
     build_nightly_registry_submit_cli_spec,
     build_nightly_regression_plan,
     build_nightly_runner_cli_spec,
+    default_nightly_regression_conf,
     execute_gateway_cli_spec,
     governance_notification_pending,
-    materialize_live_benchmark_catalog_artifact,
+    load_materialized_benchmark_catalog_snapshot,
+    nightly_regression_runtime_ready,
     write_airflow_plan_artifact,
     write_nightly_suite_plan_artifact,
+)
+from dags.serp_web_seed_crawl_refresh import (
+    SERP_PIPELINE_RUNNER_RESOURCES,
+    current_airflow_runtime_image,
 )
 
 
 def validate_nightly_regression_plan(**context: Any) -> str:
     dag_run = context.get("dag_run")
-    conf = getattr(dag_run, "conf", None) or {}
+    conf = _nightly_regression_conf_with_defaults(getattr(dag_run, "conf", None) or {})
     return write_airflow_plan_artifact(build_nightly_regression_plan(conf))
+
+
+def _nightly_regression_conf_with_defaults(supplied_conf: dict[str, Any]) -> dict[str, Any]:
+    """Accept only a canonical suite assertion; D6 runtime context is deployment-owned."""
+
+    conf = dict(supplied_conf)
+    allowed_fields = {"generated_at", "selected_suite_ids"}
+    unexpected_fields = sorted(set(conf).difference(allowed_fields))
+    if unexpected_fields:
+        raise ValueError(
+            "D6 runtime context is GitOps-owned; dag_run.conf may only set generated_at "
+            "or assert the canonical selected_suite_ids"
+        )
+    selected_suite_ids = conf.get("selected_suite_ids")
+    if selected_suite_ids is not None and selected_suite_ids != list(
+        MANDATORY_SERP_BENCHMARK_SUITES
+    ):
+        raise ValueError("selected_suite_ids must include every mandatory suite")
+    generated_at = str(
+        conf.get("generated_at") or datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    )
+    return default_nightly_regression_conf(generated_at=generated_at)
 
 
 def run_mandatory_benchmark_suites(plan_json: str) -> dict[str, Any]:
     return execute_gateway_cli_spec(build_nightly_runner_cli_spec(plan_json))
+
+
+def load_materialized_benchmark_catalog(plan_json: str) -> dict[str, Any]:
+    return load_materialized_benchmark_catalog_snapshot(plan_json)
 
 
 def build_c1_benchmark_gate_export(plan_json: str) -> dict[str, Any]:
@@ -53,7 +94,11 @@ dag = DAG(
     "serp_nightly_regression_suite",
     default_args=default_args,
     description="SERP D6 nightly benchmark regression gate contract",
-    schedule="@daily" if mandatory_benchmark_adapters_ready() else None,
+    schedule=(
+        "@daily"
+        if mandatory_benchmark_adapters_ready() and nightly_regression_runtime_ready()
+        else None
+    ),
     catchup=False,
     render_template_as_native_obj=True,
     tags=["serp", "evals", "benchmark", "bc21"],
@@ -65,9 +110,39 @@ validate_plan = PythonOperator(
     dag=dag,
 )
 
-materialize_catalog = PythonOperator(
+materialize_catalog = KubernetesPodOperator(
     task_id="materialize_live_benchmark_catalog",
-    python_callable=materialize_live_benchmark_catalog_artifact,
+    name="serp-mandatory-benchmark-catalog-acquisition",
+    namespace=conf.get("kubernetes_executor", "namespace"),
+    image=current_airflow_runtime_image(),
+    cmds=["python", "-m", "dags.serp_benchmark_catalog_materializer"],
+    arguments=[
+        "--plan-json-urlencoded",
+        "{{ ti.xcom_pull(task_ids='validate_nightly_regression_plan') | urlencode }}",
+    ],
+    env_vars=benchmark_catalog_acquisition_env_vars(),
+    service_account_name=BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT,
+    automount_service_account_token=False,
+    labels=BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_LABELS,
+    container_resources=SERP_PIPELINE_RUNNER_RESOURCES,
+    container_security_context=k8s.V1SecurityContext(
+        allow_privilege_escalation=False,
+        capabilities=k8s.V1Capabilities(drop=["ALL"]),
+    ),
+    get_logs=True,
+    log_events_on_failure=True,
+    random_name_suffix=True,
+    reattach_on_restart=True,
+    on_kill_action="keep_pod",
+    on_finish_action="delete_pod",
+    retries=1,
+    retry_delay=timedelta(seconds=5),
+    dag=dag,
+)
+
+load_catalog = PythonOperator(
+    task_id="load_materialized_benchmark_catalog",
+    python_callable=load_materialized_benchmark_catalog,
     op_args=["{{ ti.xcom_pull(task_ids='validate_nightly_regression_plan') }}"],
     dag=dag,
 )
@@ -77,7 +152,7 @@ write_suite_plan = PythonOperator(
     python_callable=write_nightly_suite_plan_artifact,
     op_args=[
         "{{ ti.xcom_pull(task_ids='validate_nightly_regression_plan') }}",
-        "{{ ti.xcom_pull(task_ids='materialize_live_benchmark_catalog') }}",
+        "{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog') }}",
     ],
     dag=dag,
 )
@@ -120,6 +195,7 @@ notify_governance = PythonOperator(
 (
     validate_plan
     >> materialize_catalog
+    >> load_catalog
     >> write_suite_plan
     >> run_suites
     >> build_benchmark_export

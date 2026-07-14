@@ -3,16 +3,27 @@
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from airflow.configuration import conf
+from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
+from kubernetes.client import models as k8s
 
+from dags.serp_benchmark_catalog_workload import (
+    BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_LABELS,
+    BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT,
+    benchmark_catalog_acquisition_env_vars,
+)
 from dags.serp_eval_contracts import (
     build_mandatory_benchmark_dataset_evidence_plan,
-    materialize_live_benchmark_catalog_artifact,
     write_airflow_plan_artifact,
+)
+from dags.serp_web_seed_crawl_refresh import (
+    SERP_PIPELINE_RUNNER_RESOURCES,
+    current_airflow_runtime_image,
 )
 
 
@@ -57,10 +68,36 @@ validate_plan = PythonOperator(
     dag=dag,
 )
 
-materialize_evidence = PythonOperator(
+materialize_evidence = KubernetesPodOperator(
     task_id="materialize_mandatory_benchmark_dataset_evidence",
-    python_callable=materialize_live_benchmark_catalog_artifact,
-    op_args=["{{ ti.xcom_pull(task_ids='validate_mandatory_benchmark_dataset_evidence_plan') }}"],
+    name="serp-mandatory-benchmark-dataset-acquisition",
+    namespace=conf.get("kubernetes_executor", "namespace"),
+    image=current_airflow_runtime_image(),
+    cmds=["python", "-m", "dags.serp_benchmark_catalog_materializer"],
+    arguments=[
+        "--plan-json-urlencoded",
+        (
+            "{{ ti.xcom_pull(task_ids='validate_mandatory_benchmark_dataset_evidence_plan') "
+            "| urlencode }}"
+        ),
+    ],
+    env_vars=benchmark_catalog_acquisition_env_vars(),
+    service_account_name=BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT,
+    automount_service_account_token=False,
+    labels=BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_LABELS,
+    container_resources=SERP_PIPELINE_RUNNER_RESOURCES,
+    container_security_context=k8s.V1SecurityContext(
+        allow_privilege_escalation=False,
+        capabilities=k8s.V1Capabilities(drop=["ALL"]),
+    ),
+    get_logs=True,
+    log_events_on_failure=True,
+    random_name_suffix=True,
+    reattach_on_restart=True,
+    on_kill_action="keep_pod",
+    on_finish_action="delete_pod",
+    retries=1,
+    retry_delay=timedelta(seconds=5),
     dag=dag,
 )
 

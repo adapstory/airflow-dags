@@ -7,6 +7,7 @@ import json
 import sys
 import types
 from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from email.message import Message
 from hashlib import sha256
 from pathlib import Path
@@ -42,6 +43,7 @@ from dags.serp_eval_contracts import (
     build_tenant_golden_registry_cli_spec,
     build_tenant_golden_regression_plan,
     build_tenant_golden_runner_cli_spec,
+    default_nightly_regression_conf,
     default_public_docs_seed_refresh_conf,
     discover_public_docs_crawler_frontier,
     dispatch_public_docs_seed_refresh_handoff,
@@ -49,6 +51,7 @@ from dags.serp_eval_contracts import (
     evaluate_tenant_golden_gate,
     execute_gateway_cli_spec,
     execute_pipeline_cli_spec,
+    load_materialized_benchmark_catalog_snapshot,
     load_public_docs_crawl_state_conf,
     materialize_live_benchmark_catalog_artifact,
     submit_public_docs_bc21_pipeline_state_artifact,
@@ -373,6 +376,10 @@ def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:
         "benchmark_catalog": (
             f"/var/opt/adapstory/serp-evals/{plan.payload['operation_id']}/benchmark-catalog.json"
         ),
+        "benchmark_catalog_receipt": (
+            "/var/opt/adapstory/serp-evals/"
+            f"{plan.payload['operation_id']}/benchmark-catalog-materialization-receipt.json"
+        ),
         "suite_plan": (
             f"/var/opt/adapstory/serp-evals/{plan.payload['operation_id']}/suite-plan.json"
         ),
@@ -381,6 +388,7 @@ def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:
     assert [task["task_id"] for task in plan.payload["tasks"]] == [
         "validate_nightly_regression_plan",
         "materialize_live_benchmark_catalog",
+        "load_materialized_benchmark_catalog",
         "write_nightly_suite_plan",
         "run_mandatory_benchmark_suites",
         "build_c1_benchmark_gate_export",
@@ -407,6 +415,34 @@ def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:
         build_nightly_regression_plan(unsafe_bc21_base_url)
 
 
+def test_default_nightly_regression_conf_is_runtime_owned_and_canonical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_defaults = {
+        "ADAPSTORY_AIRFLOW_ARTIFACT_ROOT": "s3://airflow-serp-evidence/serp-evals",
+        "ADAPSTORY_SERP_BC21_BASE_URL": "http://serp-context-platform.env-dev.svc.cluster.local",
+        "ADAPSTORY_SERP_D6_ACTOR_ID": "airflow-serp-eval-runner",
+        "ADAPSTORY_SERP_D6_PACK_VERSION_IDS": json.dumps([PACK_VERSION_ID]),
+        "ADAPSTORY_SERP_D6_REGISTRY_RESOURCE_ID": REGISTRY_RESOURCE_ID,
+        "ADAPSTORY_SERP_D6_REGISTRY_RESOURCE_TYPE": "workflow",
+        "ADAPSTORY_SERP_D6_RERANKER_PROFILE_VERSION": "reranker@2026.07.1",
+        "ADAPSTORY_SERP_D6_RETRIEVAL_PROFILE_VERSION": "hybrid@2026.07.1",
+        "ADAPSTORY_SERP_D6_TENANT_ID": TENANT_ID,
+    }
+    for name, value in runtime_defaults.items():
+        monkeypatch.setenv(name, value)
+
+    conf = default_nightly_regression_conf(generated_at="2026-07-14T08:00:00Z")
+    plan = build_nightly_regression_plan(conf)
+
+    assert conf["selected_suite_ids"] == list(MANDATORY_SERP_BENCHMARK_SUITES)
+    assert plan.payload["selected_suite_ids"] == list(MANDATORY_SERP_BENCHMARK_SUITES)
+
+    monkeypatch.delenv("ADAPSTORY_SERP_D6_PACK_VERSION_IDS")
+    with pytest.raises(ValueError, match="ADAPSTORY_SERP_D6_PACK_VERSION_IDS is required"):
+        default_nightly_regression_conf(generated_at="2026-07-14T08:00:00Z")
+
+
 def test_mandatory_benchmark_dataset_evidence_plan_is_isolated_from_scoring() -> None:
     plan = build_mandatory_benchmark_dataset_evidence_plan(
         {
@@ -425,6 +461,10 @@ def test_mandatory_benchmark_dataset_evidence_plan_is_isolated_from_scoring() ->
         "benchmark_catalog": (
             "s3://airflow-serp-artifacts/serp-evals/"
             f"{plan.payload['operation_id']}/benchmark-catalog.json"
+        ),
+        "benchmark_catalog_receipt": (
+            "s3://airflow-serp-artifacts/serp-evals/"
+            f"{plan.payload['operation_id']}/benchmark-catalog-materialization-receipt.json"
         ),
     }
     assert [task["task_id"] for task in plan.payload["tasks"]] == [
@@ -546,6 +586,96 @@ def test_nightly_catalog_materialization_writes_all_live_legal_evidence_before_b
     ]
     assert written[-1]["artifact_path"] == plan.payload["artifact_paths"]["benchmark_catalog"]
     assert len(written) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 3) + 1
+
+
+def test_load_materialized_catalog_binds_receipt_and_catalog_s3_versions() -> None:
+    plan = build_nightly_regression_plan(
+        {**_nightly_conf(), "artifact_root_path": "s3://airflow-serp-evidence/serp-evals"}
+    )
+    catalog_path = plan.payload["artifact_paths"]["benchmark_catalog"]
+    receipt_path = plan.payload["artifact_paths"]["benchmark_catalog_receipt"]
+    blocking_suite_ids = [
+        suite_id for suite_id in MANDATORY_SERP_BENCHMARK_SUITES if suite_id != "BEIR"
+    ]
+    catalog_payload = {
+        "catalog_status": "blocked",
+        "suites": [
+            {
+                "execution_status": "ready" if suite_id == "BEIR" else "adapter-unavailable",
+                "suite_id": suite_id,
+            }
+            for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+        ],
+    }
+    catalog_bytes = json.dumps(catalog_payload, sort_keys=True).encode("utf-8")
+    receipt_payload = {
+        "catalogSnapshot": {
+            "artifactPath": catalog_path,
+            "artifactSha256": sha256(catalog_bytes).hexdigest(),
+            "artifactVersionId": "catalog-v1",
+            "blockingSuiteIds": blocking_suite_ids,
+            "catalogStatus": "blocked",
+            "objectLockMode": "COMPLIANCE",
+        },
+        "contractVersion": "serp-benchmark-catalog-materializer/v1",
+        "dagId": "serp_nightly_regression_suite",
+        "operationId": plan.payload["operation_id"],
+    }
+
+    class Body:
+        def __init__(self, payload: bytes) -> None:
+            self.payload = payload
+
+        def read(self) -> bytes:
+            return self.payload
+
+    class FakeS3Client:
+        def head_object(
+            self,
+            *,
+            Bucket: str,
+            Key: str,
+            VersionId: str | None = None,
+        ) -> dict[str, object]:
+            assert Bucket == "airflow-serp-evidence"
+            if Key == receipt_path.removeprefix("s3://airflow-serp-evidence/"):
+                assert VersionId is None
+                return {
+                    "ObjectLockMode": "COMPLIANCE",
+                    "ObjectLockRetainUntilDate": datetime.now(UTC) + timedelta(days=1),
+                    "VersionId": "receipt-v1",
+                }
+            assert Key == catalog_path.removeprefix("s3://airflow-serp-evidence/")
+            assert VersionId == "catalog-v1"
+            return {
+                "ObjectLockMode": "COMPLIANCE",
+                "ObjectLockRetainUntilDate": datetime.now(UTC) + timedelta(days=1),
+                "VersionId": "catalog-v1",
+            }
+
+        def get_object(
+            self,
+            *,
+            Bucket: str,
+            Key: str,
+            VersionId: str,
+        ) -> dict[str, object]:
+            assert Bucket == "airflow-serp-evidence"
+            if VersionId == "receipt-v1":
+                assert Key == receipt_path.removeprefix("s3://airflow-serp-evidence/")
+                return {"Body": Body(json.dumps(receipt_payload, sort_keys=True).encode("utf-8"))}
+            assert VersionId == "catalog-v1"
+            assert Key == catalog_path.removeprefix("s3://airflow-serp-evidence/")
+            return {"Body": Body(catalog_bytes)}
+
+    snapshot = load_materialized_benchmark_catalog_snapshot(
+        plan.to_canonical_json(),
+        s3_client=FakeS3Client(),
+    )
+
+    assert snapshot["artifactVersionId"] == "catalog-v1"
+    assert snapshot["catalogReceiptVersionId"] == "receipt-v1"
+    assert snapshot["blockingSuiteIds"] == blocking_suite_ids
 
 
 def test_build_nightly_regression_plan_accepts_s3_artifact_root_from_env(
@@ -4674,6 +4804,7 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
             [
                 "validate_nightly_regression_plan",
                 "materialize_live_benchmark_catalog",
+                "load_materialized_benchmark_catalog",
                 "write_nightly_suite_plan",
                 "run_mandatory_benchmark_suites",
                 "build_c1_benchmark_gate_export",
@@ -4776,6 +4907,20 @@ def test_serp_dag_files_declare_expected_airflow_contracts(
         assert _keyword_values(tree, "KubernetesPodOperator", "task_id") == [
             "run_paired_benchmark_evaluation"
         ]
+    elif dag_id == "serp_nightly_regression_suite":
+        assert _keyword_values(tree, "PythonOperator", "task_id") == [
+            task_id for task_id in task_ids if task_id != "materialize_live_benchmark_catalog"
+        ]
+        assert _keyword_values(tree, "KubernetesPodOperator", "task_id") == [
+            "materialize_live_benchmark_catalog"
+        ]
+    elif dag_id == "serp_mandatory_benchmark_dataset_evidence_snapshot":
+        assert _keyword_values(tree, "PythonOperator", "task_id") == [
+            "validate_mandatory_benchmark_dataset_evidence_plan"
+        ]
+        assert _keyword_values(tree, "KubernetesPodOperator", "task_id") == [
+            "materialize_mandatory_benchmark_dataset_evidence"
+        ]
     else:
         assert _keyword_values(tree, "PythonOperator", "task_id") == task_ids
     assert "external_runner_pending" not in source
@@ -4806,7 +4951,12 @@ def test_serp_nightly_dag_uses_live_gateway_cli_for_d6_path() -> None:
     source = (REPO_ROOT / "dags" / "serp_nightly_regression_suite.py").read_text(encoding="utf-8")
 
     assert "write_nightly_suite_plan_artifact" in source
-    assert "materialize_live_benchmark_catalog_artifact" in source
+    assert "load_materialized_benchmark_catalog_snapshot" in source
+    assert "materialize_catalog = KubernetesPodOperator(" in source
+    assert "BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT" in source
+    assert "BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_LABELS" in source
+    assert "benchmark_catalog_acquisition_env_vars" in source
+    assert "materialize_live_benchmark_catalog_artifact" not in source
     assert "execute_gateway_cli_spec" in source
     assert "build_nightly_runner_cli_spec" in source
     assert "build_nightly_benchmark_export_cli_spec" in source
@@ -4819,7 +4969,9 @@ def test_serp_nightly_dag_schedules_only_after_all_adapters_are_ready() -> None:
     source = (REPO_ROOT / "dags" / "serp_nightly_regression_suite.py").read_text(encoding="utf-8")
 
     assert "mandatory_benchmark_adapters_ready" in source
-    assert 'schedule="@daily" if mandatory_benchmark_adapters_ready() else None' in source
+    assert "default_nightly_regression_conf" in source
+    assert "nightly_regression_runtime_ready" in source
+    assert "mandatory_benchmark_adapters_ready() and nightly_regression_runtime_ready()" in source
 
 
 def test_serp_public_docs_dag_runs_default_seed_registry_pipeline_path() -> None:
@@ -5609,7 +5761,6 @@ def _improvement_wave_conf() -> dict[str, object]:
         "selected_suite_ids": list(MANDATORY_SERP_BENCHMARK_SUITES),
         "tenant_id": TENANT_ID,
     }
-
 
 
 def _public_docs_seed_refresh_conf() -> dict[str, Any]:

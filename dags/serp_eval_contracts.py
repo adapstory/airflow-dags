@@ -116,6 +116,16 @@ _PUBLIC_DOCS_NEO4J_DATABASE_ENV = "ADAPSTORY_SERP_PUBLIC_DOCS_NEO4J_DATABASE"
 _PUBLIC_DOCS_SOURCE_PROXY_URL_ENV = "ADAPSTORY_SERP_SOURCE_PROXY_URL"
 _BC21_BASE_URL_ENV = "ADAPSTORY_SERP_BC21_BASE_URL"
 _BC21_SERVICE_ACCOUNT_TOKEN_PATH_ENV = "ADAPSTORY_SERP_SERVICE_ACCOUNT_TOKEN_PATH"
+_NIGHTLY_REGRESSION_RUNTIME_ENV = {
+    "actor_id": "ADAPSTORY_SERP_D6_ACTOR_ID",
+    "pack_version_ids": "ADAPSTORY_SERP_D6_PACK_VERSION_IDS",
+    "registry_resource_id": "ADAPSTORY_SERP_D6_REGISTRY_RESOURCE_ID",
+    "registry_resource_type": "ADAPSTORY_SERP_D6_REGISTRY_RESOURCE_TYPE",
+    "reranker_profile_version": "ADAPSTORY_SERP_D6_RERANKER_PROFILE_VERSION",
+    "retrieval_profile_version": "ADAPSTORY_SERP_D6_RETRIEVAL_PROFILE_VERSION",
+    "tenant_id": "ADAPSTORY_SERP_D6_TENANT_ID",
+}
+_NIGHTLY_REGRESSION_SCHEDULE_PROBE_AT = "2026-01-01T00:00:00Z"
 _DEFAULT_SERVICE_ACCOUNT_TOKEN_PATH = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
 _PUBLIC_DOCS_DEFAULT_QDRANT_COLLECTION = "serp_vectors_dev"
 _PUBLIC_DOCS_DEFAULT_OPENSEARCH_INDEX = "serp_lexical_dev"
@@ -432,6 +442,82 @@ def _validate_nightly_suite_metric_records(
         raise ValueError("metric_observations must exactly match non-retrieval metric references")
 
 
+def default_nightly_regression_conf(
+    *,
+    generated_at: str,
+    environment: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Return the D6 schedule context from GitOps-owned runtime configuration.
+
+    Suite selection is deliberately never configurable: a scheduled D6 run is
+    the canonical mandatory-suite matrix or it does not run.  The remaining
+    identity and retrieval envelope is supplied by the Airflow deployment,
+    rather than a mutable ``DagRun.conf`` payload.
+    """
+
+    values = os.environ if environment is None else environment
+    raw_pack_version_ids = _required_environment_value(
+        values, _NIGHTLY_REGRESSION_RUNTIME_ENV["pack_version_ids"]
+    )
+    try:
+        pack_version_ids = json.loads(raw_pack_version_ids)
+    except json.JSONDecodeError as exc:
+        raise ValueError("ADAPSTORY_SERP_D6_PACK_VERSION_IDS must be a JSON array") from exc
+    if not isinstance(pack_version_ids, list) or not all(
+        isinstance(value, str) and value.strip() for value in pack_version_ids
+    ):
+        raise ValueError("ADAPSTORY_SERP_D6_PACK_VERSION_IDS must be a non-empty JSON string array")
+    return {
+        "actor_id": _required_environment_value(
+            values, _NIGHTLY_REGRESSION_RUNTIME_ENV["actor_id"]
+        ),
+        "artifact_root_path": _required_environment_value(values, _ARTIFACT_ROOT_ENV),
+        "bc21_base_url": _required_environment_value(values, _BC21_BASE_URL_ENV),
+        "generated_at": _required_datetime_string({"generated_at": generated_at}, "generated_at"),
+        "pack_version_ids": pack_version_ids,
+        "registry_resource_id": _required_environment_value(
+            values, _NIGHTLY_REGRESSION_RUNTIME_ENV["registry_resource_id"]
+        ),
+        "registry_resource_type": _required_environment_value(
+            values, _NIGHTLY_REGRESSION_RUNTIME_ENV["registry_resource_type"]
+        ),
+        "reranker_profile_version": _required_environment_value(
+            values, _NIGHTLY_REGRESSION_RUNTIME_ENV["reranker_profile_version"]
+        ),
+        "retrieval_profile_version": _required_environment_value(
+            values, _NIGHTLY_REGRESSION_RUNTIME_ENV["retrieval_profile_version"]
+        ),
+        "selected_suite_ids": list(MANDATORY_SERP_BENCHMARK_SUITES),
+        "tenant_id": _required_environment_value(
+            values, _NIGHTLY_REGRESSION_RUNTIME_ENV["tenant_id"]
+        ),
+    }
+
+
+def nightly_regression_runtime_ready(
+    environment: Mapping[str, str] | None = None,
+) -> bool:
+    """Report whether a scheduled D6 run has a complete, valid runtime envelope."""
+
+    try:
+        build_nightly_regression_plan(
+            default_nightly_regression_conf(
+                generated_at=_NIGHTLY_REGRESSION_SCHEDULE_PROBE_AT,
+                environment=environment,
+            )
+        )
+    except ValueError:
+        return False
+    return True
+
+
+def _required_environment_value(environment: Mapping[str, str], name: str) -> str:
+    value = environment.get(name)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} is required")
+    return value.strip()
+
+
 def build_nightly_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
     payload = _payload(conf)
     _reject_raw_secrets(payload)
@@ -469,6 +555,10 @@ def build_nightly_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
                 ("benchmark_gate_export", "benchmark-gate-export.json"),
                 ("benchmark_catalog", "benchmark-catalog.json"),
                 (
+                    "benchmark_catalog_receipt",
+                    "benchmark-catalog-materialization-receipt.json",
+                ),
+                (
                     "nightly_registry_submissions",
                     "nightly-registry-submissions.json",
                 ),
@@ -490,6 +580,7 @@ def build_nightly_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
             (
                 "validate_nightly_regression_plan",
                 "materialize_live_benchmark_catalog",
+                "load_materialized_benchmark_catalog",
                 "write_nightly_suite_plan",
                 "run_mandatory_benchmark_suites",
                 "build_c1_benchmark_gate_export",
@@ -536,6 +627,10 @@ def build_mandatory_benchmark_dataset_evidence_plan(conf: Mapping[str, Any]) -> 
                 (
                     ("airflow_plan", "airflow-plan.json"),
                     ("benchmark_catalog", "benchmark-catalog.json"),
+                    (
+                        "benchmark_catalog_receipt",
+                        "benchmark-catalog-materialization-receipt.json",
+                    ),
                 ),
             ),
             "dag_id": "serp_mandatory_benchmark_dataset_evidence_snapshot",
@@ -1457,6 +1552,135 @@ def materialize_live_benchmark_catalog_artifact(
         if _required_str(suite, "execution_status") != "ready"
     ]
     return result
+
+
+def load_materialized_benchmark_catalog_snapshot(
+    plan_json: Mapping[str, Any] | str,
+    *,
+    s3_client: Any | None = None,
+) -> dict[str, Any]:
+    """Load a KPO-produced catalog receipt and bind the catalog's exact S3 version.
+
+    The scheduler never trusts pod stdout as benchmark provenance.  It reads the
+    receipt from the isolated executor's WORM path, then checks the receipt's
+    catalog VersionId, SHA-256, status, and blocking suites against the exact
+    catalog object before handing it to the D6 suite-plan writer.
+    """
+
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") not in {
+        "serp_nightly_regression_suite",
+        "serp_mandatory_benchmark_dataset_evidence_snapshot",
+    }:
+        raise ValueError("plan dag_id does not match benchmark catalog receipt loader")
+    artifact_paths = _required_artifact_paths(
+        plan,
+        ("benchmark_catalog", "benchmark_catalog_receipt"),
+    )
+    client = s3_client or _s3_client()
+    receipt_bytes, receipt_version_id = _read_compliance_locked_s3_bytes(
+        client,
+        artifact_paths["benchmark_catalog_receipt"],
+        field_name="benchmark_catalog_receipt",
+    )
+    try:
+        receipt = _json_object(
+            receipt_bytes.decode("utf-8"),
+            "benchmark_catalog_materialization_receipt",
+        )
+    except UnicodeDecodeError as exc:
+        raise ValueError("benchmark catalog materialization receipt is not UTF-8 JSON") from exc
+    if _required_str(receipt, "contractVersion") != "serp-benchmark-catalog-materializer/v1":
+        raise ValueError("benchmark catalog materialization receipt contract is unsupported")
+    if _required_str(receipt, "dagId") != _required_str(plan, "dag_id"):
+        raise ValueError("benchmark catalog materialization receipt dagId does not match plan")
+    if _required_str(receipt, "operationId") != _required_str(plan, "operation_id"):
+        raise ValueError(
+            "benchmark catalog materialization receipt operationId does not match plan"
+        )
+    catalog_snapshot = dict(_required_mapping(receipt, "catalogSnapshot"))
+    if _required_str(catalog_snapshot, "artifactPath") != artifact_paths["benchmark_catalog"]:
+        raise ValueError("benchmark catalog receipt must match the plan artifact path")
+    catalog_version_id = _required_str(catalog_snapshot, "artifactVersionId")
+    if _required_str(catalog_snapshot, "objectLockMode") != "COMPLIANCE":
+        raise ValueError("benchmark catalog receipt must use COMPLIANCE object lock")
+    catalog_bytes, observed_catalog_version_id = _read_compliance_locked_s3_bytes(
+        client,
+        artifact_paths["benchmark_catalog"],
+        field_name="benchmark_catalog",
+        version_id=catalog_version_id,
+    )
+    if observed_catalog_version_id != catalog_version_id:
+        raise ValueError("benchmark catalog receipt VersionId does not match catalog object")
+    if sha256(catalog_bytes).hexdigest() != _required_str(catalog_snapshot, "artifactSha256"):
+        raise ValueError("benchmark catalog receipt SHA-256 does not match catalog object")
+    try:
+        catalog = _json_object(catalog_bytes.decode("utf-8"), "benchmark_catalog")
+    except UnicodeDecodeError as exc:
+        raise ValueError("benchmark catalog object is not UTF-8 JSON") from exc
+    if _required_str(catalog, "catalog_status") != _required_str(catalog_snapshot, "catalogStatus"):
+        raise ValueError("benchmark catalog receipt status does not match catalog object")
+    suites = _required_object_list(catalog, "suites")
+    suite_ids = [_required_str(suite, "suite_id") for suite in suites]
+    if suite_ids != list(MANDATORY_SERP_BENCHMARK_SUITES):
+        raise ValueError(
+            "benchmark catalog object must contain mandatory suites in canonical order"
+        )
+    actual_blocking_suite_ids = [
+        _required_str(suite, "suite_id")
+        for suite in suites
+        if _required_str(suite, "execution_status") != "ready"
+    ]
+    if actual_blocking_suite_ids != _required_str_list(catalog_snapshot, "blockingSuiteIds"):
+        raise ValueError("benchmark catalog receipt blocking suites do not match catalog object")
+    return {
+        **catalog_snapshot,
+        "catalogReceiptPath": artifact_paths["benchmark_catalog_receipt"],
+        "catalogReceiptVersionId": receipt_version_id,
+    }
+
+
+def _read_compliance_locked_s3_bytes(
+    s3_client: Any,
+    artifact_path: str,
+    *,
+    field_name: str,
+    version_id: str | None = None,
+) -> tuple[bytes, str]:
+    artifact = _artifact_ref(field_name, artifact_path)
+    if artifact.kind != "s3":
+        raise ValueError(f"{field_name} must be an s3:// immutable artifact")
+    bucket = _required_str_ref(artifact.bucket)
+    key = _required_str_ref(artifact.key)
+    head_kwargs: dict[str, str] = {"Bucket": bucket, "Key": key}
+    if version_id is not None:
+        head_kwargs["VersionId"] = version_id
+    head = s3_client.head_object(**head_kwargs)
+    if not isinstance(head, Mapping):
+        raise ValueError(f"{field_name} HeadObject response is invalid")
+    observed_version_id = head.get("VersionId")
+    if not isinstance(observed_version_id, str) or not observed_version_id.strip():
+        raise ValueError(f"{field_name} HeadObject is missing VersionId")
+    if version_id is not None and observed_version_id != version_id:
+        raise ValueError(f"{field_name} HeadObject VersionId does not match requested version")
+    if head.get("ObjectLockMode") != "COMPLIANCE":
+        raise ValueError(f"{field_name} must use COMPLIANCE object lock")
+    retain_until = head.get("ObjectLockRetainUntilDate")
+    if not isinstance(retain_until, datetime) or retain_until.tzinfo is None:
+        raise ValueError(f"{field_name} must include a retention timestamp")
+    if retain_until.astimezone(UTC) <= datetime.now(UTC):
+        raise ValueError(f"{field_name} retention is expired")
+    response = s3_client.get_object(Bucket=bucket, Key=key, VersionId=observed_version_id)
+    if not isinstance(response, Mapping):
+        raise ValueError(f"{field_name} GetObject response is invalid")
+    body = response.get("Body")
+    if body is None or not hasattr(body, "read"):
+        raise ValueError(f"{field_name} GetObject response is missing Body")
+    payload = body.read()
+    if not isinstance(payload, bytes) or not payload:
+        raise ValueError(f"{field_name} object is empty")
+    return payload, observed_version_id
 
 
 def _fetch_https_bytes(url: str) -> bytes:
@@ -4970,7 +5194,6 @@ def _validate_benchmark_export_payload(payload: Mapping[str, Any]) -> None:
             raise ValueError("benchmark export includes a non-passing suite")
         if float(_required_str(item, "normalizedScore")) < SERP_NORMALIZED_GATE_FLOOR:
             raise ValueError("benchmark export normalized score is below gate floor")
-
 
 
 def _improvement_replay_context(
