@@ -110,6 +110,7 @@ dag = DAG(
     description="SERP D19 benchmark ratchet keep/discard contract",
     schedule=None,
     catchup=False,
+    is_paused_upon_creation=False,
     tags=["serp", "evals", "benchmark", "improvement"],
 )
 

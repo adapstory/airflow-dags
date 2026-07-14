@@ -5180,9 +5180,10 @@ def test_serp_public_docs_dag_serializes_manual_and_nightly_runs() -> None:
         "serp_web_seed_crawl_refresh.py",
         "serp_publish_signed_pack.py",
         "serp_mandatory_benchmark_dataset_evidence_snapshot.py",
+        "serp_benchmark_improvement_wave.py",
     ),
 )
-def test_public_docs_dags_are_unpaused_when_airflow_creates_them(dag_file: str) -> None:
+def test_serp_operational_dags_are_unpaused_when_airflow_creates_them(dag_file: str) -> None:
     source = (REPO_ROOT / "dags" / dag_file).read_text(encoding="utf-8")
     tree = ast.parse(source)
     dag_call = next(
