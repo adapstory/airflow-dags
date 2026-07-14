@@ -711,6 +711,42 @@ def test_nightly_provenance_requires_internal_only_boundary_for_unverified_right
         serp_eval_contracts_module._validate_nightly_benchmark_suite_provenance(metadata)
 
 
+def test_nightly_metric_compatibility_requires_immutable_matrix_version() -> None:
+    suites = [
+        _nightly_benchmark_suite_input(suite_id) for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+    ]
+    cast(dict[str, object], suites[0]["metric_compatibility"]).pop("matrix_version_id")
+
+    with pytest.raises(ValueError, match="matrix_version_id is required"):
+        serp_eval_contracts_module._required_nightly_benchmark_suite_inputs(
+            {"benchmark_suite_inputs": suites},
+            selected_suite_ids=MANDATORY_SERP_BENCHMARK_SUITES,
+        )
+
+
+def test_airflow_registry_submission_preserves_d6_executable_provenance() -> None:
+    suite = serp_eval_contracts_module._suite_result_from_suite_plan(
+        _nightly_benchmark_suite_input("BEIR")
+    )
+    submission = serp_eval_contracts_module._live_registry_submission(
+        {
+            "operation_id": "serp-nightly-fixture",
+            "registry_resource_id": REGISTRY_RESOURCE_ID,
+            "registry_resource_type": "workflow",
+            "tenant_id": TENANT_ID,
+        },
+        suite,
+        "retrieval",
+        "airflow-serp-eval-runner",
+    )
+
+    assert submission["body"]["evaluationContractCode"] == "d6-evidence-2026.07.3"
+    assert submission["body"]["provenance"]["adapterId"] == "fixture-beir"
+    assert submission["body"]["provenance"]["metricCompatibilityVersionId"] == (
+        "fixture-metric-compatibility-version"
+    )
+
+
 def test_build_online_eval_rollup_plan_materializes_d7_contract(tmp_path: Path) -> None:
     conf = _online_eval_rollup_conf()
     conf["artifact_root_path"] = str(tmp_path)
@@ -5363,6 +5399,7 @@ def _nightly_metric_compatibility(
         "contract_version": "serp-suite-metric-compatibility/v1",
         "matrix_sha256": "sha256:" + "e" * 64,
         "matrix_uri": "s3://airflow-serp-artifacts/benchmark-fixtures/metric-compatibility.json",
+        "matrix_version_id": "fixture-metric-compatibility-version",
         "requirements": [
             {
                 "metric_families": (
@@ -5612,6 +5649,7 @@ def _improvement_metric_compatibility(
         "contractVersion": "serp-suite-metric-compatibility/v1",
         "matrixSha256": "sha256:" + "9" * 64,
         "matrixUri": "s3://airflow-serp-artifacts/fixtures/metric-compatibility.json",
+        "matrixVersionId": "fixture-metric-compatibility-version",
         "requirements": [
             {"metricFamilies": list(metric_families), "suiteCode": suite_id}
             for suite_id in MANDATORY_SERP_BENCHMARK_SUITES

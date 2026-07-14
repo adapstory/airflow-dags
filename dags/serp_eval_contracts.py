@@ -56,6 +56,7 @@ _PIPELINE_CLI_CONTRACT_VERSION = "serp-airflow-pipeline-cli-bridge/v1"
 _AIRFLOW_ARTIFACT_CONTRACT_VERSION = "serp-airflow-artifact-writer/v1"
 _EVAL_CONTRACT_VERSION = "2026.07.2"
 _BENCHMARK_SUITE_CONTRACT_VERSION = "2026.07.3"
+_BENCHMARK_EVALUATION_CONTRACT_CODE = "d6-evidence-2026.07.3"
 _METRIC_COMPATIBILITY_CONTRACT_VERSION = "serp-suite-metric-compatibility/v1"
 _BENCHMARK_METRIC_FAMILIES = ("retrieval", "answer-quality", "citation", "policy")
 _STRICT_PRIMARY_RETRIEVAL_METRICS = frozenset({"MRR@10", "nDCG@10"})
@@ -306,6 +307,7 @@ def _required_nightly_benchmark_suite_inputs(
             contract_version_field="contract_version",
             matrix_uri_field="matrix_uri",
             matrix_sha256_field="matrix_sha256",
+            matrix_version_id_field="matrix_version_id",
             suite_id_field="suite_id",
             metric_families_field="metric_families",
         )
@@ -4452,6 +4454,7 @@ def _suite_result_from_suite_plan(suite: Mapping[str, Any]) -> dict[str, Any]:
         contract_version_field="contract_version",
         matrix_uri_field="matrix_uri",
         matrix_sha256_field="matrix_sha256",
+        matrix_version_id_field="matrix_version_id",
         suite_id_field="suite_id",
         metric_families_field="metric_families",
     )
@@ -4623,11 +4626,13 @@ def _live_registry_submission(
             }
             for metric in metrics
         ],
+        "evaluationContractCode": _BENCHMARK_EVALUATION_CONTRACT_CODE,
         "metricFamily": metric_family,
+        "provenance": _benchmark_run_provenance(suite),
         "referenceSourceType": "official_baseline",
         "resourceId": _required_str(report, "registry_resource_id"),
         "resourceType": _required_resource_type(report, "registry_resource_type"),
-        "runnerVersion": "airflow-d6-serp-eval-runner@2026.07.2",
+        "runnerVersion": "airflow-d6-serp-eval-runner@2026.07.3",
         "scoringAlgorithmVersion": f"airflow-d6-eval-contract@{_EVAL_CONTRACT_VERSION}",
         "suiteCode": suite_code,
         "suiteVersion": _required_str(suite, "suite_version"),
@@ -4654,6 +4659,31 @@ def _live_registry_submission(
         "suiteCode": suite_code,
         "tenantId": _required_str(report, "tenant_id"),
         "trustedActorId": actor_id,
+    }
+
+
+def _benchmark_run_provenance(suite: Mapping[str, Any]) -> dict[str, str]:
+    metadata = _required_mapping(suite, "metadata")
+    metric_compatibility = _required_mapping(metadata, "metric_compatibility")
+    return {
+        "adapterId": _required_str(metadata, "adapter_id"),
+        "adapterVersion": _required_str(metadata, "adapter_version"),
+        "adapterSourceUri": _required_str(metadata, "adapter_source_uri"),
+        "adapterSourceRevision": _required_str(metadata, "adapter_source_revision"),
+        "adapterImageDigest": _required_str(metadata, "adapter_image_digest"),
+        "datasetLicenseId": _required_str(metadata, "dataset_license_id"),
+        "datasetDistributionRule": _required_str(metadata, "dataset_distribution_rule"),
+        "datasetRightsStatus": _required_str(metadata, "dataset_rights_status"),
+        "datasetManifestUri": _required_str(metadata, "dataset_manifest_uri"),
+        "datasetManifestSha256": _required_str(metadata, "dataset_manifest_sha256"),
+        "datasetManifestVersionId": _required_str(metadata, "dataset_manifest_version_id"),
+        "executionEvidenceUri": _required_str(metadata, "execution_evidence_uri"),
+        "executionEvidenceSha256": _required_str(metadata, "execution_evidence_sha256"),
+        "executionEvidenceVersionId": _required_str(metadata, "execution_evidence_version_id"),
+        "metricCompatibilityUri": _required_str(metric_compatibility, "matrix_uri"),
+        "metricCompatibilitySha256": _required_str(metric_compatibility, "matrix_sha256"),
+        "metricCompatibilityVersionId": _required_str(metric_compatibility, "matrix_version_id"),
+        "referenceSourceUri": _required_str(metadata, "reference_source_uri"),
     }
 
 
@@ -4989,6 +5019,7 @@ def _required_improvement_candidate_evaluation(
         contract_version_field="contractVersion",
         matrix_uri_field="matrixUri",
         matrix_sha256_field="matrixSha256",
+        matrix_version_id_field="matrixVersionId",
         suite_id_field="suiteCode",
         metric_families_field="metricFamilies",
     )
@@ -5338,6 +5369,7 @@ def _required_metric_compatibility(
     contract_version_field: str,
     matrix_uri_field: str,
     matrix_sha256_field: str,
+    matrix_version_id_field: str,
     suite_id_field: str,
     metric_families_field: str,
 ) -> dict[str, Any]:
@@ -5345,6 +5377,7 @@ def _required_metric_compatibility(
         raise ValueError("unsupported metric_compatibility contract version")
     matrix_uri = _required_str(payload, matrix_uri_field)
     matrix_sha256 = _required_str(payload, matrix_sha256_field)
+    matrix_version_id = _required_str(payload, matrix_version_id_field)
     if _artifact_ref(matrix_uri_field, matrix_uri).kind != "s3":
         raise ValueError("metric_compatibility matrix URI must be an immutable s3:// artifact")
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", matrix_sha256):
@@ -5380,6 +5413,7 @@ def _required_metric_compatibility(
         "contract_version": _METRIC_COMPATIBILITY_CONTRACT_VERSION,
         "matrix_sha256": matrix_sha256,
         "matrix_uri": matrix_uri,
+        "matrix_version_id": matrix_version_id,
         "requirements": [requirements_by_suite[suite_id] for suite_id in selected_suite_ids],
     }
 
@@ -5411,6 +5445,7 @@ def _suite_result_metric_families(suite_result: Mapping[str, Any]) -> list[str]:
         contract_version_field="contract_version",
         matrix_uri_field="matrix_uri",
         matrix_sha256_field="matrix_sha256",
+        matrix_version_id_field="matrix_version_id",
         suite_id_field="suite_id",
         metric_families_field="metric_families",
     )
