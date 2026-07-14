@@ -22,6 +22,7 @@ from dags.serp_eval_contracts import (
     write_public_docs_retrieval_golden_artifact,
     write_public_docs_search_serve_smoke_artifact,
 )
+from dags.serp_web_seed_crawl_refresh import PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG
 
 
 def validate_publish_signed_pack_plan(**context: Any) -> str:
@@ -64,6 +65,7 @@ dag = DAG(
 validate_plan = PythonOperator(
     task_id="validate_publish_signed_pack_plan",
     python_callable=validate_publish_signed_pack_plan,
+    executor_config=PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -71,6 +73,7 @@ dispatch_handoff = PythonOperator(
     task_id="dispatch_publish_activation_handoff",
     python_callable=build_public_docs_publish_activation_cli_spec,
     op_args=["{{ ti.xcom_pull(task_ids='validate_publish_signed_pack_plan') }}"],
+    executor_config=PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -78,6 +81,7 @@ run_handoff = PythonOperator(
     task_id="run_publish_activation_handoff",
     python_callable=execute_pipeline_cli_spec,
     op_args=["{{ ti.xcom_pull(task_ids='dispatch_publish_activation_handoff') }}"],
+    executor_config=PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -85,6 +89,7 @@ dispatch_submit = PythonOperator(
     task_id="dispatch_publish_activation_submit",
     python_callable=build_public_docs_publish_activation_submit_cli_spec,
     op_args=["{{ ti.xcom_pull(task_ids='validate_publish_signed_pack_plan') }}"],
+    executor_config=PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -92,6 +97,7 @@ submit_activation = PythonOperator(
     task_id="submit_publish_activation_to_bc21",
     python_callable=execute_pipeline_cli_spec,
     op_args=["{{ ti.xcom_pull(task_ids='dispatch_publish_activation_submit') }}"],
+    executor_config=PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -99,6 +105,7 @@ verify_search_serve = PythonOperator(
     task_id="verify_public_docs_search_serve",
     python_callable=write_public_docs_search_serve_smoke_artifact,
     op_args=["{{ ti.xcom_pull(task_ids='validate_publish_signed_pack_plan') }}"],
+    executor_config=PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -106,6 +113,7 @@ run_retrieval_golden = PythonOperator(
     task_id="run_public_docs_retrieval_golden",
     python_callable=write_public_docs_retrieval_golden_artifact,
     op_args=["{{ ti.xcom_pull(task_ids='validate_publish_signed_pack_plan') }}"],
+    executor_config=PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -113,6 +121,7 @@ rollback_post_activation_failure = PythonOperator(
     task_id="rollback_public_docs_post_activation_failure",
     python_callable=rollback_public_docs_post_activation_failure,
     op_args=["{{ ti.xcom_pull(task_ids='validate_publish_signed_pack_plan') }}"],
+    executor_config=PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG,
     retries=2,
     retry_delay=timedelta(seconds=30),
     trigger_rule=TriggerRule.ONE_FAILED,
@@ -123,6 +132,7 @@ write_coverage_proof = PythonOperator(
     task_id="write_public_docs_coverage_proof",
     python_callable=write_public_docs_coverage_proof_artifact,
     op_args=["{{ ti.xcom_pull(task_ids='validate_publish_signed_pack_plan') }}"],
+    executor_config=PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -130,6 +140,7 @@ commit_crawl_state = PythonOperator(
     task_id="commit_public_docs_crawl_state",
     python_callable=write_public_docs_crawl_state_artifact,
     op_args=["{{ ti.xcom_pull(task_ids='validate_publish_signed_pack_plan') }}"],
+    executor_config=PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -144,6 +155,7 @@ cleanup_retired_pack_versions = PythonOperator(
     task_id="cleanup_retired_public_docs_pack_versions",
     python_callable=execute_pipeline_cli_spec,
     op_args=["{{ ti.xcom_pull(task_ids='build_retired_public_docs_pack_cleanup') }}"],
+    executor_config=PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG,
     retries=1,
     dag=dag,
 )
@@ -152,6 +164,7 @@ notify_governance = PythonOperator(
     task_id="notify_governance_eval_surfaces",
     python_callable=governance_notification_pending,
     op_args=["{{ ti.xcom_pull(task_ids='validate_publish_signed_pack_plan') }}"],
+    executor_config=PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG,
     dag=dag,
 )
 

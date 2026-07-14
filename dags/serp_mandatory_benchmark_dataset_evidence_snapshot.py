@@ -26,7 +26,19 @@ from dags.serp_eval_contracts import (
     build_mandatory_benchmark_dataset_evidence_plan,
     write_airflow_plan_artifact,
 )
+from dags.serp_evidence_workload_identity import minio_web_identity_executor_config
 from dags.serp_web_seed_crawl_refresh import current_airflow_runtime_image
+
+BENCHMARK_EVALUATOR_EXECUTOR_CONFIG = minio_web_identity_executor_config(
+    service_account_name="airflow-serp-benchmark-evaluator",
+    labels={
+        "adapstory.com/serp-evidence-workload": "true",
+        "adapstory.com/serp-network-profile": "benchmark-evaluator",
+        "component": "worker",
+        "release": "airflow",
+        "tier": "airflow",
+    },
+)
 
 
 def validate_mandatory_benchmark_dataset_evidence_plan(**context: Any) -> str:
@@ -67,6 +79,7 @@ dag = DAG(
 validate_plan = PythonOperator(
     task_id="validate_mandatory_benchmark_dataset_evidence_plan",
     python_callable=validate_mandatory_benchmark_dataset_evidence_plan,
+    executor_config=BENCHMARK_EVALUATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
 

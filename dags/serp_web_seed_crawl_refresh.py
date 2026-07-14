@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -27,6 +26,12 @@ from dags.serp_eval_contracts import (
     write_public_docs_publish_activation_trigger_conf_artifact,
     write_public_docs_seed_refresh_plan_artifact,
     write_public_docs_seed_registry_artifact,
+)
+from dags.serp_evidence_workload_identity import (
+    minio_web_identity_env_vars,
+    minio_web_identity_executor_config,
+    minio_web_identity_volume_mounts,
+    minio_web_identity_volumes,
 )
 
 _PIPELINE_RUNNER_ENV_NAMES = (
@@ -64,6 +69,8 @@ SERP_PIPELINE_RUNNER_RESOURCES = k8s.V1ResourceRequirements(
     limits={"cpu": "1000m", "memory": "2Gi"},
 )
 PUBLIC_DOCS_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-public-docs-acquisition"
+PUBLIC_DOCS_ACQUISITION_WEB_IDENTITY_VOLUMES = minio_web_identity_volumes()
+PUBLIC_DOCS_ACQUISITION_WEB_IDENTITY_VOLUME_MOUNTS = minio_web_identity_volume_mounts()
 PUBLIC_DOCS_ACQUISITION_WORKLOAD_LABELS = {
     "adapstory.com/serp-evidence-workload": "true",
     "adapstory.com/serp-network-profile": "public-docs-acquisition",
@@ -71,6 +78,10 @@ PUBLIC_DOCS_ACQUISITION_WORKLOAD_LABELS = {
     "release": "airflow",
     "tier": "airflow",
 }
+PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG = minio_web_identity_executor_config(
+    service_account_name=PUBLIC_DOCS_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT,
+    labels=PUBLIC_DOCS_ACQUISITION_WORKLOAD_LABELS,
+)
 
 
 def current_airflow_runtime_image() -> str:
@@ -93,34 +104,11 @@ def pipeline_runner_env_vars(cli_spec_task_id: str) -> list[k8s.V1EnvVar]:
 
 
 def pipeline_runner_runtime_env_vars() -> list[k8s.V1EnvVar]:
-    """Return the shared non-DAG-specific runtime and secret environment contract."""
+    """Return the shared runtime plus short-lived MinIO identity contract."""
 
-    values: list[k8s.V1EnvVar] = []
-    for name in _PIPELINE_RUNNER_ENV_NAMES:
-        value = os.environ.get(name)
-        if value is None or not value.strip():
-            raise ValueError(f"public docs pipeline runner environment is required: {name}")
-        values.append(k8s.V1EnvVar(name=name, value=_native_template_safe_env_value(value)))
+    values = minio_web_identity_env_vars(_PIPELINE_RUNNER_ENV_NAMES)
     values.extend(
         (
-            k8s.V1EnvVar(
-                name="ADAPSTORY_AIRFLOW_ARTIFACT_S3_ACCESS_KEY",
-                value_from=k8s.V1EnvVarSource(
-                    secret_key_ref=k8s.V1SecretKeySelector(
-                        name="airflow-serp-evidence-store",
-                        key="access-key",
-                    )
-                ),
-            ),
-            k8s.V1EnvVar(
-                name="ADAPSTORY_AIRFLOW_ARTIFACT_S3_SECRET_KEY",
-                value_from=k8s.V1EnvVarSource(
-                    secret_key_ref=k8s.V1SecretKeySelector(
-                        name="airflow-serp-evidence-store",
-                        key="secret-key",
-                    )
-                ),
-            ),
             k8s.V1EnvVar(
                 name="ADAPSTORY_SERP_NEO4J_PASSWORD",
                 value_from=k8s.V1EnvVarSource(
@@ -133,12 +121,6 @@ def pipeline_runner_runtime_env_vars() -> list[k8s.V1EnvVar]:
         )
     )
     return values
-
-
-def _native_template_safe_env_value(value: str) -> str:
-    """Return a NativeEnvironment literal that renders to an exact Kubernetes string."""
-
-    return repr(value)
 
 
 def validate_public_docs_seed_registry(**context: Any) -> str:
@@ -214,6 +196,7 @@ dag = DAG(
 validate_plan = PythonOperator(
     task_id="validate_public_docs_seed_registry",
     python_callable=validate_public_docs_seed_registry,
+    executor_config=PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -221,6 +204,7 @@ write_seed_registry = PythonOperator(
     task_id="write_public_docs_seed_registry",
     python_callable=write_public_docs_seed_registry_artifact,
     op_args=["{{ ti.xcom_pull(task_ids='validate_public_docs_seed_registry') }}"],
+    executor_config=PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -228,6 +212,7 @@ build_refresh_plan = PythonOperator(
     task_id="build_public_docs_seed_refresh_plan",
     python_callable=write_public_docs_seed_refresh_plan_artifact,
     op_args=["{{ ti.xcom_pull(task_ids='validate_public_docs_seed_registry') }}"],
+    executor_config=PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -235,6 +220,7 @@ dispatch_handoff = PythonOperator(
     task_id="dispatch_pipeline_seed_refresh_handoff",
     python_callable=dispatch_public_docs_seed_refresh_handoff,
     op_args=["{{ ti.xcom_pull(task_ids='validate_public_docs_seed_registry') }}"],
+    executor_config=PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -248,6 +234,8 @@ run_pipeline = KubernetesPodOperator(
     service_account_name=PUBLIC_DOCS_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT,
     automount_service_account_token=False,
     labels=PUBLIC_DOCS_ACQUISITION_WORKLOAD_LABELS,
+    volumes=PUBLIC_DOCS_ACQUISITION_WEB_IDENTITY_VOLUMES,
+    volume_mounts=PUBLIC_DOCS_ACQUISITION_WEB_IDENTITY_VOLUME_MOUNTS,
     container_resources=SERP_PIPELINE_RUNNER_RESOURCES,
     container_security_context=k8s.V1SecurityContext(
         allow_privilege_escalation=False,
@@ -268,6 +256,7 @@ submit_bc21_pipeline_state = PythonOperator(
     task_id="submit_public_docs_bc21_pipeline_state",
     python_callable=submit_public_docs_bc21_pipeline_state_artifact,
     op_args=["{{ ti.xcom_pull(task_ids='validate_public_docs_seed_registry') }}"],
+    executor_config=PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -275,12 +264,14 @@ write_publish_trigger_conf = PythonOperator(
     task_id="write_public_docs_publish_activation_trigger_conf",
     python_callable=write_public_docs_publish_activation_trigger_conf_artifact,
     op_args=["{{ ti.xcom_pull(task_ids='validate_public_docs_seed_registry') }}"],
+    executor_config=PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG,
     dag=dag,
 )
 
 prepare_d5_dispatch = PythonOperator(
     task_id="prepare_public_docs_d5_dispatch",
     python_callable=prepare_public_docs_d5_dispatch,
+    executor_config=PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -301,6 +292,7 @@ notify_governance = PythonOperator(
     task_id="notify_governance_eval_surfaces",
     python_callable=governance_notification_pending,
     op_args=["{{ ti.xcom_pull(task_ids='validate_public_docs_seed_registry') }}"],
+    executor_config=PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG,
     dag=dag,
 )
 

@@ -753,7 +753,9 @@ def test_write_airflow_plan_artifact_writes_s3_artifact_root(
         ) -> None:
             put_calls.append((Bucket, Key, Body.decode("utf-8"), ContentType))
 
-    monkeypatch.setattr("dags.serp_eval_contracts._s3_client", lambda: FakeS3Client())
+    monkeypatch.setattr(
+        "dags.serp_eval_contracts._s3_client", lambda *_artifact_paths: FakeS3Client()
+    )
 
     plan_json = write_airflow_plan_artifact(plan)
 
@@ -1208,7 +1210,9 @@ def test_execute_pipeline_cli_spec_persists_failure_receipt_to_s3(
         stdout = ""
         stderr = "ValueError: OPENSEARCH_PASSWORD=do-not-persist"
 
-    monkeypatch.setattr("dags.serp_eval_contracts._s3_client", lambda: FakeS3Client())
+    monkeypatch.setattr(
+        "dags.serp_eval_contracts._s3_client", lambda *_artifact_paths: FakeS3Client()
+    )
     monkeypatch.setattr(
         "dags.serp_eval_contracts.subprocess.run", lambda *_args, **_kwargs: Result()
     )
@@ -1473,7 +1477,9 @@ def test_execute_pipeline_cli_spec_materializes_s3_inputs_and_uploads_stdout(
 
         return Result()
 
-    monkeypatch.setattr("dags.serp_eval_contracts._s3_client", lambda: FakeS3Client())
+    monkeypatch.setattr(
+        "dags.serp_eval_contracts._s3_client", lambda *_artifact_paths: FakeS3Client()
+    )
     monkeypatch.setattr("dags.serp_eval_contracts.subprocess.run", fake_run)
 
     result = execute_pipeline_cli_spec(
@@ -1564,7 +1570,9 @@ def test_execute_pipeline_cli_spec_preserves_pipeline_owned_immutable_evidence_o
 
         return Result()
 
-    monkeypatch.setattr("dags.serp_eval_contracts._s3_client", lambda: FakeS3Client())
+    monkeypatch.setattr(
+        "dags.serp_eval_contracts._s3_client", lambda *_artifact_paths: FakeS3Client()
+    )
     monkeypatch.setattr("dags.serp_eval_contracts.subprocess.run", fake_run)
 
     result = execute_pipeline_cli_spec(
@@ -1657,7 +1665,9 @@ def test_execute_gateway_cli_spec_materializes_s3_inputs_and_uploads_stdout(
 
         return Result()
 
-    monkeypatch.setattr("dags.serp_eval_contracts._s3_client", lambda: FakeS3Client())
+    monkeypatch.setattr(
+        "dags.serp_eval_contracts._s3_client", lambda *_artifact_paths: FakeS3Client()
+    )
     monkeypatch.setattr("dags.serp_eval_contracts.subprocess.run", fake_run)
 
     result = execute_gateway_cli_spec(
@@ -2897,7 +2907,9 @@ def test_d20_writes_public_docs_publish_activation_trigger_conf_from_s3_result(
         ) -> None:
             put_calls.append((Bucket, Key, Body.decode("utf-8"), ContentType))
 
-    monkeypatch.setattr("dags.serp_eval_contracts._s3_client", lambda: FakeS3Client())
+    monkeypatch.setattr(
+        "dags.serp_eval_contracts._s3_client", lambda *_artifact_paths: FakeS3Client()
+    )
 
     trigger_artifact = write_public_docs_publish_activation_trigger_conf_artifact(
         plan.to_canonical_json()
@@ -4404,7 +4416,9 @@ def test_public_docs_publish_activation_plan_accepts_s3_d20_result(
         def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
             return {"Body": io.BytesIO(storage[(Bucket, Key)])}
 
-    monkeypatch.setattr("dags.serp_eval_contracts._s3_client", lambda: FakeS3Client())
+    monkeypatch.setattr(
+        "dags.serp_eval_contracts._s3_client", lambda *_artifact_paths: FakeS3Client()
+    )
 
     conf = _public_docs_publish_activation_conf(seed_refresh_result_path)
     conf["artifact_root_path"] = "s3://airflow-serp-artifacts/serp-evals"
@@ -4462,7 +4476,9 @@ def test_pipeline_cli_executor_materializes_s3_activation_receipt_output(
         ) -> None:
             put_calls.append((Bucket, Key, Body.decode("utf-8"), ContentType))
 
-    monkeypatch.setattr("dags.serp_eval_contracts._s3_client", lambda: FakeS3Client())
+    monkeypatch.setattr(
+        "dags.serp_eval_contracts._s3_client", lambda *_artifact_paths: FakeS3Client()
+    )
 
     cli_spec = {
         "argv": [
@@ -5096,7 +5112,10 @@ def test_serp_public_docs_dag_runs_default_seed_registry_pipeline_path() -> None
     assert "datetime.now(UTC)" in source
     assert "KubernetesPodOperator" in source
     assert "run_public_docs_seed_refresh_pipeline" in source
-    assert "airflow-serp-evidence-store" in source
+    assert "airflow-serp-evidence-store" not in source
+    assert "minio_web_identity_env_vars" in source
+    assert "minio_web_identity_volumes" in source
+    assert "minio_web_identity_volume_mounts" in source
     assert "airflow-artifact-store" not in source
     assert "PUBLIC_DOCS_ACQUISITION_WORKLOAD_LABELS" in source
     assert "airflow-serp-public-docs-acquisition" in source
@@ -5134,6 +5153,8 @@ def test_serp_public_docs_pipeline_task_survives_scheduler_rollout() -> None:
             assert "pipeline_runner_env_vars" in source
             assert "current_airflow_runtime_image" in source
             assert "ADAPSTORY_SERP_EMBEDDING_DIMENSION" in source
+            assert "volumes=PUBLIC_DOCS_ACQUISITION_WEB_IDENTITY_VOLUMES" in source
+            assert "volume_mounts=PUBLIC_DOCS_ACQUISITION_WEB_IDENTITY_VOLUME_MOUNTS" in source
             labels = next(keyword.value for keyword in node.keywords if keyword.arg == "labels")
             assert isinstance(labels, ast.Name)
             assert labels.id == "PUBLIC_DOCS_ACQUISITION_WORKLOAD_LABELS"
@@ -5395,9 +5416,7 @@ def test_public_docs_pipeline_runner_env_contract_survives_native_template_rende
     }
 
     for name, value in numeric_values.items():
-        assert values[name] == repr(value)
-        assert isinstance(ast.literal_eval(values[name]), str)
-        assert ast.literal_eval(values[name]) == value
+        assert values[name] == value
     expected_cli_spec_template = (
         "{{ ti.xcom_pull(task_ids='dispatch_pipeline_seed_refresh_handoff') | tojson | urlencode }}"
     )
@@ -5527,6 +5546,10 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     models.V1Capabilities = FakeKubernetesModel
     models.V1EnvVar = FakeKubernetesModel
     models.V1EnvVarSource = FakeKubernetesModel
+    models.V1Container = FakeKubernetesModel
+    models.V1ObjectMeta = FakeKubernetesModel
+    models.V1Pod = FakeKubernetesModel
+    models.V1PodSpec = FakeKubernetesModel
     models.V1PodSecurityContext = FakeKubernetesModel
     models.V1ResourceRequirements = FakeKubernetesModel
     models.V1SeccompProfile = FakeKubernetesModel

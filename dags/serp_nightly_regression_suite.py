@@ -35,8 +35,20 @@ from dags.serp_eval_contracts import (
     write_airflow_plan_artifact,
     write_nightly_suite_plan_artifact,
 )
+from dags.serp_evidence_workload_identity import minio_web_identity_executor_config
 from dags.serp_web_seed_crawl_refresh import (
     current_airflow_runtime_image,
+)
+
+NIGHTLY_EVALUATOR_EXECUTOR_CONFIG = minio_web_identity_executor_config(
+    service_account_name="airflow-serp-benchmark-evaluator",
+    labels={
+        "adapstory.com/serp-evidence-workload": "true",
+        "adapstory.com/serp-network-profile": "benchmark-evaluator",
+        "component": "worker",
+        "release": "airflow",
+        "tier": "airflow",
+    },
 )
 
 
@@ -111,6 +123,7 @@ dag = DAG(
 validate_plan = PythonOperator(
     task_id="validate_nightly_regression_plan",
     python_callable=validate_nightly_regression_plan,
+    executor_config=NIGHTLY_EVALUATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -148,6 +161,7 @@ load_catalog = PythonOperator(
     task_id="load_materialized_benchmark_catalog",
     python_callable=load_materialized_benchmark_catalog,
     op_args=["{{ ti.xcom_pull(task_ids='validate_nightly_regression_plan') }}"],
+    executor_config=NIGHTLY_EVALUATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -158,6 +172,7 @@ write_suite_plan = PythonOperator(
         "{{ ti.xcom_pull(task_ids='validate_nightly_regression_plan') }}",
         "{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog') }}",
     ],
+    executor_config=NIGHTLY_EVALUATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -165,6 +180,7 @@ run_suites = PythonOperator(
     task_id="run_mandatory_benchmark_suites",
     python_callable=run_mandatory_benchmark_suites,
     op_args=["{{ ti.xcom_pull(task_ids='validate_nightly_regression_plan') }}"],
+    executor_config=NIGHTLY_EVALUATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -172,6 +188,7 @@ build_benchmark_export = PythonOperator(
     task_id="build_c1_benchmark_gate_export",
     python_callable=build_c1_benchmark_gate_export,
     op_args=["{{ ti.xcom_pull(task_ids='validate_nightly_regression_plan') }}"],
+    executor_config=NIGHTLY_EVALUATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -179,6 +196,7 @@ build_submissions = PythonOperator(
     task_id="build_bc21_benchmark_run_submissions",
     python_callable=build_bc21_benchmark_run_submissions,
     op_args=["{{ ti.xcom_pull(task_ids='validate_nightly_regression_plan') }}"],
+    executor_config=NIGHTLY_EVALUATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -186,6 +204,7 @@ submit_submissions = PythonOperator(
     task_id="submit_bc21_benchmark_run_submissions",
     python_callable=submit_bc21_benchmark_run_submissions,
     op_args=["{{ ti.xcom_pull(task_ids='validate_nightly_regression_plan') }}"],
+    executor_config=NIGHTLY_EVALUATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -193,6 +212,7 @@ notify_governance = PythonOperator(
     task_id="notify_governance_eval_surfaces",
     python_callable=governance_notification_pending,
     op_args=["{{ ti.xcom_pull(task_ids='validate_nightly_regression_plan') }}"],
+    executor_config=NIGHTLY_EVALUATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
 

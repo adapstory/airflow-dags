@@ -30,6 +30,7 @@ from dags.serp_eval_contracts import (
 )
 from dags.serp_evidence_workload_identity import (
     minio_web_identity_env_vars,
+    minio_web_identity_executor_config,
     minio_web_identity_volume_mounts,
     minio_web_identity_volumes,
 )
@@ -53,6 +54,10 @@ _D19_EVALUATOR_ENV_NAMES = (
 )
 D19_EVALUATOR_WEB_IDENTITY_VOLUMES = minio_web_identity_volumes()
 D19_EVALUATOR_WEB_IDENTITY_VOLUME_MOUNTS = minio_web_identity_volume_mounts()
+D19_EVALUATOR_EXECUTOR_CONFIG = minio_web_identity_executor_config(
+    service_account_name=D19_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT,
+    labels=D19_EVALUATOR_WORKLOAD_LABELS,
+)
 
 
 def d19_evaluator_env_vars() -> list[k8s.V1EnvVar]:
@@ -99,6 +104,7 @@ dag = DAG(
 validate_plan = PythonOperator(
     task_id="validate_benchmark_improvement_wave_plan",
     python_callable=validate_benchmark_improvement_wave_plan,
+    executor_config=D19_EVALUATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -106,6 +112,7 @@ write_spec = PythonOperator(
     task_id="write_improvement_spec",
     python_callable=write_improvement_spec,
     op_args=["{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') }}"],
+    executor_config=D19_EVALUATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -143,6 +150,7 @@ load_catalog = PythonOperator(
     task_id="load_materialized_benchmark_catalog",
     python_callable=load_materialized_benchmark_catalog,
     op_args=["{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') }}"],
+    executor_config=D19_EVALUATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -153,6 +161,7 @@ write_request = PythonOperator(
         "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') }}",
         "{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog') }}",
     ],
+    executor_config=D19_EVALUATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -202,6 +211,7 @@ notify_governance = PythonOperator(
     task_id="notify_governance_eval_surfaces",
     python_callable=governance_notification_pending,
     op_args=["{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') }}"],
+    executor_config=D19_EVALUATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
 

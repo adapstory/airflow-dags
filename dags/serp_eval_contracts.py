@@ -12,7 +12,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from functools import lru_cache, partial
+from functools import partial
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
@@ -141,9 +141,6 @@ _PUBLIC_DOCS_RETRIEVAL_GOLDEN_MAX_FRESHNESS_HOURS = 24
 _PUBLIC_DOCS_RETRIEVAL_GOLDEN_P95_SLO_SECONDS = 2.0
 _ARTIFACT_S3_ENDPOINT_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT"
 _ARTIFACT_S3_REGION_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION"
-_ARTIFACT_S3_ACCESS_KEY_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ACCESS_KEY"
-_ARTIFACT_S3_SECRET_KEY_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_S3_SECRET_KEY"
-_ARTIFACT_S3_PATH_STYLE_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_S3_PATH_STYLE"
 _EVIDENCE_RETENTION_DAYS_ENV = "ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS"
 _RAW_SECRET_KEYS = frozenset(
     {
@@ -1425,7 +1422,7 @@ def write_immutable_evidence_bytes_snapshot(
     if artifact.kind != "s3":
         raise ValueError("immutable evidence snapshots require an s3:// artifact path")
     retention_days = _required_positive_int_env(_EVIDENCE_RETENTION_DAYS_ENV)
-    client = s3_client or _s3_client()
+    client = s3_client or _s3_client(artifact_path)
     written_at = datetime.now(UTC)
     response = client.put_object(
         Bucket=_required_str_ref(artifact.bucket),
@@ -1625,7 +1622,7 @@ def load_materialized_benchmark_catalog_snapshot(
         plan,
         ("benchmark_catalog", "benchmark_catalog_receipt"),
     )
-    client = s3_client or _s3_client()
+    client = s3_client or _s3_client(*artifact_paths.values())
     receipt_bytes, receipt_version_id = _read_compliance_locked_s3_bytes(
         client,
         artifact_paths["benchmark_catalog_receipt"],
@@ -7229,7 +7226,7 @@ def _read_artifact_text(path: str, field_name: str) -> str:
     artifact = _artifact_ref(field_name, path)
     if artifact.kind == "file":
         return Path(artifact.local_path or "").read_text(encoding="utf-8")
-    response = _s3_client().get_object(
+    response = _s3_client(path).get_object(
         Bucket=_required_str_ref(artifact.bucket), Key=_required_str_ref(artifact.key)
     )
     body = response.get("Body")
@@ -7248,7 +7245,7 @@ def _write_artifact_text(path: str, raw: str) -> None:
         local_path.parent.mkdir(parents=True, exist_ok=True)
         local_path.write_text(raw, encoding="utf-8")
         return
-    _s3_client().put_object(
+    _s3_client(path).put_object(
         Bucket=_required_str_ref(artifact.bucket),
         Key=_required_str_ref(artifact.key),
         Body=raw.encode("utf-8"),
@@ -7366,29 +7363,10 @@ def _pipeline_owns_evidence_output(spec: Mapping[str, Any], argv: Sequence[str])
     return True
 
 
-@lru_cache(maxsize=1)
-def _s3_client() -> Any:
-    try:
-        import boto3
-        from botocore.config import Config
-    except ImportError as exc:
-        raise ValueError("boto3 is required for s3:// artifact paths") from exc
-    return boto3.client(
-        "s3",
-        endpoint_url=_required_env(_ARTIFACT_S3_ENDPOINT_ENV),
-        aws_access_key_id=_required_env(_ARTIFACT_S3_ACCESS_KEY_ENV),
-        aws_secret_access_key=_required_env(_ARTIFACT_S3_SECRET_KEY_ENV),
-        region_name=os.environ.get(_ARTIFACT_S3_REGION_ENV, "us-east-1"),
-        config=Config(
-            s3={
-                "addressing_style": (
-                    "path"
-                    if os.environ.get(_ARTIFACT_S3_PATH_STYLE_ENV, "true").lower() != "false"
-                    else "virtual"
-                )
-            }
-        ),
-    )
+def _s3_client(*artifact_paths: str) -> Any:
+    from dags.serp_evidence_workload_identity import operation_prefix_s3_client
+
+    return operation_prefix_s3_client(artifact_uris=artifact_paths)
 
 
 def _required_env(name: str) -> str:

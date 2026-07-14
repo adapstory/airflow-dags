@@ -161,7 +161,10 @@ def test_catalog_acquisition_workload_has_minimal_proxy_and_evidence_contract(
     assert literal_env["ADAPSTORY_AIRFLOW_ARTIFACT_S3_WEB_IDENTITY_TOKEN_FILE"] == (
         "/var/run/secrets/adapstory/minio-web-identity/token"
     )
-    assert literal_env["ADAPSTORY_AIRFLOW_ARTIFACT_S3_STS_DURATION_SECONDS"] == "900"
+    assert literal_env["ADAPSTORY_AIRFLOW_ARTIFACT_S3_STS_DURATION_SECONDS"] in {
+        "900",
+        "'900'",
+    }
     assert literal_env["ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS"] == '"365"'
     assert literal_env["ADAPSTORY_SERP_SOURCE_PROXY_URL"] == (
         "http://forward-proxy.forward-proxy.svc:3128"

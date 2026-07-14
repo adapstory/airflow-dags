@@ -15,6 +15,7 @@ from kubernetes.client import models as k8s
 
 from dags.serp_evidence_workload_identity import (
     minio_web_identity_env_vars,
+    minio_web_identity_executor_config,
     minio_web_identity_volume_mounts,
     minio_web_identity_volumes,
 )
@@ -48,26 +49,15 @@ SCIFACT_EVALUATOR_WORKLOAD_LABELS = {
     "release": "airflow",
     "tier": "airflow",
 }
-SCIFACT_EXECUTOR_CONFIG = {
-    "pod_override": k8s.V1Pod(
-        spec=k8s.V1PodSpec(
-            containers=[k8s.V1Container(name="base")],
-            service_account_name=SCIFACT_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT,
-            automount_service_account_token=True,
-        )
-    )
-}
+SCIFACT_EXECUTOR_CONFIG = minio_web_identity_executor_config(
+    service_account_name=SCIFACT_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT,
+    labels=SCIFACT_ACQUISITION_WORKLOAD_LABELS,
+)
 _SCIFACT_EVALUATOR_ENV_NAMES = (
     "ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS",
     "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT",
     "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION",
     "ADAPSTORY_SERP_SEARCH_SERVE_BASE_URL",
-)
-_SCIFACT_STATIC_EVIDENCE_CREDENTIAL_ENV_NAMES = frozenset(
-    {
-        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ACCESS_KEY",
-        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_SECRET_KEY",
-    }
 )
 SCIFACT_INDEXER_WEB_IDENTITY_VOLUMES = minio_web_identity_volumes()
 SCIFACT_INDEXER_WEB_IDENTITY_VOLUME_MOUNTS = minio_web_identity_volume_mounts()
@@ -76,21 +66,9 @@ SCIFACT_EVALUATOR_WEB_IDENTITY_VOLUME_MOUNTS = minio_web_identity_volume_mounts(
 
 
 def scifact_indexer_env_vars() -> list[k8s.V1EnvVar]:
-    """Return store access plus operation-scoped MinIO web identity for indexing.
+    """Return the shared short-lived MinIO identity contract for indexing."""
 
-    The shared public-docs runner includes a legacy static evidence credential
-    pair because non-benchmark jobs still use that contract.  The SciFact
-    indexer is an evidence workload and must instead mint a scoped STS session
-    from its projected token; retaining the static pair makes the runner fail
-    closed before it can read its version-bound archive.
-    """
-
-    values = [
-        value
-        for value in pipeline_runner_runtime_env_vars()
-        if value.name not in _SCIFACT_STATIC_EVIDENCE_CREDENTIAL_ENV_NAMES
-    ]
-    return [*values, *minio_web_identity_env_vars(())]
+    return pipeline_runner_runtime_env_vars()
 
 
 def scifact_evaluator_env_vars() -> list[k8s.V1EnvVar]:

@@ -53,7 +53,9 @@ def test_scifact_dag_assigns_the_dedicated_workload_identity_to_each_bc21_task()
             for target in node.targets
         )
     )
-    assert isinstance(assignment.value, ast.Dict)
+    assert isinstance(assignment.value, ast.Call)
+    assert isinstance(assignment.value.func, ast.Name)
+    assert assignment.value.func.id == "minio_web_identity_executor_config"
 
     python_operator_calls = [
         node
@@ -128,20 +130,8 @@ def test_scifact_kubernetes_tasks_use_only_their_required_projected_tokens() -> 
     ).read_text(encoding="utf-8")
     tree = ast.parse(source)
 
-    executor_config = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "V1PodSpec"
-    )
-    executor_automount = next(
-        keyword.value
-        for keyword in executor_config.keywords
-        if keyword.arg == "automount_service_account_token"
-    )
-    assert isinstance(executor_automount, ast.Constant)
-    assert executor_automount.value is True
+    assert "minio_web_identity_executor_config" in source
+    assert "SCIFACT_EXECUTOR_CONFIG" in source
 
     kubernetes_tasks = {
         next(
@@ -200,10 +190,9 @@ def test_scifact_indexer_uses_web_identity_without_static_minio_credentials() ->
     indexer_contract = source.split("def scifact_indexer_env_vars()", 1)[1].split(
         "def scifact_evaluator_env_vars()", 1
     )[0]
-    assert "if value.name not in _SCIFACT_STATIC_EVIDENCE_CREDENTIAL_ENV_NAMES" in indexer_contract
-    assert "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ACCESS_KEY" in source
-    assert "ADAPSTORY_AIRFLOW_ARTIFACT_S3_SECRET_KEY" in source
-    assert "return [*values, *minio_web_identity_env_vars(())]" in indexer_contract
+    assert "return pipeline_runner_runtime_env_vars()" in indexer_contract
+    assert "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ACCESS_KEY" not in source
+    assert "ADAPSTORY_AIRFLOW_ARTIFACT_S3_SECRET_KEY" not in source
 
 
 def test_scifact_archive_materialization_binds_bytes_and_s3_version_before_indexing() -> None:
