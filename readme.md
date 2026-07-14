@@ -199,7 +199,8 @@ SERP eval DAG contracts:
   must be added through GitOps before replacing those file-based handoff tasks
   with native networked operators. D6 now executes the same CLI bridge in the
   DAG default path and fails closed when BC-21 submission is not configured.
-  D19 uses the same packaged gateway CLI bridge as D6; production claims still
+  D19 invokes the isolated packaged pipeline receipt executor after the
+  restricted catalog-acquisition/readback boundary; production claims still
   require a signed runtime image, pinned GitOps refs, provisioned suite
   adapters, and live MinIO evidence.
 - `serp_publish_signed_pack` is the D5 public-docs publish activation handoff
