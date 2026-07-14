@@ -81,6 +81,7 @@ def test_scifact_kubernetes_tasks_use_separate_acquisition_and_evaluation_identi
     assert "SCIFACT_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT" in source
     assert "SCIFACT_ACQUISITION_WORKLOAD_LABELS" in source
     assert "SCIFACT_EVALUATOR_WORKLOAD_LABELS" in source
+    assert '"adapstory.com/serp-network-profile": "benchmark-indexer"' in source
     assert "service_account_name=SCIFACT_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT" in source
     assert "service_account_name=SCIFACT_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT" in source
 

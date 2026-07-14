@@ -36,7 +36,7 @@ SCIFACT_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-beir-scifact"
 SCIFACT_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-benchmark-evaluator"
 SCIFACT_ACQUISITION_WORKLOAD_LABELS = {
     "adapstory.com/serp-evidence-workload": "true",
-    "adapstory.com/serp-network-profile": "benchmark-acquisition",
+    "adapstory.com/serp-network-profile": "benchmark-indexer",
     "component": "worker",
     "release": "airflow",
     "tier": "airflow",
