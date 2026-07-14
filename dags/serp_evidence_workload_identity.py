@@ -20,11 +20,14 @@ MINIO_WEB_IDENTITY_AUDIENCE = "minio"
 MINIO_WEB_IDENTITY_EXPIRATION_SECONDS = 900
 EVIDENCE_BUCKET = "airflow-serp-evidence"
 EVIDENCE_PREFIX = "serp-evals/"
+TASK_LOG_BUCKET = "airflow-serp-artifacts"
+TASK_LOG_PREFIX = "airflow-task-logs/"
 _STATIC_CREDENTIAL_ENV_NAMES = (
     "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ACCESS_KEY",
     "ADAPSTORY_AIRFLOW_ARTIFACT_S3_SECRET_KEY",
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
 )
 
 
@@ -115,12 +118,6 @@ def operation_prefix_s3_client(*, artifact_uris: Iterable[str]) -> Any:
     resources = tuple(sorted({operation_prefix_resource(uri) for uri in artifact_uris}))
     if len(resources) != 1:
         raise ValueError("all operation artifacts must belong to one evidence operation")
-    _reject_static_credentials()
-    endpoint_url = _required_env("ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT")
-    region_name = os.environ.get("ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION", "us-west-1").strip()
-    if not region_name:
-        raise ValueError("ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION must not be empty")
-    token = _projected_token()
     policy = json.dumps(
         {
             "Version": "2012-10-17",
@@ -139,6 +136,68 @@ def operation_prefix_s3_client(*, artifact_uris: Iterable[str]) -> Any:
         },
         sort_keys=True,
     )
+    return _web_identity_s3_client(policy=policy)
+
+
+def task_log_s3_client() -> Any:
+    """Return an STS client constrained to the immutable Airflow task-log prefix."""
+
+    return _web_identity_s3_client(
+        policy=build_minio_prefix_policy(
+            bucket=TASK_LOG_BUCKET,
+            prefix=TASK_LOG_PREFIX,
+            object_actions=("s3:GetObject", "s3:GetObjectVersion", "s3:PutObject"),
+        )
+    )
+
+
+def build_minio_prefix_policy(
+    *,
+    bucket: str,
+    prefix: str,
+    object_actions: Sequence[str],
+) -> str:
+    """Build a deterministic STS policy limited to one S3 object prefix."""
+
+    _validate_prefix_scope(bucket=bucket, prefix=prefix, object_actions=object_actions)
+    bucket_resource = f"arn:aws:s3:::{bucket}"
+    return json.dumps(
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Action": ["s3:GetBucketLocation"],
+                    "Effect": "Allow",
+                    "Resource": [bucket_resource],
+                },
+                {
+                    "Action": ["s3:ListBucket"],
+                    "Condition": {
+                        "StringLike": {"s3:prefix": [prefix.removesuffix("/"), f"{prefix}*"]}
+                    },
+                    "Effect": "Allow",
+                    "Resource": [bucket_resource],
+                },
+                {
+                    "Action": list(object_actions),
+                    "Effect": "Allow",
+                    "Resource": [f"{bucket_resource}/{prefix}*"],
+                },
+            ],
+        },
+        sort_keys=True,
+    )
+
+
+def _web_identity_s3_client(*, policy: str) -> Any:
+    """Exchange a projected token for an S3 client without ambient credentials."""
+
+    _reject_static_credentials()
+    endpoint_url = _required_env("ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT")
+    region_name = os.environ.get("ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION", "us-west-1").strip()
+    if not region_name:
+        raise ValueError("ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION must not be empty")
+    token = _projected_token()
     credentials = _assume_minio_role_with_web_identity(
         endpoint_url=endpoint_url,
         token=token,
@@ -155,6 +214,15 @@ def operation_prefix_s3_client(*, artifact_uris: Iterable[str]) -> Any:
         aws_session_token=credentials["SessionToken"],
         config=botocore_config.Config(s3={"addressing_style": "path"}),
     )
+
+
+def _validate_prefix_scope(*, bucket: str, prefix: str, object_actions: Sequence[str]) -> None:
+    if not bucket or "/" in bucket or bucket.strip() != bucket:
+        raise ValueError("MinIO bucket scope is invalid")
+    if not prefix.endswith("/") or prefix.startswith("/") or ".." in prefix.split("/"):
+        raise ValueError("MinIO prefix scope is invalid")
+    if not object_actions or any(not action.startswith("s3:") for action in object_actions):
+        raise ValueError("MinIO object actions are invalid")
 
 
 def operation_prefix_resource(artifact_uri: str) -> str:
