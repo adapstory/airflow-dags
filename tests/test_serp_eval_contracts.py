@@ -594,7 +594,7 @@ def test_catalog_materializer_accepts_dedicated_dataset_evidence_plan() -> None:
         }
         for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
     ]
-    assert len(written) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 6) + 3
+    assert len(written) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 6) + 4
 
 
 def test_nightly_regression_plan_rejects_caller_supplied_suite_inputs() -> None:
@@ -651,7 +651,7 @@ def test_nightly_catalog_materialization_writes_all_live_evidence_before_native_
         MANDATORY_SERP_BENCHMARK_SUITES
     )
     assert written[-1]["artifact_path"] == plan.payload["artifact_paths"]["benchmark_catalog"]
-    assert len(written) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 6) + 3
+    assert len(written) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 6) + 4
 
 
 @pytest.mark.parametrize(
@@ -669,13 +669,66 @@ def test_load_materialized_catalog_binds_receipt_and_catalog_s3_versions(
         plan = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
     catalog_path = plan.payload["artifact_paths"]["benchmark_catalog"]
     receipt_path = plan.payload["artifact_paths"]["benchmark_catalog_receipt"]
+    corpus_role_by_suite = {
+        "APIBench": "api-documentation",
+        "ARES": "context-corpus",
+        "BEIR": "beir-corpus",
+        "CodeRAG-Bench": "documentation-corpus",
+        "RAGBench": "source-context",
+        "RepoQA": "repository-code",
+        "SWE-bench Verified": "base-commit-repository",
+        "cwd-benchmark-data": "reference-graph",
+        "rusBEIR": "beir-corpus",
+    }
     catalog_payload = {
         "catalog_status": "ready",
         "contract_version": "serp-benchmark-catalog/v4",
         "suites": [
             {
+                "corpus_snapshots": {
+                    "corpus": {
+                        "corpus_role": corpus_role_by_suite[entry.suite_id],
+                        "immutable_artifact": {
+                            "artifactPath": (
+                                f"s3://airflow-serp-evidence/catalog/{entry.suite_id}/corpus"
+                            ),
+                            "artifactSha256": "e" * 64,
+                            "artifactVersionId": f"{entry.suite_id}-corpus-v1",
+                            "objectLockMode": "COMPLIANCE",
+                        },
+                        "sha256": "sha256:" + "e" * 64,
+                        "url": f"derived://native-corpus/{entry.suite_id}/corpus",
+                    }
+                },
                 "distribution_rule": entry.distribution_rule,
                 "execution_status": "ready",
+                "native_adapter_manifest": {
+                    "corpusEvidence": [
+                        {
+                            "artifactPath": (
+                                f"s3://airflow-serp-evidence/catalog/{entry.suite_id}/corpus"
+                            ),
+                            "artifactSha256": "e" * 64,
+                            "artifactVersionId": f"{entry.suite_id}-corpus-v1",
+                            "corpusRole": corpus_role_by_suite[entry.suite_id],
+                            "objectLockMode": "COMPLIANCE",
+                            "sourceId": "corpus",
+                        }
+                    ],
+                    "corpusManifest": {
+                        "schema": "NativeBenchmarkCorpusManifest/v1",
+                        "sources": [
+                            {
+                                "corpusRole": corpus_role_by_suite[entry.suite_id],
+                                "documentCount": 1,
+                                "payloadSha256": "sha256:" + "e" * 64,
+                                "sourceId": "corpus",
+                            }
+                        ],
+                        "status": "materialized",
+                        "suiteId": entry.suite_id,
+                    },
+                },
                 "official_harness": {
                     "entrypoint": entry.harness_entrypoint,
                     "license_id": entry.harness_license_id,

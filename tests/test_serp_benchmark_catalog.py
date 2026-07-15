@@ -212,6 +212,11 @@ def test_catalog_covers_every_mandatory_suite_with_explicit_licensing_boundary()
     assert all(entry.harness_entrypoint for entry in MANDATORY_BENCHMARK_SUITE_CATALOG)
     assert all(entry.harness_license_id for entry in MANDATORY_BENCHMARK_SUITE_CATALOG)
     assert all(entry.distribution_rule for entry in MANDATORY_BENCHMARK_SUITE_CATALOG)
+    assert all(
+        entry.distribution_rule == "internal-only-no-redistribution"
+        for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+        if entry.harness_license_status == "UNDECLARED"
+    )
 
 
 def test_catalog_exposes_fail_closed_d6_schedule_readiness() -> None:
@@ -254,6 +259,16 @@ def test_catalog_pins_each_upstream_dataset_to_an_immutable_revision() -> None:
     assert all(
         entry.harness_revision in entry.harness_license_url
         for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+    )
+    coderag = next(
+        entry for entry in MANDATORY_BENCHMARK_SUITE_CATALOG if entry.suite_id == "CodeRAG-Bench"
+    )
+    assert coderag.supplemental_dataset_artifacts == (
+        (
+            "documentation-corpus",
+            "https://huggingface.co/datasets/neulab/docprompting-conala/resolve/"
+            "48df7abf0f64f9279b4ee04386272eb9dc89ef89/conala-docs.jsonl",
+        ),
     )
 
 
@@ -470,7 +485,7 @@ def test_live_catalog_retains_immutable_source_and_license_snapshots() -> None:
     )
     suites = cast(list[dict[str, Any]], evidence["suites"])
 
-    assert len(calls) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 6) + 2
+    assert len(calls) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 6) + 3
     beir = next(item for item in suites if item["suite_id"] == "BEIR")
     assert (
         beir["dataset_snapshots"]["dataset"]["immutable_artifact"]["objectLockMode"] == "COMPLIANCE"

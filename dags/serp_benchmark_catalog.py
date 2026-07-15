@@ -198,7 +198,13 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
             "https://huggingface.co/datasets/code-rag-bench/ds1000/resolve/"
             "7a5933733e549d11b75b74d3eb52bb056ffd986c/ds1000.json"
         ),
-        supplemental_dataset_artifacts=(),
+        supplemental_dataset_artifacts=(
+            (
+                "documentation-corpus",
+                "https://huggingface.co/datasets/neulab/docprompting-conala/resolve/"
+                "48df7abf0f64f9279b4ee04386272eb9dc89ef89/conala-docs.jsonl",
+            ),
+        ),
         license_evidence_url=(
             "https://huggingface.co/api/datasets/code-rag-bench/ds1000/revision/"
             "7a5933733e549d11b75b74d3eb52bb056ffd986c"
@@ -259,7 +265,7 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         harness_license_status=_HARNESS_LICENSE_UNDECLARED,
         harness_distribution_rule="internal-only-no-redistribution",
         dataset_license_id="CC-BY-4.0",
-        distribution_rule="public-share-allowed",
+        distribution_rule="internal-only-no-redistribution",
         rights_status=_RIGHTS_ATTESTED,
         legal_boundary="RAGBench dataset card's CC-BY-4.0 terms apply to the retained snapshot.",
     ),

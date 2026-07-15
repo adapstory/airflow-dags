@@ -2496,6 +2496,7 @@ def load_materialized_benchmark_catalog_snapshot(
         raise ValueError(
             "benchmark catalog object must contain mandatory suites in canonical order"
         )
+    _validate_benchmark_catalog_corpus_evidence(suites)
     if normalize_benchmark_catalog_suite_summary(
         catalog_snapshot.get("suiteSummary")
     ) != _catalog_suite_summary(suites):
@@ -2667,6 +2668,84 @@ def _catalog_official_harness_lineage(
             }
         )
     return normalize_benchmark_catalog_official_harness_lineage(lineage)
+
+
+def _validate_benchmark_catalog_corpus_evidence(
+    suites: Sequence[Mapping[str, Any]],
+) -> None:
+    """Reject a ready suite unless its query-independent corpus is WORM-bound."""
+
+    for suite in suites:
+        suite_id = _required_str(suite, "suite_id")
+        execution_status = _required_str(suite, "execution_status")
+        corpus_snapshots = _required_mapping(suite, "corpus_snapshots")
+        native_manifest = _required_mapping(suite, "native_adapter_manifest")
+        if execution_status != "ready":
+            if corpus_snapshots:
+                raise ValueError(
+                    f"benchmark catalog blocked suite cannot expose corpus snapshots: {suite_id}"
+                )
+            if "corpusManifest" in native_manifest or "corpusEvidence" in native_manifest:
+                raise ValueError(
+                    f"benchmark catalog blocked suite cannot expose corpus lineage: {suite_id}"
+                )
+            continue
+        if not corpus_snapshots:
+            raise ValueError(
+                f"benchmark catalog ready suite requires corpus snapshots: {suite_id}"
+            )
+        corpus_manifest = _required_mapping(native_manifest, "corpusManifest")
+        if _required_str(corpus_manifest, "schema") != "NativeBenchmarkCorpusManifest/v1":
+            raise ValueError(f"benchmark catalog corpus schema is unsupported: {suite_id}")
+        if _required_str(corpus_manifest, "suiteId") != suite_id:
+            raise ValueError(f"benchmark catalog corpus suite identity mismatch: {suite_id}")
+        if _required_str(corpus_manifest, "status") != "materialized":
+            raise ValueError(f"benchmark catalog corpus is not materialized: {suite_id}")
+        sources = _required_object_list(corpus_manifest, "sources")
+        source_ids = [_required_str(source, "sourceId") for source in sources]
+        if source_ids != list(corpus_snapshots):
+            raise ValueError(f"benchmark catalog corpus source order mismatch: {suite_id}")
+        expected_evidence: list[dict[str, str]] = []
+        for source, source_id in zip(sources, source_ids, strict=True):
+            snapshot = _required_mapping(corpus_snapshots, source_id)
+            corpus_role = _required_str(snapshot, "corpus_role")
+            if _required_str(source, "corpusRole") != corpus_role:
+                raise ValueError(f"benchmark catalog corpus role mismatch: {suite_id}")
+            digest = _normalized_catalog_sha256_digest(
+                _required_str(snapshot, "sha256"),
+                f"{suite_id}.corpus_snapshots.{source_id}.sha256",
+            )
+            if _normalized_catalog_sha256_digest(
+                _required_str(source, "payloadSha256"),
+                f"{suite_id}.corpusManifest.payloadSha256",
+            ) != digest:
+                raise ValueError(f"benchmark catalog corpus digest mismatch: {suite_id}")
+            if _required_str(snapshot, "url") != (
+                f"derived://native-corpus/{suite_id}/{source_id}"
+            ):
+                raise ValueError(f"benchmark catalog corpus URL mismatch: {suite_id}")
+            artifact = _required_mapping(snapshot, "immutable_artifact")
+            if _required_str(artifact, "objectLockMode") != "COMPLIANCE":
+                raise ValueError(f"benchmark catalog corpus must be COMPLIANCE WORM: {suite_id}")
+            artifact_sha = _required_str(artifact, "artifactSha256")
+            if "sha256:" + artifact_sha != digest:
+                raise ValueError(f"benchmark catalog corpus artifact digest mismatch: {suite_id}")
+            artifact_path = _required_str(artifact, "artifactPath")
+            if not artifact_path.startswith("s3://"):
+                raise ValueError(f"benchmark catalog corpus path must be s3://: {suite_id}")
+            expected_evidence.append(
+                {
+                    "artifactPath": artifact_path,
+                    "artifactSha256": artifact_sha,
+                    "artifactVersionId": _required_str(artifact, "artifactVersionId"),
+                    "corpusRole": corpus_role,
+                    "objectLockMode": "COMPLIANCE",
+                    "sourceId": source_id,
+                }
+            )
+        corpus_evidence = native_manifest.get("corpusEvidence")
+        if not isinstance(corpus_evidence, list) or corpus_evidence != expected_evidence:
+            raise ValueError(f"benchmark catalog corpus evidence mismatch: {suite_id}")
 
 
 def _catalog_blocking_reason_by_suite(
