@@ -914,6 +914,7 @@ def test_immutable_binary_snapshot_binds_raw_dataset_bytes_to_s3_version(
     assert result["artifactSha256"] == (
         "4b724b1a7d2ebf3ed72a63ea0abec451734920b428729b6f7f7f4b7f75ea0962"
     )
+    assert result["retainUntil"].endswith("Z")
     assert client.calls[0]["Body"] == b"PK\\x03\\x04scifact"
     assert client.calls[0]["ContentType"] == "application/zip"
     assert "ObjectLockMode" not in client.calls[0]

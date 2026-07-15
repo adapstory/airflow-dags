@@ -2234,7 +2234,7 @@ def test_paired_eval_request_derives_canonical_catalog_bindings_as_worm_evidence
             "artifactType": artifact_type,
             "artifactVersionId": "paired-request-version-001",
             "objectLockMode": "COMPLIANCE",
-            "objectLockRetainUntil": "2027-07-14T00:00:00Z",
+            "retainUntil": "2027-07-14T00:00:00Z",
             "status": "written",
         }
 

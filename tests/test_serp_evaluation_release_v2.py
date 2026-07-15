@@ -297,6 +297,7 @@ def test_d17_consumes_ci_v3_bundle_and_seals_governed_v2_promotion() -> None:
         payload["metricCompatibilityMatrixEvidence"] == bundle["metricCompatibilityMatrixEvidence"]
     )
     assert payload["objectiveSpecificationEvidence"] == bundle["objectiveSpecificationEvidence"]
+    assert receipt["promotionEvidence"]["retainUntil"] == "2027-07-15T00:00:00Z"
     serialized = json.dumps(payload, sort_keys=True)
     for forbidden in ("suiteProfiles", "replay", "ModelRelease/v1"):
         assert forbidden not in serialized
@@ -546,7 +547,7 @@ def _snapshot_writer(artifact_path: object | None = None, **kwargs: object) -> d
         "artifactType": str(kwargs["artifact_type"]),
         "artifactVersionId": "written-version-001",
         "objectLockMode": "COMPLIANCE",
-        "objectLockRetainUntil": "2027-07-15T00:00:00Z",
+        "retainUntil": "2027-07-15T00:00:00Z",
         "status": "written",
     }
 

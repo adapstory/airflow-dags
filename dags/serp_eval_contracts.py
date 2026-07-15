@@ -1683,7 +1683,7 @@ def _written_worm_evidence_reference(
         "sha256": "sha256:" + _required_sha256_hex(snapshot, "artifactSha256"),
         "versionId": _required_str(snapshot, "artifactVersionId"),
         "objectLockMode": "COMPLIANCE",
-        "retainUntil": _required_datetime_string(snapshot, "objectLockRetainUntil"),
+        "retainUntil": _required_datetime_string(snapshot, "retainUntil"),
     }
 
 
@@ -2269,7 +2269,7 @@ def write_immutable_evidence_bytes_snapshot(
     version_id = response.get("VersionId")
     if not isinstance(version_id, str) or not version_id.strip():
         raise ValueError("immutable evidence S3 response is missing VersionId")
-    _verify_compliance_locked_evidence_version(
+    retain_until = _verify_compliance_locked_evidence_version(
         client,
         bucket=_required_str_ref(artifact.bucket),
         key=_required_str_ref(artifact.key),
@@ -2289,6 +2289,7 @@ def write_immutable_evidence_bytes_snapshot(
         "contractVersion": _AIRFLOW_ARTIFACT_CONTRACT_VERSION,
         "objectLockMode": "COMPLIANCE",
         "operationId": operation_id,
+        "retainUntil": retain_until,
         "retentionDays": retention_days,
         "status": "written",
     }
@@ -2302,7 +2303,7 @@ def _verify_compliance_locked_evidence_version(
     version_id: str,
     retention_days: int,
     written_at: datetime,
-) -> None:
+) -> str:
     """Fail closed unless bucket policy applied COMPLIANCE retention to this version.
 
     Evidence writers intentionally lack ``s3:PutObjectRetention``.  The
@@ -2324,6 +2325,7 @@ def _verify_compliance_locked_evidence_version(
     minimum_retention = written_at + timedelta(days=retention_days) - timedelta(minutes=1)
     if retain_until.astimezone(UTC) < minimum_retention:
         raise ValueError("immutable evidence retention is shorter than the required policy")
+    return retain_until.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 _BENCHMARK_SUBSTRATE_SOURCE_SET_ENV = "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE"
