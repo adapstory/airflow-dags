@@ -1175,13 +1175,20 @@ def _validated_model_promotion_receipt(
 
 def _validated_model_release_binding(binding: Mapping[str, Any], field_name: str) -> dict[str, Any]:
     release = _required_mapping(binding, "release")
+    normalized_release = (
+        _normalize_governed_model_release(release, f"{field_name}.release")
+        if "apiVersion" in release
+        else _normalize_governed_model_release_fields(release, f"{field_name}.release")
+    )
+    if "apiVersion" not in release:
+        normalized_release["ciRuntime"] = _normalize_signed_ci_runtime(
+            release,
+            f"{field_name}.release",
+            _required_mapping(normalized_release, "runtime"),
+        )
     return {
         "evidence": _immutable_evidence_reference(binding, "evidence"),
-        "release": (
-            _normalize_governed_model_release(release, f"{field_name}.release")
-            if "apiVersion" in release
-            else _normalize_governed_model_release_fields(release, f"{field_name}.release")
-        ),
+        "release": normalized_release,
     }
 
 
@@ -1196,7 +1203,11 @@ def _normalize_governed_model_release(
         raise ValueError(f"{field_name} kind is unsupported")
     if _required_str(payload, "status") != "approved-for-evaluation":
         raise ValueError(f"{field_name} is not approved for evaluation")
-    return _normalize_governed_model_release_fields(payload, field_name)
+    normalized = _normalize_governed_model_release_fields(payload, field_name)
+    normalized["ciRuntime"] = _normalize_signed_ci_runtime(
+        payload, field_name, _required_mapping(normalized, "runtime")
+    )
+    return normalized
 
 
 def _normalize_governed_model_release_fields(
@@ -1238,6 +1249,66 @@ def _normalize_governed_model_release_fields(
             "sourceRevision": source_revision,
         },
         "tenantId": str(_required_uuid(payload, "tenantId")),
+    }
+
+
+def _normalize_signed_ci_runtime(
+    payload: Mapping[str, Any], field_name: str, runtime: Mapping[str, Any]
+) -> dict[str, str]:
+    """Bind each D17 release to the signed Jenkins runtime receipt it came from."""
+
+    ci_runtime = _required_mapping(payload, "ciRuntime")
+    manifest_media_type = _required_str(ci_runtime, "manifestMediaType")
+    config_media_type = _required_str(ci_runtime, "configMediaType")
+    supported_media_types = {
+        "application/vnd.oci.image.manifest.v1+json": "application/vnd.oci.image.config.v1+json",
+        "application/vnd.docker.distribution.manifest.v2+json": (
+            "application/vnd.docker.container.image.v1+json"
+        ),
+    }
+    if supported_media_types.get(manifest_media_type) != config_media_type:
+        raise ValueError(f"{field_name} ciRuntime image media types are unsupported")
+    if _required_str(ci_runtime, "result") != "SUCCESS":
+        raise ValueError(f"{field_name} ciRuntime result must be SUCCESS")
+    jenkins_build_url = _required_str(ci_runtime, "jenkinsBuildUrl")
+    if not re.fullmatch(
+        r"https://jenkins\.adapstory\.com/job/infra-build/[1-9][0-9]*/", jenkins_build_url
+    ):
+        raise ValueError(f"{field_name} ciRuntime jenkinsBuildUrl is unsupported")
+    digest = _required_sha256_prefixed(ci_runtime, "digest")
+    if digest != _required_sha256_prefixed(runtime, "imageDigest"):
+        raise ValueError(f"{field_name} ciRuntime digest does not match runtime imageDigest")
+    source_revision = _required_str(runtime, "sourceRevision")
+    refs = {
+        name: _required_str(ci_runtime, name)
+        for name in (
+            "airflowDagsRef",
+            "serpMcpGatewayRef",
+            "serpPipelineRef",
+            "serpContextBenchmarkRef",
+        )
+    }
+    if any(not re.fullmatch(r"[0-9a-f]{40}", value) for value in refs.values()):
+        raise ValueError(f"{field_name} ciRuntime source refs must be full Git SHAs")
+    if refs["serpMcpGatewayRef"] != source_revision:
+        raise ValueError(
+            f"{field_name} ciRuntime gateway ref does not match runtime sourceRevision"
+        )
+    repository = _required_str(ci_runtime, "repository")
+    if not repository.startswith("harbor.adapstory.com/"):
+        raise ValueError(f"{field_name} ciRuntime repository must use internal Harbor")
+    return {
+        "airflowDagsRef": refs["airflowDagsRef"],
+        "configMediaType": config_media_type,
+        "digest": digest,
+        "jenkinsBuildUrl": jenkins_build_url,
+        "manifestMediaType": manifest_media_type,
+        "repository": repository,
+        "result": "SUCCESS",
+        "serpContextBenchmarkRef": refs["serpContextBenchmarkRef"],
+        "serpMcpGatewayRef": refs["serpMcpGatewayRef"],
+        "serpPipelineRef": refs["serpPipelineRef"],
+        "tag": _required_str(ci_runtime, "tag"),
     }
 
 

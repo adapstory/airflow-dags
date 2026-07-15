@@ -186,11 +186,60 @@ def test_d17_reloads_exact_worm_release_manifests_before_sealing_receipt() -> No
     assert promoted_releases["candidateRelease"]["release"]["releaseId"] == "candidate-reranker"
 
 
+def test_d17_rejects_a_release_manifest_without_signed_ci_runtime_provenance() -> None:
+    baseline_payload = json.loads(
+        _release_manifest("baseline-reranker", "baseline-run", "reranker@2026.07.1")
+    )
+    del baseline_payload["ciRuntime"]
+    baseline = json.dumps(baseline_payload, separators=(",", ":"), sort_keys=True).encode()
+    candidate = _release_manifest("candidate-reranker", "candidate-run", "reranker@2026.07.2")
+    conf = _promotion_conf()
+    conf["baseline_release_evidence"] = {
+        **_immutable_evidence("baseline"),
+        "artifactSha256": "sha256:" + sha256(baseline).hexdigest(),
+    }
+    conf["candidate_release_evidence"] = {
+        **_immutable_evidence("candidate"),
+        "artifactSha256": "sha256:" + sha256(candidate).hexdigest(),
+    }
+    plan = build_model_catalog_promotion_plan(conf)
+    client = _FakeS3(
+        {
+            (
+                "airflow-serp-evidence",
+                "serp-evals/model-releases/baseline.json",
+                "version-baseline",
+            ): baseline,
+            (
+                "airflow-serp-evidence",
+                "serp-evals/model-releases/candidate.json",
+                "version-candidate",
+            ): candidate,
+        }
+    )
+
+    with pytest.raises(ValueError, match="ciRuntime"):
+        load_governed_model_releases(plan.to_canonical_json(), s3_client=client)
+
+
 def _release_manifest(release_id: str, run_id: str, reranker_profile: str) -> bytes:
     payload = {
         "apiVersion": "serp.adapstory.ai/v1alpha1",
         "component": "reranker-profile-public-docs",
         "contractVersion": "serp-model-release/v1",
+        "ciRuntime": {
+            "airflowDagsRef": "a" * 40,
+            "configMediaType": "application/vnd.docker.container.image.v1+json",
+            "digest": "sha256:" + "b" * 64,
+            "jenkinsBuildUrl": "https://jenkins.adapstory.com/job/infra-build/123/",
+            "manifestMediaType": "application/vnd.docker.distribution.manifest.v2+json",
+            "repository": "harbor.adapstory.com/adapstory/airflow",
+            "result": "SUCCESS",
+            "serpContextBenchmarkRef": "d" * 40,
+            "serpMcpGatewayRef": "c" * 40,
+            "serpPipelineRef": "e" * 40,
+            "tag": "3.3.0-runtime-test",
+        },
         "evaluationRunId": run_id,
         "kind": "ModelRelease",
         "model": {

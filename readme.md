@@ -98,7 +98,13 @@ SERP eval DAG contracts:
   caller. The DAG re-reads both manifests with exact `VersionId` plus
   `COMPLIANCE` retention, validates that their tenant/resource/component and
   non-reranker replay boundary match, then seals a WORM promotion receipt.
-  Release manifest production belongs to the signed CI/release path; a missing
+  Release manifest production belongs to the signed CI/release path: the
+  `airflow-runtime` Jenkins build seals the active baseline and newly signed
+  candidate under a build-scoped MinIO COMPLIANCE prefix using its projected
+  workload token, and archives only their exact VersionId/SHA handles. Every
+  `ModelRelease` carries the matching signed runtime receipt (image digest,
+  all pinned source refs, successful Jenkins URL, and compatible manifest
+  media types); D17 rejects a missing or mismatched receipt. A missing
   candidate release is a real block, never a reason to invent a candidate.
 - `serp_benchmark_improvement_wave` is the D19 fail-closed improvement
   contract DAG. Its `dag_run.conf` provides tenant id, improvement spec id,

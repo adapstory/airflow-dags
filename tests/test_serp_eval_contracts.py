@@ -6208,6 +6208,19 @@ def _d19_promotion_snapshot(plan: Any) -> dict[str, Any]:
                 "artifactVersionId": f"{release_id}-version-001",
             },
             "release": {
+                "ciRuntime": {
+                    "airflowDagsRef": "a" * 40,
+                    "configMediaType": "application/vnd.docker.container.image.v1+json",
+                    "digest": "sha256:" + "e" * 64,
+                    "jenkinsBuildUrl": "https://jenkins.adapstory.com/job/infra-build/123/",
+                    "manifestMediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                    "repository": "harbor.adapstory.com/adapstory/airflow",
+                    "result": "SUCCESS",
+                    "serpContextBenchmarkRef": "b" * 40,
+                    "serpMcpGatewayRef": "f" * 40,
+                    "serpPipelineRef": "c" * 40,
+                    "tag": "3.3.0-runtime-test",
+                },
                 "component": "reranker-profile-public-docs",
                 "evaluationRunId": evaluation_run_id,
                 "model": {
