@@ -94,7 +94,12 @@ _UNATTESTED_LICENSE_MARKERS = ("pending", "unknown", "noassertion", "unlicensed"
 _DATASET_RIGHTS_STATUSES = frozenset({"attested", "rights-unverified"})
 _RIGHTS_UNVERIFIED_DISTRIBUTION_RULE = "internal-only-no-redistribution"
 _CATALOG_EXECUTION_STATUSES = frozenset(
-    {"corpus-evidence-blocked", "ready", "rights-policy-blocked"}
+    {
+        "corpus-evidence-blocked",
+        "execution-substrate-blocked",
+        "ready",
+        "rights-policy-blocked",
+    }
 )
 _CATALOG_BLOCKING_REASON_ORDER = ("rights-policy-blocked",)
 _FORBIDDEN_INLINE_D19_FIELDS = frozenset(
@@ -1011,7 +1016,13 @@ def _d19_harness_task_ids() -> tuple[str, ...]:
                 if suite_id in _D19_CODE_SANDBOX_SUITES:
                     task_ids.extend(
                         f"{phase}_code_sandbox_{slug}_{side}_{repetition}"
-                        for phase in ("prepare", "execute", "seal")
+                        for phase in (
+                            "prepare",
+                            "fanout",
+                            "execute",
+                            "result_set_plan",
+                            "seal",
+                        )
                     )
                 else:
                     task_ids.append(f"run_official_harness_{slug}_{side}_{repetition}")
@@ -2291,6 +2302,120 @@ def _verify_compliance_locked_evidence_version(
         raise ValueError("immutable evidence retention is shorter than the required policy")
 
 
+_BENCHMARK_SUBSTRATE_SOURCE_SET_ENV = "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE"
+
+
+def _load_execution_substrate_source_set(
+    source_set_evidence: Mapping[str, Any],
+    *,
+    s3_client: Any | None = None,
+) -> dict[str, dict[str, bytes]]:
+    """Load one exact WORM source set and every exact WORM role it declares."""
+
+    from dags.serp_benchmark_catalog import EXTERNAL_EXECUTION_SUBSTRATE_ROLES
+
+    source_handle = _validated_compact_worm_handle(
+        source_set_evidence, "benchmark execution substrate source set"
+    )
+    source_client = s3_client or _s3_client(source_handle["s3Uri"])
+    source_bytes, _ = _read_compliance_locked_s3_bytes(
+        source_client,
+        source_handle["s3Uri"],
+        field_name="benchmark execution substrate source set",
+        version_id=source_handle["versionId"],
+    )
+    if "sha256:" + sha256(source_bytes).hexdigest() != source_handle["sha256"]:
+        raise ValueError("benchmark execution substrate source set digest is mismatched")
+    try:
+        source_set = json.loads(source_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("benchmark execution substrate source set is not valid JSON") from exc
+    if (
+        not isinstance(source_set, Mapping)
+        or set(source_set) != {"schema", "suites"}
+        or source_set.get("schema") != "BenchmarkExecutionSubstrateSourceSet/v1"
+    ):
+        raise ValueError("benchmark execution substrate source set shape is invalid")
+    raw_suites = source_set.get("suites")
+    if not isinstance(raw_suites, list) or len(raw_suites) != len(
+        EXTERNAL_EXECUTION_SUBSTRATE_ROLES
+    ):
+        raise ValueError("benchmark execution substrate source set suites are incomplete")
+    result: dict[str, dict[str, bytes]] = {}
+    for index, (expected_suite_id, expected_roles) in enumerate(
+        EXTERNAL_EXECUTION_SUBSTRATE_ROLES.items()
+    ):
+        suite = raw_suites[index]
+        if (
+            not isinstance(suite, Mapping)
+            or set(suite) != {"roles", "suiteId"}
+            or suite.get("suiteId") != expected_suite_id
+        ):
+            raise ValueError("benchmark execution substrate source set suite order is invalid")
+        raw_roles = suite.get("roles")
+        if not isinstance(raw_roles, list) or len(raw_roles) != len(expected_roles):
+            raise ValueError(
+                f"benchmark execution substrate source roles are incomplete: {expected_suite_id}"
+            )
+        loaded_roles: dict[str, bytes] = {}
+        for role_index, expected_role in enumerate(expected_roles):
+            role = raw_roles[role_index]
+            if (
+                not isinstance(role, Mapping)
+                or set(role) != {"evidence", "role"}
+                or role.get("role") != expected_role
+            ):
+                raise ValueError(
+                    "benchmark execution substrate source role order is invalid: "
+                    f"{expected_suite_id}"
+                )
+            handle = _validated_compact_worm_handle(
+                role.get("evidence"),
+                f"benchmark execution substrate {expected_suite_id}/{expected_role}",
+            )
+            role_client = s3_client or _s3_client(handle["s3Uri"])
+            payload, _ = _read_compliance_locked_s3_bytes(
+                role_client,
+                handle["s3Uri"],
+                field_name=f"benchmark execution substrate {expected_suite_id}/{expected_role}",
+                version_id=handle["versionId"],
+            )
+            if "sha256:" + sha256(payload).hexdigest() != handle["sha256"]:
+                raise ValueError(
+                    f"benchmark execution substrate role digest is mismatched: "
+                    f"{expected_suite_id}/{expected_role}"
+                )
+            loaded_roles[expected_role] = payload
+        result[expected_suite_id] = loaded_roles
+    return result
+
+
+def _validated_compact_worm_handle(value: object, field_name: str) -> dict[str, str]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "objectLockMode",
+        "s3Uri",
+        "sha256",
+        "versionId",
+    }:
+        raise ValueError(f"{field_name} evidence shape is invalid")
+    handle = {key: _required_str(value, key) for key in value}
+    if handle["objectLockMode"] != "COMPLIANCE":
+        raise ValueError(f"{field_name} must declare COMPLIANCE object lock")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", handle["sha256"]):
+        raise ValueError(f"{field_name} digest must be sha256:<64 lowercase hex>")
+    _artifact_ref(field_name, handle["s3Uri"])
+    return handle
+
+
+def _execution_substrate_source_set_from_env() -> dict[str, dict[str, bytes]]:
+    raw = os.environ.get(_BENCHMARK_SUBSTRATE_SOURCE_SET_ENV, "").strip()
+    if not raw:
+        return {}
+    return _load_execution_substrate_source_set(
+        _json_object(raw, _BENCHMARK_SUBSTRATE_SOURCE_SET_ENV)
+    )
+
+
 def materialize_live_benchmark_catalog_artifact(
     plan_json: Mapping[str, Any] | str,
     *,
@@ -2304,6 +2429,20 @@ def materialize_live_benchmark_catalog_artifact(
     native_corpus_materializer: Callable[
         [str, Mapping[str, bytes], Mapping[str, Mapping[str, object]]], Mapping[str, object]
     ]
+    | None = None,
+    execution_substrate_materializer: Callable[
+        [
+            str,
+            Mapping[str, bytes],
+            Mapping[str, Mapping[str, object]],
+            Mapping[str, bytes],
+            Mapping[str, Mapping[str, object]],
+            Mapping[str, bytes],
+        ],
+        Mapping[str, bytes],
+    ]
+    | None = None,
+    execution_substrate_role_payload_loader: Callable[[], Mapping[str, Mapping[str, bytes]]]
     | None = None,
 ) -> dict[str, Any]:
     """Capture all upstream benchmark licensing evidence in immutable storage.
@@ -2361,6 +2500,16 @@ def materialize_live_benchmark_catalog_artifact(
             _native_corpus_materializer
             if native_corpus_materializer is None
             else native_corpus_materializer
+        ),
+        execution_substrate_materializer=(
+            _execution_substrate_materializer
+            if execution_substrate_materializer is None
+            else execution_substrate_materializer
+        ),
+        execution_substrate_role_payloads=(
+            _execution_substrate_source_set_from_env()
+            if execution_substrate_role_payload_loader is None
+            else execution_substrate_role_payload_loader()
         ),
     )
     writer = write_immutable_evidence_snapshot if snapshot_writer is None else snapshot_writer
@@ -2428,6 +2577,33 @@ def _native_corpus_materializer(
     }
 
 
+def _execution_substrate_materializer(
+    suite_id: str,
+    dataset_payloads: Mapping[str, bytes],
+    dataset_snapshots: Mapping[str, Mapping[str, object]],
+    corpus_payloads: Mapping[str, bytes],
+    corpus_snapshots: Mapping[str, Mapping[str, object]],
+    official_harness_payloads: Mapping[str, bytes],
+) -> Mapping[str, bytes]:
+    """Materialize exact role bytes only inside the isolated catalog workload."""
+
+    from adapstory_serp_pipeline.benchmark.execution_substrate_materialization import (  # type: ignore[import-not-found]
+        materialize_execution_substrate_role_payloads,
+    )
+
+    return cast(
+        Mapping[str, bytes],
+        materialize_execution_substrate_role_payloads(
+            suite_id,
+            dataset_payloads,
+            dataset_snapshots,
+            corpus_payloads,
+            corpus_snapshots,
+            official_harness_payloads,
+        ),
+    )
+
+
 def load_materialized_benchmark_catalog_snapshot(
     plan_json: Mapping[str, Any] | str,
     *,
@@ -2466,7 +2642,7 @@ def load_materialized_benchmark_catalog_snapshot(
         )
     except UnicodeDecodeError as exc:
         raise ValueError("benchmark catalog materialization receipt is not UTF-8 JSON") from exc
-    if _required_str(receipt, "contractVersion") != "serp-benchmark-catalog-materializer/v4":
+    if _required_str(receipt, "contractVersion") != "serp-benchmark-catalog-materializer/v5":
         raise ValueError("benchmark catalog materialization receipt contract is unsupported")
     if _required_str(receipt, "dagId") != _required_str(plan, "dag_id"):
         raise ValueError("benchmark catalog materialization receipt dagId does not match plan")
@@ -2496,15 +2672,19 @@ def load_materialized_benchmark_catalog_snapshot(
         raise ValueError("benchmark catalog object is not UTF-8 JSON") from exc
     if _required_str(catalog, "catalog_status") != _required_str(catalog_snapshot, "catalogStatus"):
         raise ValueError("benchmark catalog receipt status does not match catalog object")
-    if _required_str(catalog, "contract_version") != "serp-benchmark-catalog/v4":
+    if _required_str(catalog, "contract_version") != "serp-benchmark-catalog/v5":
         raise ValueError("benchmark catalog contract is unsupported")
+    if set(catalog) != {"catalog_status", "contract_version", "observed_at", "suites"}:
+        raise ValueError("benchmark catalog object has an invalid v5 shape")
     suites = _required_object_list(catalog, "suites")
     suite_ids = [_required_str(suite, "suite_id") for suite in suites]
     if suite_ids != list(MANDATORY_SERP_BENCHMARK_SUITES):
         raise ValueError(
             "benchmark catalog object must contain mandatory suites in canonical order"
         )
+    _validate_benchmark_catalog_suite_shapes(suites)
     _validate_benchmark_catalog_corpus_evidence(suites)
+    _validate_benchmark_catalog_execution_substrate_artifacts(suites)
     if normalize_benchmark_catalog_suite_summary(
         catalog_snapshot.get("suiteSummary")
     ) != _catalog_suite_summary(suites):
@@ -2688,18 +2868,22 @@ def _validate_benchmark_catalog_corpus_evidence(
         execution_status = _required_str(suite, "execution_status")
         corpus_snapshots = _required_mapping(suite, "corpus_snapshots")
         native_manifest = _required_mapping(suite, "native_adapter_manifest")
-        if execution_status != "ready":
+        if execution_status == "corpus-evidence-blocked":
             if corpus_snapshots:
                 raise ValueError(
-                    f"benchmark catalog blocked suite cannot expose corpus snapshots: {suite_id}"
+                    "benchmark catalog corpus-blocked suite cannot expose corpus snapshots: "
+                    + suite_id
                 )
             if "corpusManifest" in native_manifest or "corpusEvidence" in native_manifest:
                 raise ValueError(
-                    f"benchmark catalog blocked suite cannot expose corpus lineage: {suite_id}"
+                    "benchmark catalog corpus-blocked suite cannot expose corpus lineage: "
+                    + suite_id
                 )
             continue
         if not corpus_snapshots:
-            raise ValueError(f"benchmark catalog ready suite requires corpus snapshots: {suite_id}")
+            raise ValueError(
+                f"benchmark catalog runnable suite requires corpus snapshots: {suite_id}"
+            )
         corpus_manifest = _required_mapping(native_manifest, "corpusManifest")
         if _required_str(corpus_manifest, "schema") != "NativeBenchmarkCorpusManifest/v1":
             raise ValueError(f"benchmark catalog corpus schema is unsupported: {suite_id}")
@@ -2757,6 +2941,88 @@ def _validate_benchmark_catalog_corpus_evidence(
             raise ValueError(f"benchmark catalog corpus evidence mismatch: {suite_id}")
 
 
+def _validate_benchmark_catalog_suite_shapes(
+    suites: Sequence[Mapping[str, Any]],
+) -> None:
+    required_fields = {
+        "corpus_snapshots",
+        "dataset_id",
+        "dataset_license_id",
+        "dataset_revision",
+        "dataset_snapshots",
+        "distribution_rule",
+        "execution_status",
+        "execution_substrate_artifacts",
+        "legal_boundary",
+        "license_snapshot",
+        "native_adapter_manifest",
+        "official_harness",
+        "rights_status",
+        "source_snapshot",
+        "suite_id",
+    }
+    for suite in suites:
+        expected = set(required_fields)
+        if _required_str(suite, "execution_status") != "ready":
+            expected.add("blocking_reason")
+        if set(suite) != expected:
+            raise ValueError(
+                "benchmark catalog suite has an invalid v5 shape: "
+                + _required_str(suite, "suite_id")
+            )
+
+
+def _validate_benchmark_catalog_execution_substrate_artifacts(
+    suites: Sequence[Mapping[str, Any]],
+) -> None:
+    from dags.serp_benchmark_catalog import MANDATORY_EXECUTION_SUBSTRATE_ROLES
+
+    for suite in suites:
+        suite_id = _required_str(suite, "suite_id")
+        execution_status = _required_str(suite, "execution_status")
+        artifacts = _required_mapping(suite, "execution_substrate_artifacts")
+        if execution_status in {"corpus-evidence-blocked", "execution-substrate-blocked"}:
+            if artifacts:
+                raise ValueError(
+                    f"benchmark catalog blocked suite cannot expose partial substrate: {suite_id}"
+                )
+            continue
+        expected_roles = MANDATORY_EXECUTION_SUBSTRATE_ROLES[suite_id]
+        if tuple(artifacts) != expected_roles:
+            raise ValueError(
+                f"benchmark catalog execution substrate roles are incomplete: {suite_id}"
+            )
+        identities: list[tuple[str, str]] = []
+        for role, value in artifacts.items():
+            if not isinstance(value, Mapping) or set(value) != {
+                "artifactPath",
+                "artifactSha256",
+                "artifactVersionId",
+                "objectLockMode",
+            }:
+                raise ValueError(
+                    f"benchmark catalog execution substrate handle is invalid: {suite_id}/{role}"
+                )
+            path = _required_str(value, "artifactPath")
+            if not path.startswith("s3://"):
+                raise ValueError(
+                    f"benchmark catalog execution substrate path must use s3://: {suite_id}/{role}"
+                )
+            _normalized_catalog_sha256_digest(
+                _required_str(value, "artifactSha256"),
+                f"{suite_id}.execution_substrate_artifacts.{role}.artifactSha256",
+            )
+            if _required_str(value, "objectLockMode") != "COMPLIANCE":
+                raise ValueError(
+                    f"benchmark catalog execution substrate must be COMPLIANCE: {suite_id}/{role}"
+                )
+            identities.append((path, _required_str(value, "artifactVersionId")))
+        if len(set(identities)) != len(identities):
+            raise ValueError(
+                f"benchmark catalog execution substrate handles must be unique: {suite_id}"
+            )
+
+
 def _catalog_blocking_reason_by_suite(
     suites: Sequence[Mapping[str, Any]],
 ) -> dict[str, str]:
@@ -2779,7 +3045,11 @@ def _catalog_blocking_reason_by_suite(
             continue
         reason = _required_str(suite, "blocking_reason")
         if not reason.startswith(
-            ("query-independent-corpus-unavailable: ", "rights-policy-blocked: ")
+            (
+                "execution-substrate-unavailable: ",
+                "query-independent-corpus-unavailable: ",
+                "rights-policy-blocked: ",
+            )
         ):
             raise ValueError(
                 "catalog-evidence-invalid: blocking_reason is unsupported for " + suite_id

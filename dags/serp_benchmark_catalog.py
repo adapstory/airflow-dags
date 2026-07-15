@@ -9,6 +9,7 @@ upstream dataset and licensing evidence before an adapter is allowed to run.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -16,12 +17,37 @@ from hashlib import sha256
 
 from dags.serp_eval_contracts import MANDATORY_SERP_BENCHMARK_SUITES
 
-BENCHMARK_CATALOG_CONTRACT_VERSION = "serp-benchmark-catalog/v4"
+BENCHMARK_CATALOG_CONTRACT_VERSION = "serp-benchmark-catalog/v5"
 _READY = "ready"
 _RIGHTS_ATTESTED = "attested"
 _RIGHTS_UNVERIFIED = "rights-unverified"
 _HARNESS_LICENSE_ATTESTED = "ATTESTED"
 _HARNESS_LICENSE_UNDECLARED = "UNDECLARED"
+_IMAGE_REFERENCE = re.compile(
+    r"[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?"
+    r"(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}\Z"
+)
+_DS1000_LIBRARY_VERSIONS = (
+    ("DateTime", "4.7"),
+    ("gensim", "4.2.0"),
+    ("matplotlib", "3.5.2"),
+    ("numpy", "1.21.6"),
+    ("openai", "0.23.0"),
+    ("pandas", "1.3.5"),
+    ("pandas-datareader", "0.10.0"),
+    ("pathlib", "1.0.1"),
+    ("scikit-learn", "1.0.2"),
+    ("scipy", "1.7.3"),
+    ("seaborn", "0.11.2"),
+    ("statsmodels", "0.13.2"),
+    ("tensorflow", "2.10.0"),
+    ("tokenizers", "0.12.1"),
+    ("torch", "1.12.1"),
+    ("torchvision", "0.13.1"),
+    ("tqdm", "4.64.1"),
+    ("xgboost", "1.6.2"),
+    ("Pillow", "9.2.0"),
+)
 _CORPUS_ROLE_BY_SUITE = {
     "APIBench": "api-documentation",
     "ARES": "context-corpus",
@@ -33,6 +59,41 @@ _CORPUS_ROLE_BY_SUITE = {
     "cwd-benchmark-data": "reference-graph",
     "rusBEIR": "beir-corpus",
 }
+MANDATORY_EXECUTION_SUBSTRATE_ROLES: Mapping[str, tuple[str, ...]] = {
+    "APIBench": ("api-documentation-corpus", "task-dataset"),
+    "ARES": (
+        "few-shot-judge-examples",
+        "gold-labels",
+        "judge-route",
+        "unlabeled-system-outputs",
+    ),
+    "BEIR": ("corpus", "qrels", "queries"),
+    "CodeRAG-Bench": (
+        "corpus",
+        "execution-sandbox",
+        "generation-dataset",
+        "qrels",
+        "queries",
+    ),
+    "RAGBench": ("labeled-rag-triples", "metric-implementation"),
+    "RepoQA": ("needle-manifest", "repository-snapshots", "tree-sitter-runtime"),
+    "SWE-bench Verified": (
+        "instance-dataset",
+        "repository-snapshots",
+        "sandbox-image-set",
+    ),
+    "cwd-benchmark-data": ("investigation-graph", "reference-query-set"),
+    "rusBEIR": ("corpus", "qrels", "queries"),
+}
+EXTERNAL_EXECUTION_SUBSTRATE_ROLES: Mapping[str, tuple[str, ...]] = {
+    "ARES": ("judge-route",),
+    "CodeRAG-Bench": ("execution-sandbox",),
+    "RAGBench": ("metric-implementation",),
+    "RepoQA": ("tree-sitter-runtime",),
+    "SWE-bench Verified": ("sandbox-image-set",),
+}
+if tuple(MANDATORY_EXECUTION_SUBSTRATE_ROLES) != MANDATORY_SERP_BENCHMARK_SUITES:
+    raise RuntimeError("execution substrate roles must cover the canonical mandatory nine")
 
 
 @dataclass(frozen=True, slots=True)
@@ -458,6 +519,19 @@ def build_live_benchmark_catalog_evidence(
         [str, Mapping[str, bytes], Mapping[str, Mapping[str, object]]], Mapping[str, object]
     ]
     | None = None,
+    execution_substrate_materializer: Callable[
+        [
+            str,
+            Mapping[str, bytes],
+            Mapping[str, Mapping[str, object]],
+            Mapping[str, bytes],
+            Mapping[str, Mapping[str, object]],
+            Mapping[str, bytes],
+        ],
+        Mapping[str, bytes],
+    ]
+    | None = None,
+    execution_substrate_role_payloads: Mapping[str, Mapping[str, bytes]] | None = None,
 ) -> dict[str, object]:
     """Fetch and content-address dataset bytes plus legal evidence for every suite.
 
@@ -472,6 +546,9 @@ def build_live_benchmark_catalog_evidence(
         raise ValueError("native adapter materializer is required")
     if native_corpus_materializer is None:
         raise ValueError("native corpus materializer is required")
+    if execution_substrate_materializer is None:
+        raise ValueError("execution substrate materializer is required")
+    authoritative_roles = _validated_external_role_payloads(execution_substrate_role_payloads or {})
     suites: list[dict[str, object]] = []
     for entry in MANDATORY_BENCHMARK_SUITE_CATALOG:
         source_payload = _fetch(entry.dataset_source_url, fetch_bytes)
@@ -559,6 +636,46 @@ def build_live_benchmark_catalog_evidence(
             )
             for source_id, payload in corpus_payloads.items()
         }
+        execution_substrate_blocking_reason: str | None = None
+        execution_substrate_artifacts: dict[str, dict[str, str]] = {}
+        if corpus_blocking_reason is None:
+            try:
+                substrate_payloads = _validated_execution_substrate_materialization(
+                    execution_substrate_materializer(
+                        entry.suite_id,
+                        dataset_payloads,
+                        immutable_dataset_snapshots,
+                        corpus_payloads,
+                        {
+                            source_id: _immutable_dataset_snapshot(
+                                snapshot, entry.suite_id, source_id
+                            )
+                            for source_id, snapshot in corpus_snapshots.items()
+                        },
+                        {
+                            "license": harness_license_payload,
+                            "source-archive": harness_source_archive_payload,
+                            **authoritative_roles.get(entry.suite_id, {}),
+                        },
+                    ),
+                    entry,
+                )
+                execution_substrate_artifacts = {
+                    role: _compact_immutable_artifact(
+                        _snapshot(
+                            entry.suite_id,
+                            f"execution-substrate-{role}",
+                            f"derived://execution-substrate/{entry.suite_id}/{role}",
+                            payload,
+                            snapshot_bytes,
+                        ),
+                        entry.suite_id,
+                        role,
+                    )
+                    for role, payload in substrate_payloads.items()
+                }
+            except ValueError as exc:
+                execution_substrate_blocking_reason = f"execution-substrate-unavailable: {exc}"
         if corpus_manifest is not None:
             native_manifest["corpusManifest"] = corpus_manifest
             native_manifest["corpusEvidence"] = [
@@ -592,8 +709,16 @@ def build_live_benchmark_catalog_evidence(
                 "dataset_revision": entry.dataset_revision,
                 "distribution_rule": entry.distribution_rule,
                 "execution_status": (
-                    _READY if corpus_blocking_reason is None else "corpus-evidence-blocked"
+                    _READY
+                    if corpus_blocking_reason is None
+                    and execution_substrate_blocking_reason is None
+                    else (
+                        "corpus-evidence-blocked"
+                        if corpus_blocking_reason is not None
+                        else "execution-substrate-blocked"
+                    )
                 ),
+                "execution_substrate_artifacts": execution_substrate_artifacts,
                 "legal_boundary": entry.legal_boundary,
                 "license_snapshot": _snapshot(
                     entry.suite_id,
@@ -616,7 +741,12 @@ def build_live_benchmark_catalog_evidence(
                 **(
                     {}
                     if corpus_blocking_reason is None
-                    else {"blocking_reason": corpus_blocking_reason}
+                    and execution_substrate_blocking_reason is None
+                    else {
+                        "blocking_reason": (
+                            corpus_blocking_reason or execution_substrate_blocking_reason
+                        )
+                    }
                 ),
             }
         )
@@ -627,6 +757,32 @@ def build_live_benchmark_catalog_evidence(
         "observed_at": observed_at,
         "suites": suites,
     }
+
+
+def _validated_external_role_payloads(
+    values: Mapping[str, Mapping[str, bytes]],
+) -> dict[str, dict[str, bytes]]:
+    if not isinstance(values, Mapping):
+        raise ValueError("execution substrate authoritative roles must be a mapping")
+    unsupported = set(values) - set(EXTERNAL_EXECUTION_SUBSTRATE_ROLES)
+    if unsupported:
+        raise ValueError("execution substrate authoritative roles contain unsupported suites")
+    normalized: dict[str, dict[str, bytes]] = {}
+    for suite_id, raw_roles in values.items():
+        if (
+            not isinstance(raw_roles, Mapping)
+            or tuple(raw_roles) != (EXTERNAL_EXECUTION_SUBSTRATE_ROLES[suite_id])
+        ):
+            raise ValueError(f"execution substrate authoritative roles are incomplete: {suite_id}")
+        roles: dict[str, bytes] = {}
+        for role, payload in raw_roles.items():
+            if not isinstance(payload, bytes) or not payload:
+                raise ValueError(
+                    f"execution substrate authoritative payload is empty: {suite_id}/{role}"
+                )
+            roles[role] = payload
+        normalized[suite_id] = roles
+    return normalized
 
 
 def mandatory_benchmark_adapters_ready() -> bool:
@@ -702,6 +858,191 @@ def _validate_native_adapter_manifest(manifest: Mapping[str, object], suite_id: 
         evidence = official_harness.get(field_name)
         if not isinstance(evidence, Mapping) or evidence.get("objectLockMode") != "COMPLIANCE":
             raise ValueError(f"native adapter manifest has invalid {field_name}: {suite_id}")
+
+
+def _validated_execution_substrate_materialization(
+    materialization: Mapping[str, bytes], entry: BenchmarkSuiteCatalogEntry
+) -> dict[str, bytes]:
+    if not isinstance(materialization, Mapping):
+        raise ValueError(f"execution substrate materialization is invalid: {entry.suite_id}")
+    expected_roles = MANDATORY_EXECUTION_SUBSTRATE_ROLES[entry.suite_id]
+    if tuple(materialization) != expected_roles:
+        raise ValueError(
+            f"execution substrate roles are incomplete or noncanonical: {entry.suite_id}"
+        )
+    payloads: dict[str, bytes] = {}
+    for role, payload in materialization.items():
+        if not isinstance(payload, bytes) or not payload:
+            raise ValueError(f"execution substrate payload is empty: {entry.suite_id}/{role}")
+        payloads[role] = payload
+    if entry.suite_id == "CodeRAG-Bench":
+        _validate_ds1000_sandbox_inventory(payloads["execution-sandbox"], entry)
+    if entry.suite_id == "SWE-bench Verified":
+        _validate_swe_bench_sandbox_inventory(payloads["sandbox-image-set"], entry)
+    return payloads
+
+
+def _validate_ds1000_sandbox_inventory(payload: bytes, entry: BenchmarkSuiteCatalogEntry) -> None:
+    inventory = _json_mapping(payload, "DS-1000 sandbox image inventory")
+    if set(inventory) != {
+        "dockerSocketMounted",
+        "imageDigest",
+        "imagePurpose",
+        "imageReference",
+        "libraries",
+        "networkMode",
+        "officialHarnessRevision",
+        "pythonVersion",
+        "readOnlyRootFilesystem",
+        "schema",
+        "suiteId",
+    }:
+        raise ValueError("DS-1000 sandbox image inventory shape is invalid")
+    if inventory.get("schema") != "Ds1000SandboxImageInventory/v1":
+        raise ValueError("DS-1000 sandbox image inventory schema is unsupported")
+    if inventory.get("suiteId") != entry.suite_id:
+        raise ValueError("DS-1000 sandbox image inventory suite is mismatched")
+    if inventory.get("officialHarnessRevision") != entry.harness_revision:
+        raise ValueError("DS-1000 sandbox image inventory revision is mismatched")
+    if inventory.get("imagePurpose") != "ds1000-official-execution":
+        raise ValueError("DS-1000 sandbox image inventory purpose is unsupported")
+    if inventory.get("pythonVersion") != "3.7.10":
+        raise ValueError("DS-1000 sandbox image inventory Python version is unsupported")
+    if (
+        inventory.get("dockerSocketMounted") is not False
+        or inventory.get("networkMode") != "disabled"
+        or inventory.get("readOnlyRootFilesystem") is not True
+    ):
+        raise ValueError("DS-1000 sandbox image inventory isolation is invalid")
+    image_digest = _catalog_sha256(inventory.get("imageDigest"), "DS-1000 imageDigest")
+    _validate_image_reference(
+        inventory.get("imageReference"), image_digest, "DS-1000 imageReference"
+    )
+    libraries = inventory.get("libraries")
+    if not isinstance(libraries, list):
+        raise ValueError("DS-1000 sandbox image inventory libraries are required")
+    observed_libraries: list[tuple[str, str]] = []
+    for library in libraries:
+        if not isinstance(library, Mapping) or set(library) != {"name", "version"}:
+            raise ValueError("DS-1000 library inventory entry is invalid")
+        name = library.get("name")
+        version = library.get("version")
+        if not isinstance(name, str) or not isinstance(version, str) or not version.strip():
+            raise ValueError("DS-1000 library inventory entry is incomplete")
+        observed_libraries.append((name, version))
+    if tuple(observed_libraries) != _DS1000_LIBRARY_VERSIONS:
+        raise ValueError("DS-1000 sandbox image inventory libraries are noncanonical")
+
+
+def _validate_swe_bench_sandbox_inventory(
+    payload: bytes, entry: BenchmarkSuiteCatalogEntry
+) -> None:
+    inventory = _json_mapping(payload, "SWE-bench sandbox image inventory")
+    if set(inventory) != {
+        "dockerSocketMounted",
+        "executionMode",
+        "instances",
+        "networkMode",
+        "officialHarnessRevision",
+        "schema",
+        "suiteId",
+    }:
+        raise ValueError("SWE-bench sandbox image inventory shape is invalid")
+    if inventory.get("schema") != "SweBenchSandboxImageInventory/v1":
+        raise ValueError("SWE-bench sandbox image inventory schema is unsupported")
+    if inventory.get("suiteId") != entry.suite_id:
+        raise ValueError("SWE-bench sandbox image inventory suite is mismatched")
+    if inventory.get("officialHarnessRevision") != entry.harness_revision:
+        raise ValueError("SWE-bench sandbox image inventory revision is mismatched")
+    if inventory.get("executionMode") != "prebuilt-per-instance-image":
+        raise ValueError("SWE-bench sandbox image inventory execution mode is unsupported")
+    if (
+        inventory.get("dockerSocketMounted") is not False
+        or inventory.get("networkMode") != "disabled"
+    ):
+        raise ValueError("SWE-bench sandbox image inventory isolation is invalid")
+    instances = inventory.get("instances")
+    if not isinstance(instances, list) or not instances:
+        raise ValueError("SWE-bench sandbox image inventory instances are required")
+    observed_ids: list[str] = []
+    for instance in instances:
+        if not isinstance(instance, Mapping) or set(instance) != {
+            "baseCommit",
+            "imageDigest",
+            "imageReference",
+            "instanceId",
+            "repository",
+        }:
+            raise ValueError("SWE-bench sandbox image inventory entry is invalid")
+        instance_id = instance.get("instanceId")
+        repository = instance.get("repository")
+        base_commit = instance.get("baseCommit")
+        if not isinstance(instance_id, str) or not instance_id.strip():
+            raise ValueError("SWE-bench sandbox image inventory instanceId is invalid")
+        if (
+            not isinstance(repository, str)
+            or len(repository.split("/")) != 2
+            or any(not part for part in repository.split("/"))
+        ):
+            raise ValueError("SWE-bench sandbox image inventory repository is invalid")
+        if (
+            not isinstance(base_commit, str)
+            or len(base_commit) != 40
+            or any(character not in "0123456789abcdef" for character in base_commit)
+        ):
+            raise ValueError("SWE-bench sandbox image inventory baseCommit is invalid")
+        image_digest = _catalog_sha256(instance.get("imageDigest"), "SWE-bench imageDigest")
+        _validate_image_reference(
+            instance.get("imageReference"), image_digest, "SWE-bench imageReference"
+        )
+        observed_ids.append(instance_id)
+    if observed_ids != sorted(observed_ids) or len(set(observed_ids)) != len(observed_ids):
+        raise ValueError("SWE-bench sandbox image inventory order is noncanonical")
+
+
+def _validate_image_reference(value: object, digest: str, field_name: str) -> None:
+    if not isinstance(value, str) or not _IMAGE_REFERENCE.fullmatch(value):
+        raise ValueError(f"{field_name} must use an immutable digest")
+    if not value.endswith("@" + digest):
+        raise ValueError(f"{field_name} and image digest are mismatched")
+
+
+def _json_mapping(payload: bytes, field_name: str) -> Mapping[str, object]:
+    try:
+        value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{field_name} must be UTF-8 JSON") from exc
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{field_name} must be a JSON object")
+    return value
+
+
+def _catalog_sha256(value: object, field_name: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != len("sha256:") + 64
+        or not value.startswith("sha256:")
+        or any(character not in "0123456789abcdef" for character in value[7:])
+    ):
+        raise ValueError(f"{field_name} must be sha256:<64 lowercase hex>")
+    return value
+
+
+def _compact_immutable_artifact(
+    snapshot: Mapping[str, object], suite_id: str, role: str
+) -> dict[str, str]:
+    artifact = snapshot.get("immutable_artifact")
+    if not isinstance(artifact, Mapping):
+        raise ValueError(f"execution substrate artifact is not immutable: {suite_id}/{role}")
+    expected = {
+        "artifactPath": _required_catalog_str(artifact, "artifactPath"),
+        "artifactSha256": _required_catalog_str(artifact, "artifactSha256"),
+        "artifactVersionId": _required_catalog_str(artifact, "artifactVersionId"),
+        "objectLockMode": _required_catalog_str(artifact, "objectLockMode"),
+    }
+    if expected["objectLockMode"] != "COMPLIANCE":
+        raise ValueError(f"execution substrate artifact is not COMPLIANCE: {suite_id}/{role}")
+    return expected
 
 
 def _validated_native_corpus_materialization(

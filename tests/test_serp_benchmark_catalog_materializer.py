@@ -132,7 +132,7 @@ def test_catalog_materializer_seals_catalog_snapshot_in_immutable_receipt() -> N
                     for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
                 ],
             },
-            "contractVersion": "serp-benchmark-catalog-materializer/v4",
+            "contractVersion": "serp-benchmark-catalog-materializer/v5",
             "dagId": "serp_nightly_regression_suite",
             "operationId": "op-1",
         },
@@ -148,6 +148,12 @@ def test_catalog_acquisition_workload_has_minimal_proxy_and_evidence_contract(
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_PATH_STYLE": "true",
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION": "us-east-1",
         "ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS": "365",
+        "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE": (
+            '{"objectLockMode":"COMPLIANCE","s3Uri":"s3://airflow-serp-evidence/'
+            'serp-evals/substrates/source-set.json","sha256":"sha256:'
+            + "a" * 64
+            + '","versionId":"source-set-v1"}'
+        ),
         "ADAPSTORY_SERP_SOURCE_PROXY_URL": "http://forward-proxy.forward-proxy.svc:3128",
     }.items():
         monkeypatch.setenv(name, value)
@@ -171,6 +177,7 @@ def test_catalog_acquisition_workload_has_minimal_proxy_and_evidence_contract(
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_STS_DURATION_SECONDS",
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_PATH_STYLE",
         "ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS",
+        "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE",
         "ADAPSTORY_SERP_SOURCE_PROXY_URL",
         "HTTP_PROXY",
         "HTTPS_PROXY",
@@ -187,6 +194,12 @@ def test_catalog_acquisition_workload_has_minimal_proxy_and_evidence_contract(
     )
     assert literal_env["ADAPSTORY_AIRFLOW_ARTIFACT_S3_STS_DURATION_SECONDS"] == '"900"'
     assert literal_env["ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS"] == '"365"'
+    assert literal_env["ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE"] == (
+        '{"objectLockMode":"COMPLIANCE","s3Uri":"s3://airflow-serp-evidence/'
+        'serp-evals/substrates/source-set.json","sha256":"sha256:'
+        + "a" * 64
+        + '","versionId":"source-set-v1"}'
+    )
     assert literal_env["ADAPSTORY_SERP_SOURCE_PROXY_URL"] == (
         "http://forward-proxy.forward-proxy.svc:3128"
     )

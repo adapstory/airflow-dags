@@ -21,7 +21,11 @@ from uuid import UUID
 import pytest
 
 import dags.serp_eval_contracts as serp_eval_contracts_module
-from dags.serp_benchmark_catalog import MANDATORY_BENCHMARK_SUITE_CATALOG
+from dags.serp_benchmark_catalog import (
+    EXTERNAL_EXECUTION_SUBSTRATE_ROLES,
+    MANDATORY_BENCHMARK_SUITE_CATALOG,
+    MANDATORY_EXECUTION_SUBSTRATE_ROLES,
+)
 from dags.serp_eval_contracts import (
     MANDATORY_SERP_BENCHMARK_SUITES,
     SERP_NORMALIZED_GATE_FLOOR,
@@ -581,6 +585,7 @@ def test_catalog_materializer_accepts_dedicated_dataset_evidence_plan() -> None:
         snapshot_bytes_writer=snapshot_bytes_writer,
         native_adapter_materializer=_native_adapter_materializer,
         native_corpus_materializer=_native_corpus_materializer,
+        execution_substrate_materializer=_execution_substrate_materializer,
     )
 
     assert result["catalogStatus"] == "ready"
@@ -594,7 +599,87 @@ def test_catalog_materializer_accepts_dedicated_dataset_evidence_plan() -> None:
         }
         for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
     ]
-    assert len(written) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 6) + 4
+    assert len(written) == (
+        (len(MANDATORY_SERP_BENCHMARK_SUITES) * 6)
+        + 4
+        + sum(len(roles) for roles in MANDATORY_EXECUTION_SUBSTRATE_ROLES.values())
+    )
+
+
+def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() -> None:
+    role_payloads = {
+        (suite_id, role): f"sealed:{suite_id}:{role}".encode()
+        for suite_id, roles in EXTERNAL_EXECUTION_SUBSTRATE_ROLES.items()
+        for role in roles
+    }
+    objects: dict[tuple[str, str], bytes] = {}
+    suite_entries: list[dict[str, object]] = []
+    for suite_id, roles in EXTERNAL_EXECUTION_SUBSTRATE_ROLES.items():
+        role_entries: list[dict[str, object]] = []
+        for role in roles:
+            payload = role_payloads[(suite_id, role)]
+            key = f"serp-evals/substrates/{suite_id}/{role}.json"
+            version_id = f"version-{suite_id}-{role}"
+            objects[(key, version_id)] = payload
+            role_entries.append(
+                {
+                    "evidence": {
+                        "objectLockMode": "COMPLIANCE",
+                        "s3Uri": f"s3://airflow-serp-evidence/{key}",
+                        "sha256": "sha256:" + sha256(payload).hexdigest(),
+                        "versionId": version_id,
+                    },
+                    "role": role,
+                }
+            )
+        suite_entries.append({"roles": role_entries, "suiteId": suite_id})
+    source_set = {
+        "schema": "BenchmarkExecutionSubstrateSourceSet/v1",
+        "suites": suite_entries,
+    }
+    source_set_bytes = json.dumps(
+        source_set, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+    ).encode()
+    source_key = "serp-evals/substrates/source-set.json"
+    source_version = "source-set-version"
+    objects[(source_key, source_version)] = source_set_bytes
+    source_evidence = {
+        "objectLockMode": "COMPLIANCE",
+        "s3Uri": f"s3://airflow-serp-evidence/{source_key}",
+        "sha256": "sha256:" + sha256(source_set_bytes).hexdigest(),
+        "versionId": source_version,
+    }
+
+    class Body:
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+
+        def read(self) -> bytes:
+            return self._payload
+
+    class FakeS3Client:
+        def head_object(self, *, Bucket: str, Key: str, VersionId: str) -> dict[str, object]:
+            assert Bucket == "airflow-serp-evidence"
+            assert (Key, VersionId) in objects
+            return {
+                "ObjectLockMode": "COMPLIANCE",
+                "ObjectLockRetainUntilDate": datetime.now(UTC) + timedelta(days=365),
+                "VersionId": VersionId,
+            }
+
+        def get_object(self, *, Bucket: str, Key: str, VersionId: str) -> dict[str, object]:
+            assert Bucket == "airflow-serp-evidence"
+            return {"Body": Body(objects[(Key, VersionId)])}
+
+    loaded = serp_eval_contracts_module._load_execution_substrate_source_set(
+        source_evidence,
+        s3_client=FakeS3Client(),
+    )
+
+    assert loaded == {
+        suite_id: {role: role_payloads[(suite_id, role)] for role in roles}
+        for suite_id, roles in EXTERNAL_EXECUTION_SUBSTRATE_ROLES.items()
+    }
 
 
 def test_nightly_regression_plan_rejects_caller_supplied_suite_inputs() -> None:
@@ -643,6 +728,7 @@ def test_nightly_catalog_materialization_writes_all_live_evidence_before_native_
         snapshot_bytes_writer=snapshot_bytes_writer,
         native_adapter_materializer=_native_adapter_materializer,
         native_corpus_materializer=_native_corpus_materializer,
+        execution_substrate_materializer=_execution_substrate_materializer,
     )
 
     assert result["catalogStatus"] == "ready"
@@ -651,7 +737,11 @@ def test_nightly_catalog_materialization_writes_all_live_evidence_before_native_
         MANDATORY_SERP_BENCHMARK_SUITES
     )
     assert written[-1]["artifact_path"] == plan.payload["artifact_paths"]["benchmark_catalog"]
-    assert len(written) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 6) + 4
+    assert len(written) == (
+        (len(MANDATORY_SERP_BENCHMARK_SUITES) * 6)
+        + 4
+        + sum(len(roles) for roles in MANDATORY_EXECUTION_SUBSTRATE_ROLES.values())
+    )
 
 
 @pytest.mark.parametrize(
@@ -682,7 +772,8 @@ def test_load_materialized_catalog_binds_receipt_and_catalog_s3_versions(
     }
     catalog_payload = {
         "catalog_status": "ready",
-        "contract_version": "serp-benchmark-catalog/v4",
+        "contract_version": "serp-benchmark-catalog/v5",
+        "observed_at": "2026-07-13T00:00:00Z",
         "suites": [
             {
                 "corpus_snapshots": {
@@ -700,8 +791,26 @@ def test_load_materialized_catalog_binds_receipt_and_catalog_s3_versions(
                         "url": f"derived://native-corpus/{entry.suite_id}/corpus",
                     }
                 },
+                "dataset_id": entry.dataset_id,
+                "dataset_license_id": entry.dataset_license_id,
+                "dataset_revision": entry.dataset_revision,
+                "dataset_snapshots": {},
                 "distribution_rule": entry.distribution_rule,
                 "execution_status": "ready",
+                "execution_substrate_artifacts": {
+                    role: {
+                        "artifactPath": (
+                            "s3://airflow-serp-evidence/catalog/"
+                            f"{entry.suite_id}/execution-substrate-{role}"
+                        ),
+                        "artifactSha256": sha256(f"{entry.suite_id}:{role}".encode()).hexdigest(),
+                        "artifactVersionId": f"{entry.suite_id}-{role}-v1",
+                        "objectLockMode": "COMPLIANCE",
+                    }
+                    for role in MANDATORY_EXECUTION_SUBSTRATE_ROLES[entry.suite_id]
+                },
+                "legal_boundary": entry.legal_boundary,
+                "license_snapshot": {},
                 "native_adapter_manifest": {
                     "corpusEvidence": [
                         {
@@ -738,6 +847,7 @@ def test_load_materialized_catalog_binds_receipt_and_catalog_s3_versions(
                     "source_archive_snapshot": {"sha256": "sha256:" + "c" * 64},
                 },
                 "rights_status": entry.rights_status,
+                "source_snapshot": {},
                 "suite_id": entry.suite_id,
             }
             for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
@@ -774,7 +884,7 @@ def test_load_materialized_catalog_binds_receipt_and_catalog_s3_versions(
                 for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
             ],
         },
-        "contractVersion": "serp-benchmark-catalog-materializer/v4",
+        "contractVersion": "serp-benchmark-catalog-materializer/v5",
         "dagId": plan.payload["dag_id"],
         "operationId": plan.payload["operation_id"],
     }
@@ -2061,7 +2171,13 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
                     "prepare_code_sandbox_"
                     f"{suite_id.casefold().replace(' ', '_').replace('-', '_')}_"
                     f"{side}_{repetition}",
+                    "fanout_code_sandbox_"
+                    f"{suite_id.casefold().replace(' ', '_').replace('-', '_')}_"
+                    f"{side}_{repetition}",
                     "execute_code_sandbox_"
+                    f"{suite_id.casefold().replace(' ', '_').replace('-', '_')}_"
+                    f"{side}_{repetition}",
+                    "result_set_plan_code_sandbox_"
                     f"{suite_id.casefold().replace(' ', '_').replace('-', '_')}_"
                     f"{side}_{repetition}",
                     f"seal_code_sandbox_{suite_id.casefold().replace(' ', '_').replace('-', '_')}_"
@@ -5689,9 +5805,31 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
+    class FakeXComArg:
+        def __init__(self, operator: object) -> None:
+            self.operator = operator
+
+    class FakePartialOperator:
+        def __init__(
+            self, operator_class: type[FakePythonOperator], kwargs: dict[str, object]
+        ) -> None:
+            self.operator_class = operator_class
+            self.kwargs = kwargs
+
+        def expand_kwargs(self, mapped_kwargs: object) -> FakePythonOperator:
+            return self.operator_class(**self.kwargs, mapped_kwargs=mapped_kwargs)
+
     class FakePythonOperator:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             self.kwargs = _kwargs
+
+        @classmethod
+        def partial(cls, **kwargs: object) -> FakePartialOperator:
+            return FakePartialOperator(cls, kwargs)
+
+        @property
+        def output(self) -> FakeXComArg:
+            return FakeXComArg(self)
 
         def __rshift__(self, other: object) -> object:
             return other
@@ -5742,6 +5880,7 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         "ADAPSTORY_SERP_QDRANT_URL",
         "ADAPSTORY_SERP_SEARCH_SERVE_ACTOR_ID",
         "ADAPSTORY_SERP_SEARCH_SERVE_BASE_URL",
+        "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE",
         "ADAPSTORY_SERP_PUBLIC_DOCS_RETRY_DELAY_SECONDS",
         "ADAPSTORY_SERP_SOURCE_CURL_FALLBACK_ENABLED",
         "ADAPSTORY_SERP_SOURCE_FETCH_TIMEOUT_SECONDS",
@@ -5797,11 +5936,13 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     cast(Any, modules["airflow.utils.trigger_rule"]).TriggerRule = FakeTriggerRule
     models = cast(Any, modules["kubernetes.client.models"])
     models.V1Capabilities = FakeKubernetesModel
+    models.V1ConfigMapProjection = FakeKubernetesModel
     models.V1EnvVar = FakeKubernetesModel
     models.V1EnvVarSource = FakeKubernetesModel
     models.V1Container = FakeKubernetesModel
     models.V1EmptyDirVolumeSource = FakeKubernetesModel
     models.V1ObjectMeta = FakeKubernetesModel
+    models.V1ObjectFieldSelector = FakeKubernetesModel
     models.V1Pod = FakeKubernetesModel
     models.V1PodSpec = FakeKubernetesModel
     models.V1PodSecurityContext = FakeKubernetesModel
@@ -5810,6 +5951,7 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     models.V1SecretKeySelector = FakeKubernetesModel
     models.V1SecurityContext = FakeKubernetesModel
     models.V1ServiceAccountTokenProjection = FakeKubernetesModel
+    models.V1KeyToPath = FakeKubernetesModel
     models.V1Volume = FakeKubernetesModel
     models.V1VolumeMount = FakeKubernetesModel
     models.V1VolumeProjection = FakeKubernetesModel
@@ -6102,7 +6244,9 @@ def test_d19_routes_code_suites_through_credential_isolated_sandbox_chains(
     assert module.D19_CODE_SANDBOX_SUITES == frozenset({"CodeRAG-Bench", "SWE-bench Verified"})
     assert len(module.D19_STANDARD_HARNESS_RUN_TASKS) == 70
     assert len(module.D19_CODE_SANDBOX_PREPARE_TASKS) == 20
+    assert len(module.D19_CODE_SANDBOX_FANOUT_TASKS) == 20
     assert len(module.D19_CODE_SANDBOX_TASKS) == 20
+    assert len(module.D19_CODE_SANDBOX_RESULT_SET_PLAN_TASKS) == 20
     assert len(module.D19_CODE_SANDBOX_SEAL_TASKS) == 20
     assert len(module.D19_OFFICIAL_HARNESS_RUN_TASKS) == 90
     for identity, sandbox_task in module.D19_CODE_SANDBOX_TASKS.items():
@@ -6113,40 +6257,80 @@ def test_d19_routes_code_suites_through_credential_isolated_sandbox_chains(
         assert kwargs["automount_service_account_token"] is False
         assert kwargs["labels"]["adapstory.com/serp-network-profile"] == ("benchmark-code-sandbox")
         assert kwargs["do_xcom_push"] is True
+        output_mount = next(
+            mount
+            for mount in kwargs["volume_mounts"]
+            if mount.kwargs["mount_path"] == "/sandbox/output"
+        )
+        assert output_mount.kwargs["read_only"] is True
         assert kwargs["cmds"] == [
             "python",
             "-m",
             "adapstory_serp_pipeline.orchestration.official_harness_execution",
         ]
-        assert kwargs["arguments"][0] == "publish-code-sandbox-result"
-        assert kwargs["arguments"][-2:] == ["--xcom-output", "/airflow/xcom/return.json"]
+        assert kwargs["image"] == "harbor/airflow@sha256:" + "d" * 64
+        publisher_env = {env.kwargs["name"]: env for env in kwargs["env_vars"]}
+        assert set(("POD_NAME", "POD_NAMESPACE", "POD_UID")) <= set(publisher_env)
+        assert (
+            publisher_env["POD_NAME"].kwargs["value_from"].kwargs["field_ref"].kwargs["field_path"]
+            == "metadata.name"
+        )
+        assert (
+            publisher_env["POD_NAMESPACE"]
+            .kwargs["value_from"]
+            .kwargs["field_ref"]
+            .kwargs["field_path"]
+            == "metadata.namespace"
+        )
+        assert (
+            publisher_env["POD_UID"].kwargs["value_from"].kwargs["field_ref"].kwargs["field_path"]
+            == "metadata.uid"
+        )
+        pod_status_mount = next(
+            mount
+            for mount in kwargs["volume_mounts"]
+            if mount.kwargs["mount_path"] == "/var/run/secrets/kubernetes.io/serviceaccount"
+        )
+        assert pod_status_mount.kwargs["name"] == "d19-code-sandbox-pod-status-token"
+        assert pod_status_mount.kwargs["read_only"] is True
+        pod_status_volume = next(
+            volume
+            for volume in kwargs["volumes"]
+            if volume.kwargs["name"] == "d19-code-sandbox-pod-status-token"
+        )
+        projected_sources = pod_status_volume.kwargs["projected"].kwargs["sources"]
+        assert len(projected_sources) == 2
+        assert (
+            projected_sources[0].kwargs["service_account_token"].kwargs["expiration_seconds"] == 900
+        )
+        assert projected_sources[1].kwargs["config_map"].kwargs["name"] == ("kube-root-ca.crt")
+        workspace = next(
+            volume
+            for volume in kwargs["volumes"]
+            if volume.kwargs["name"] == "d19-code-sandbox-workspace"
+        )
+        assert workspace.kwargs["empty_dir"].kwargs["size_limit"] == "32Gi"
+        assert kwargs["mapped_kwargs"].operator is module.D19_CODE_SANDBOX_FANOUT_TASKS[identity]
         assert not any(
             "OLLAMA" in env.kwargs.get("name", "")
             or "BC21" in env.kwargs.get("name", "")
             or "MCP" in env.kwargs.get("name", "")
             for env in kwargs["env_vars"]
         )
-        init_container = kwargs["init_containers"][0]
-        assert init_container.kwargs["name"] == "stage-code-sandbox"
-        assert init_container.kwargs["args"][0] == "stage-code-sandbox"
-        full_spec = kwargs["full_pod_spec"].kwargs["spec"]
-        assert full_spec.kwargs["share_process_namespace"] is False
-        executor = full_spec.kwargs["containers"][1]
-        assert executor.kwargs["name"] == "sandbox-executor"
-        assert executor.kwargs["args"][0] == "execute-code-sandbox"
-        assert executor.kwargs["env"] == []
-        assert executor.kwargs["env_from"] == []
-        assert {mount.kwargs["mount_path"] for mount in executor.kwargs["volume_mounts"]} == {
-            "/sandbox/input",
-            "/sandbox/output",
-            "/tmp",
-        }
-        assert executor.kwargs["security_context"].kwargs["read_only_root_filesystem"] is True
-        assert executor.kwargs["security_context"].kwargs["run_as_non_root"] is True
-        assert (
-            executor.kwargs["resources"].kwargs["limits"]
-            == (module.D19_OFFICIAL_HARNESS_LIMITS[suite_id])
+        assert "arguments" not in kwargs
+        assert "init_containers" not in kwargs
+        assert "full_pod_spec" not in kwargs
+        fanout = module.D19_CODE_SANDBOX_FANOUT_TASKS[identity]
+        assert fanout.kwargs["python_callable"] is (
+            module.build_code_sandbox_mapped_operator_kwargs
         )
+        result_set_plan = module.D19_CODE_SANDBOX_RESULT_SET_PLAN_TASKS[identity]
+        assert result_set_plan.kwargs["python_callable"] is (
+            module.write_code_sandbox_result_set_assembly_plan
+        )
+        seal_arguments = module.D19_CODE_SANDBOX_SEAL_TASKS[identity].kwargs["arguments"]
+        assert "--sandbox-result-set-plan" in seal_arguments
+        assert "--sandbox-result" not in seal_arguments
         assert (
             module.D19_CODE_SANDBOX_PREPARE_TASKS[identity].kwargs["service_account_name"]
             == "airflow-serp-benchmark-aggregator"
@@ -6157,7 +6341,375 @@ def test_d19_routes_code_suites_through_credential_isolated_sandbox_chains(
         )
 
     source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(encoding="utf-8")
-    assert "prepare_task >> sandbox_task >> seal_task >> write_assembly_plan" in source
+    assert "KubernetesPodOperator.partial(" in source
+    assert ").expand_kwargs(fanout_task.output)" in source
+    assert "prepare_task >> fanout_task >> sandbox_task >> result_set_plan_task" in source
+    assert "result_set_plan_task >> seal_task >> write_assembly_plan" in source
+
+
+def test_d19_maps_ds1000_from_one_sealed_suite_specific_sandbox_work_item(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    for name, value in {
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT": "http://minio:9000",
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION": "us-east-1",
+        "ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST": "sha256:" + "d" * 64,
+        "ADAPSTORY_SERP_BC21_BASE_URL": "http://context-platform:8080/api/bc-21/serp/v1",
+        "ADAPSTORY_OLLAMA_BASE_URL": "http://ollama.ollama.svc.cluster.local:11434",
+    }.items():
+        monkeypatch.setenv(name, value)
+    module = importlib.import_module("dags.serp_benchmark_improvement_wave")
+    module = importlib.reload(module)
+    evidence = {
+        "artifactPath": "s3://airflow-serp-evidence/serp-evals/op/sandbox-work-item.json",
+        "artifactSha256": "sha256:" + "a" * 64,
+        "artifactVersionId": "sandbox-work-item-version",
+        "objectLockMode": "COMPLIANCE",
+    }
+    image_digest = "sha256:" + "b" * 64
+    prepared = {
+        "schema": "SandboxWorkItemSet/v1",
+        "suiteId": "CodeRAG-Bench",
+        "side": "candidate",
+        "repetition": 1,
+        "workItemSetEvidence": {
+            **evidence,
+            "artifactPath": "s3://airflow-serp-evidence/serp-evals/op/sandbox-work-items.json",
+        },
+        "workItems": [
+            {
+                "caseIdSha256": "sha256:" + "c" * 64,
+                "executorArgs": ["/sandbox/input/ds1000_executor.py"],
+                "executorCommand": "/usr/local/bin/python3.7",
+                "sandboxImageDigest": image_digest,
+                "sandboxImageReference": "harbor.adapstory.com/serp/ds1000@" + image_digest,
+                "sandboxWorkItemEvidence": evidence,
+            }
+        ],
+    }
+
+    mapped = module.build_code_sandbox_mapped_operator_kwargs(
+        prepared,
+        expected_suite_id="CodeRAG-Bench",
+        expected_side="candidate",
+        expected_repetition=1,
+        trusted_runtime_image="harbor.adapstory.com/adapstory/airflow@sha256:" + "d" * 64,
+    )
+
+    assert len(mapped) == 1
+    assert mapped[0]["arguments"][0] == "publish-code-sandbox-result"
+    assert "/sandbox/output/raw-result.json" in mapped[0]["arguments"]
+    pod = mapped[0]["pod_template_dict"]
+    assert pod["spec"]["initContainers"][0]["image"].endswith("@sha256:" + "d" * 64)
+    assert [container["name"] for container in pod["spec"]["containers"]] == ["base"]
+    assert [container["name"] for container in pod["spec"]["initContainers"]] == [
+        "stage-code-sandbox",
+        "sandbox-executor",
+    ]
+    executor = pod["spec"]["initContainers"][1]
+    stage = pod["spec"]["initContainers"][0]
+    assert executor["image"] == "harbor.adapstory.com/serp/ds1000@" + image_digest
+    assert executor["env"] == []
+    assert executor["envFrom"] == []
+    assert executor["command"] == ["/usr/local/bin/python3.7"]
+    assert executor["args"] == ["/sandbox/input/ds1000_executor.py"]
+    assert executor["resources"]["requests"]["ephemeral-storage"] == "8Gi"
+    assert executor["resources"]["limits"]["ephemeral-storage"] == "36Gi"
+    assert stage["resources"]["requests"]["ephemeral-storage"] == "1Gi"
+    assert stage["resources"]["limits"]["ephemeral-storage"] == "6Gi"
+    assert "adapstory_serp_pipeline" not in json.dumps(executor, sort_keys=True)
+    assert "/airflow/xcom" not in {mount["mountPath"] for mount in executor["volumeMounts"]}
+    assert "/var/run/docker.sock" not in {mount["mountPath"] for mount in executor["volumeMounts"]}
+    assert "/var/run/secrets/kubernetes.io/serviceaccount" not in {
+        mount["mountPath"] for mount in executor["volumeMounts"]
+    }
+    assert "/var/run/secrets/kubernetes.io/serviceaccount" not in {
+        mount["mountPath"] for mount in stage["volumeMounts"]
+    }
+
+
+def test_d19_maps_swe_bench_by_exact_instance_image_repo_and_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    for name, value in {
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT": "http://minio:9000",
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION": "us-east-1",
+        "ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST": "sha256:" + "d" * 64,
+        "ADAPSTORY_SERP_BC21_BASE_URL": "http://context-platform:8080/api/bc-21/serp/v1",
+        "ADAPSTORY_OLLAMA_BASE_URL": "http://ollama.ollama.svc.cluster.local:11434",
+    }.items():
+        monkeypatch.setenv(name, value)
+    module = importlib.import_module("dags.serp_benchmark_improvement_wave")
+    module = importlib.reload(module)
+
+    def evidence(name: str, digest: str) -> dict[str, str]:
+        return {
+            "artifactPath": f"s3://airflow-serp-evidence/serp-evals/op/{name}.json",
+            "artifactSha256": "sha256:" + digest * 64,
+            "artifactVersionId": f"{name}-version",
+            "objectLockMode": "COMPLIANCE",
+        }
+
+    first_digest = "sha256:" + "1" * 64
+    second_digest = "sha256:" + "2" * 64
+    prepared = {
+        "schema": "SandboxWorkItemSet/v1",
+        "suiteId": "SWE-bench Verified",
+        "side": "baseline",
+        "repetition": 5,
+        "workItemSetEvidence": evidence("work-item-set", "a"),
+        "workItems": [
+            {
+                "baseCommit": "3" * 40,
+                "caseIdSha256": "sha256:" + "3" * 64,
+                "executorArgs": ["/sandbox/input/swe_executor.sh"],
+                "executorCommand": "/bin/bash",
+                "repository": "django/django",
+                "sandboxImageDigest": first_digest,
+                "sandboxImageReference": "harbor.adapstory.com/serp/swe-django@" + first_digest,
+                "sandboxWorkItemEvidence": evidence("django", "b"),
+            },
+            {
+                "baseCommit": "4" * 40,
+                "caseIdSha256": "sha256:" + "4" * 64,
+                "executorArgs": ["/sandbox/input/swe_executor.sh"],
+                "executorCommand": "/bin/bash",
+                "repository": "pytest-dev/pytest",
+                "sandboxImageDigest": second_digest,
+                "sandboxImageReference": "harbor.adapstory.com/serp/swe-pytest@" + second_digest,
+                "sandboxWorkItemEvidence": evidence("pytest", "c"),
+            },
+        ],
+    }
+
+    mapped = module.build_code_sandbox_mapped_operator_kwargs(
+        prepared,
+        expected_suite_id="SWE-bench Verified",
+        expected_side="baseline",
+        expected_repetition=5,
+        trusted_runtime_image="harbor.adapstory.com/adapstory/airflow@sha256:" + "d" * 64,
+    )
+
+    executors = [item["pod_template_dict"]["spec"]["initContainers"][1] for item in mapped]
+    assert [executor["image"] for executor in executors] == [
+        "harbor.adapstory.com/serp/swe-django@" + first_digest,
+        "harbor.adapstory.com/serp/swe-pytest@" + second_digest,
+    ]
+    assert all(executor["command"] == ["/bin/bash"] for executor in executors)
+    assert all(executor["args"] == ["/sandbox/input/swe_executor.sh"] for executor in executors)
+    assert all("adapstory_serp_pipeline" not in json.dumps(executor) for executor in executors)
+    assert all(
+        executor["securityContext"]["readOnlyRootFilesystem"] is True for executor in executors
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda payload: payload.update(workItems=[]), "inventory is required"),
+        (
+            lambda payload: payload["workItems"][0].update(
+                sandboxImageReference="harbor.adapstory.com/serp/ds1000:latest"
+            ),
+            "immutable digest",
+        ),
+        (
+            lambda payload: payload["workItems"][0]["sandboxWorkItemEvidence"].update(
+                objectLockMode="GOVERNANCE"
+            ),
+            "COMPLIANCE",
+        ),
+        (
+            lambda payload: payload["workItems"][0].update(executorCommand="/bin/sh"),
+            "executor command",
+        ),
+        (
+            lambda payload: payload["workItems"][0].update(executorArgs=["-c", "id"]),
+            "executor arguments",
+        ),
+    ],
+)
+def test_d19_sandbox_fanout_fails_closed_without_exact_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: Any,
+    message: str,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    for name, value in {
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT": "http://minio:9000",
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION": "us-east-1",
+        "ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST": "sha256:" + "d" * 64,
+        "ADAPSTORY_SERP_BC21_BASE_URL": "http://context-platform:8080/api/bc-21/serp/v1",
+        "ADAPSTORY_OLLAMA_BASE_URL": "http://ollama.ollama.svc.cluster.local:11434",
+    }.items():
+        monkeypatch.setenv(name, value)
+    module = importlib.import_module("dags.serp_benchmark_improvement_wave")
+    module = importlib.reload(module)
+    image_digest = "sha256:" + "b" * 64
+    prepared = {
+        "schema": "SandboxWorkItemSet/v1",
+        "suiteId": "CodeRAG-Bench",
+        "side": "candidate",
+        "repetition": 1,
+        "workItemSetEvidence": {
+            "artifactPath": "s3://airflow-serp-evidence/serp-evals/op/set.json",
+            "artifactSha256": "sha256:" + "a" * 64,
+            "artifactVersionId": "set-version",
+            "objectLockMode": "COMPLIANCE",
+        },
+        "workItems": [
+            {
+                "caseIdSha256": "sha256:" + "c" * 64,
+                "executorArgs": ["/sandbox/input/ds1000_executor.py"],
+                "executorCommand": "/usr/local/bin/python3.7",
+                "sandboxImageDigest": image_digest,
+                "sandboxImageReference": "harbor.adapstory.com/serp/ds1000@" + image_digest,
+                "sandboxWorkItemEvidence": {
+                    "artifactPath": "s3://airflow-serp-evidence/serp-evals/op/item.json",
+                    "artifactSha256": "sha256:" + "d" * 64,
+                    "artifactVersionId": "item-version",
+                    "objectLockMode": "COMPLIANCE",
+                },
+            }
+        ],
+    }
+    mutation(prepared)
+
+    with pytest.raises(ValueError, match=message):
+        module.build_code_sandbox_mapped_operator_kwargs(
+            prepared,
+            expected_suite_id="CodeRAG-Bench",
+            expected_side="candidate",
+            expected_repetition=1,
+            trusted_runtime_image=("harbor.adapstory.com/adapstory/airflow@sha256:" + "d" * 64),
+        )
+
+
+def test_d19_aggregates_every_mapped_swe_result_into_one_worm_seal_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    for name, value in {
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT": "http://minio:9000",
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION": "us-east-1",
+        "ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST": "sha256:" + "d" * 64,
+        "ADAPSTORY_SERP_BC21_BASE_URL": "http://context-platform:8080/api/bc-21/serp/v1",
+        "ADAPSTORY_OLLAMA_BASE_URL": "http://ollama.ollama.svc.cluster.local:11434",
+    }.items():
+        monkeypatch.setenv(name, value)
+    module = importlib.import_module("dags.serp_benchmark_improvement_wave")
+    module = importlib.reload(module)
+
+    def evidence(name: str, digest: str) -> dict[str, str]:
+        return {
+            "artifactPath": f"s3://airflow-serp-evidence/serp-evals/op/{name}.json",
+            "artifactSha256": "sha256:" + digest * 64,
+            "artifactVersionId": f"{name}-version",
+            "objectLockMode": "COMPLIANCE",
+        }
+
+    prepared = {
+        "schema": "SandboxWorkItemSet/v1",
+        "suiteId": "SWE-bench Verified",
+        "side": "candidate",
+        "repetition": 2,
+        "workItemSetEvidence": evidence("work-item-set", "a"),
+        "workItems": [
+            {
+                "baseCommit": "1" * 40,
+                "caseIdSha256": "sha256:" + "1" * 64,
+                "executorArgs": ["/sandbox/input/swe_executor.sh"],
+                "executorCommand": "/bin/bash",
+                "repository": "django/django",
+                "sandboxImageDigest": "sha256:" + "3" * 64,
+                "sandboxImageReference": (
+                    "harbor.adapstory.com/serp/swe-django@sha256:" + "3" * 64
+                ),
+                "sandboxWorkItemEvidence": evidence("work-item-django", "b"),
+            },
+            {
+                "baseCommit": "2" * 40,
+                "caseIdSha256": "sha256:" + "2" * 64,
+                "executorArgs": ["/sandbox/input/swe_executor.sh"],
+                "executorCommand": "/bin/bash",
+                "repository": "pytest-dev/pytest",
+                "sandboxImageDigest": "sha256:" + "4" * 64,
+                "sandboxImageReference": (
+                    "harbor.adapstory.com/serp/swe-pytest@sha256:" + "4" * 64
+                ),
+                "sandboxWorkItemEvidence": evidence("work-item-pytest", "c"),
+            },
+        ],
+    }
+    results = [
+        {
+            "caseIdSha256": "sha256:" + "1" * 64,
+            "sandboxResultEvidence": evidence("result-django", "d"),
+        },
+        {
+            "caseIdSha256": "sha256:" + "2" * 64,
+            "sandboxResultEvidence": evidence("result-pytest", "e"),
+        },
+    ]
+    captured: list[dict[str, Any]] = []
+
+    def snapshot_writer(
+        artifact_path: str,
+        *,
+        artifact_type: str,
+        operation_id: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, str]:
+        captured.append(
+            {
+                "artifactPath": artifact_path,
+                "artifactType": artifact_type,
+                "operationId": operation_id,
+                "payload": dict(payload),
+            }
+        )
+        return evidence("result-set-plan", "f")
+
+    monkeypatch.setattr(module, "write_immutable_evidence_snapshot", snapshot_writer)
+    plan = {
+        "dag_id": "serp_benchmark_improvement_wave",
+        "operation_id": "op",
+        "artifact_paths": {
+            "paired_evaluation_assembly_plan": (
+                "s3://airflow-serp-evidence/serp-evals/op/paired-assembly.json"
+            )
+        },
+    }
+
+    assembled = module.write_code_sandbox_result_set_assembly_plan(
+        plan,
+        prepared,
+        results,
+        expected_suite_id="SWE-bench Verified",
+        expected_side="candidate",
+        expected_repetition=2,
+    )
+
+    assert assembled == {
+        "resultCount": 2,
+        "resultSetPlanEvidence": evidence("result-set-plan", "f"),
+        "repetition": 2,
+        "side": "candidate",
+        "suiteId": "SWE-bench Verified",
+    }
+    assert captured[0]["artifactType"] == "sandbox_result_set_assembly_plan"
+    payload = captured[0]["payload"]
+    assert payload["schema"] == "SandboxResultSetAssemblyPlan/v1"
+    assert [item["caseIdSha256"] for item in payload["results"]] == [
+        "sha256:" + "1" * 64,
+        "sha256:" + "2" * 64,
+    ]
+    assert [item["sandboxResultEvidence"] for item in payload["results"]] == [
+        evidence("result-django", "d"),
+        evidence("result-pytest", "e"),
+    ]
 
 
 def test_d19_model_runner_has_only_minio_and_ollama_runtime_env(
@@ -6676,6 +7228,91 @@ def _native_corpus_materializer(
         },
         "payloads": {"corpus": corpus},
     }
+
+
+def _execution_substrate_materializer(
+    suite_id: str,
+    _dataset_payloads: Mapping[str, bytes],
+    _dataset_snapshots: Mapping[str, Mapping[str, object]],
+    _corpus_payloads: Mapping[str, bytes],
+    _corpus_snapshots: Mapping[str, Mapping[str, object]],
+    _official_harness_payloads: Mapping[str, bytes],
+) -> Mapping[str, bytes]:
+    payloads = {
+        role: f"pinned-execution-substrate:{suite_id}:{role}".encode()
+        for role in MANDATORY_EXECUTION_SUBSTRATE_ROLES[suite_id]
+    }
+    revision = next(
+        entry.harness_revision
+        for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+        if entry.suite_id == suite_id
+    )
+    if suite_id == "CodeRAG-Bench":
+        payloads["execution-sandbox"] = json.dumps(
+            {
+                "dockerSocketMounted": False,
+                "imageDigest": "sha256:" + "1" * 64,
+                "imageReference": ("harbor.adapstory.com/serp/ds1000@sha256:" + "1" * 64),
+                "imagePurpose": "ds1000-official-execution",
+                "libraries": [
+                    {"name": name, "version": version}
+                    for name, version in (
+                        ("DateTime", "4.7"),
+                        ("gensim", "4.2.0"),
+                        ("matplotlib", "3.5.2"),
+                        ("numpy", "1.21.6"),
+                        ("openai", "0.23.0"),
+                        ("pandas", "1.3.5"),
+                        ("pandas-datareader", "0.10.0"),
+                        ("pathlib", "1.0.1"),
+                        ("scikit-learn", "1.0.2"),
+                        ("scipy", "1.7.3"),
+                        ("seaborn", "0.11.2"),
+                        ("statsmodels", "0.13.2"),
+                        ("tensorflow", "2.10.0"),
+                        ("tokenizers", "0.12.1"),
+                        ("torch", "1.12.1"),
+                        ("torchvision", "0.13.1"),
+                        ("tqdm", "4.64.1"),
+                        ("xgboost", "1.6.2"),
+                        ("Pillow", "9.2.0"),
+                    )
+                ],
+                "networkMode": "disabled",
+                "officialHarnessRevision": revision,
+                "pythonVersion": "3.7.10",
+                "readOnlyRootFilesystem": True,
+                "schema": "Ds1000SandboxImageInventory/v1",
+                "suiteId": suite_id,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    if suite_id == "SWE-bench Verified":
+        payloads["sandbox-image-set"] = json.dumps(
+            {
+                "dockerSocketMounted": False,
+                "executionMode": "prebuilt-per-instance-image",
+                "instances": [
+                    {
+                        "baseCommit": "2" * 40,
+                        "imageDigest": "sha256:" + "2" * 64,
+                        "imageReference": (
+                            "harbor.adapstory.com/serp/swe-django@sha256:" + "2" * 64
+                        ),
+                        "instanceId": "django__django-12345",
+                        "repository": "django/django",
+                    }
+                ],
+                "networkMode": "disabled",
+                "officialHarnessRevision": revision,
+                "schema": "SweBenchSandboxImageInventory/v1",
+                "suiteId": suite_id,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    return payloads
 
 
 def _d19_catalog_snapshot(plan: Any) -> dict[str, object]:

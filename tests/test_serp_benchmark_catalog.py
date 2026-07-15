@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
@@ -14,6 +15,7 @@ import dags.serp_eval_contracts as serp_eval_contracts_module
 from dags.serp_benchmark_catalog import (
     BENCHMARK_CATALOG_CONTRACT_VERSION,
     MANDATORY_BENCHMARK_SUITE_CATALOG,
+    MANDATORY_EXECUTION_SUBSTRATE_ROLES,
     build_live_benchmark_catalog_evidence,
     mandatory_benchmark_adapters_ready,
 )
@@ -176,7 +178,7 @@ def test_huggingface_dataset_artifact_uses_pinned_xet_aware_client(
 
 
 def test_catalog_covers_every_mandatory_suite_with_explicit_licensing_boundary() -> None:
-    assert BENCHMARK_CATALOG_CONTRACT_VERSION == "serp-benchmark-catalog/v4"
+    assert BENCHMARK_CATALOG_CONTRACT_VERSION == "serp-benchmark-catalog/v5"
     assert tuple(entry.suite_id for entry in MANDATORY_BENCHMARK_SUITE_CATALOG) == (
         MANDATORY_SERP_BENCHMARK_SUITES
     )
@@ -300,6 +302,7 @@ def test_live_catalog_allows_rights_unverified_internal_runs() -> None:
         snapshot_bytes=_snapshot_bytes,
         native_adapter_materializer=_native_adapter_materializer,
         native_corpus_materializer=_native_corpus_materializer,
+        execution_substrate_materializer=_execution_substrate_materializer,
     )
     suites = cast(list[dict[str, Any]], evidence["suites"])
 
@@ -355,6 +358,16 @@ def test_live_catalog_allows_rights_unverified_internal_runs() -> None:
         snapshot["immutable_artifact"]["objectLockMode"] == "COMPLIANCE"
         for item in suites
         for snapshot in item["corpus_snapshots"].values()
+    )
+    assert all(
+        tuple(item["execution_substrate_artifacts"])
+        == MANDATORY_EXECUTION_SUBSTRATE_ROLES[item["suite_id"]]
+        for item in suites
+    )
+    assert all(
+        handle["objectLockMode"] == "COMPLIANCE"
+        for item in suites
+        for handle in item["execution_substrate_artifacts"].values()
     )
     assert all(
         all(
@@ -419,6 +432,7 @@ def test_catalog_blocks_suites_without_query_independent_corpus_evidence() -> No
         snapshot_bytes=_snapshot_bytes,
         native_adapter_materializer=_native_adapter_materializer,
         native_corpus_materializer=corpus_materializer,
+        execution_substrate_materializer=_execution_substrate_materializer,
     )
     suites = cast(list[dict[str, Any]], evidence["suites"])
 
@@ -439,6 +453,139 @@ def test_catalog_blocks_suites_without_query_independent_corpus_evidence() -> No
         for item in suites
         if item["execution_status"] == "corpus-evidence-blocked"
     )
+
+
+def test_catalog_blocks_missing_execution_substrate_without_discarding_corpus() -> None:
+    payload_by_url = {
+        entry.dataset_source_url: f"dataset-source:{entry.suite_id}".encode()
+        for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+    }
+    payload_by_url.update(
+        {
+            entry.license_evidence_url: f"license:{entry.suite_id}".encode()
+            for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+        }
+    )
+    payload_by_url.update(
+        {
+            entry.dataset_artifact_url: f"dataset-bytes:{entry.suite_id}".encode()
+            for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+        }
+    )
+    payload_by_url.update(_supplemental_dataset_payloads())
+    payload_by_url.update(_official_harness_payloads())
+
+    def substrate_materializer(
+        suite_id: str,
+        dataset_payloads: Mapping[str, bytes],
+        dataset_snapshots: Mapping[str, Mapping[str, object]],
+        corpus_payloads: Mapping[str, bytes],
+        corpus_snapshots: Mapping[str, Mapping[str, object]],
+        official_harness_payloads: Mapping[str, bytes],
+    ) -> Mapping[str, bytes]:
+        if suite_id == "CodeRAG-Bench":
+            raise ValueError("CodeRAG-Bench official execution-sandbox payload is required")
+        return _execution_substrate_materializer(
+            suite_id,
+            dataset_payloads,
+            dataset_snapshots,
+            corpus_payloads,
+            corpus_snapshots,
+            official_harness_payloads,
+        )
+
+    evidence = build_live_benchmark_catalog_evidence(
+        observed_at="2026-07-13T00:00:00Z",
+        fetch_bytes=payload_by_url.__getitem__,
+        snapshot_bytes=_snapshot_bytes,
+        native_adapter_materializer=_native_adapter_materializer,
+        native_corpus_materializer=_native_corpus_materializer,
+        execution_substrate_materializer=substrate_materializer,
+    )
+    suites = cast(list[dict[str, Any]], evidence["suites"])
+    coderag = next(item for item in suites if item["suite_id"] == "CodeRAG-Bench")
+
+    assert evidence["catalog_status"] == "blocked"
+    assert coderag["execution_status"] == "execution-substrate-blocked"
+    assert coderag["blocking_reason"] == (
+        "execution-substrate-unavailable: "
+        "CodeRAG-Bench official execution-sandbox payload is required"
+    )
+    assert coderag["execution_substrate_artifacts"] == {}
+    assert coderag["corpus_snapshots"]
+    assert coderag["native_adapter_manifest"]["corpusManifest"]["status"] == "materialized"
+
+
+def test_catalog_forwards_only_authoritative_external_role_payloads() -> None:
+    payload_by_url = {
+        entry.dataset_source_url: f"dataset-source:{entry.suite_id}".encode()
+        for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+    }
+    payload_by_url.update(
+        {
+            entry.license_evidence_url: f"license:{entry.suite_id}".encode()
+            for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+        }
+    )
+    payload_by_url.update(
+        {
+            entry.dataset_artifact_url: f"dataset-bytes:{entry.suite_id}".encode()
+            for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+        }
+    )
+    payload_by_url.update(_supplemental_dataset_payloads())
+    payload_by_url.update(_official_harness_payloads())
+    observed: dict[str, bytes] = {}
+
+    def substrate_materializer(
+        suite_id: str,
+        dataset_payloads: Mapping[str, bytes],
+        dataset_snapshots: Mapping[str, Mapping[str, object]],
+        corpus_payloads: Mapping[str, bytes],
+        corpus_snapshots: Mapping[str, Mapping[str, object]],
+        official_harness_payloads: Mapping[str, bytes],
+    ) -> Mapping[str, bytes]:
+        if suite_id == "ARES":
+            observed.update(official_harness_payloads)
+        return _execution_substrate_materializer(
+            suite_id,
+            dataset_payloads,
+            dataset_snapshots,
+            corpus_payloads,
+            corpus_snapshots,
+            official_harness_payloads,
+        )
+
+    evidence = build_live_benchmark_catalog_evidence(
+        observed_at="2026-07-13T00:00:00Z",
+        fetch_bytes=payload_by_url.__getitem__,
+        snapshot_bytes=_snapshot_bytes,
+        native_adapter_materializer=_native_adapter_materializer,
+        native_corpus_materializer=_native_corpus_materializer,
+        execution_substrate_materializer=substrate_materializer,
+        execution_substrate_role_payloads={
+            "ARES": {"judge-route": b"sealed-authoritative-judge-route"}
+        },
+    )
+
+    assert evidence["catalog_status"] == "ready"
+    assert observed == {
+        "judge-route": b"sealed-authoritative-judge-route",
+        "license": _official_harness_payloads()[
+            next(
+                entry.harness_license_url
+                for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+                if entry.suite_id == "ARES"
+            )
+        ],
+        "source-archive": _official_harness_payloads()[
+            next(
+                entry.harness_source_archive_url
+                for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+                if entry.suite_id == "ARES"
+            )
+        ],
+    }
 
 
 def test_live_catalog_retains_immutable_source_and_license_snapshots() -> None:
@@ -482,10 +629,15 @@ def test_live_catalog_retains_immutable_source_and_license_snapshots() -> None:
         snapshot_bytes=snapshot_bytes,
         native_adapter_materializer=_native_adapter_materializer,
         native_corpus_materializer=_native_corpus_materializer,
+        execution_substrate_materializer=_execution_substrate_materializer,
     )
     suites = cast(list[dict[str, Any]], evidence["suites"])
 
-    assert len(calls) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 6) + 3
+    assert len(calls) == (
+        (len(MANDATORY_SERP_BENCHMARK_SUITES) * 6)
+        + 3
+        + sum(len(roles) for roles in MANDATORY_EXECUTION_SUBSTRATE_ROLES.values())
+    )
     beir = next(item for item in suites if item["suite_id"] == "BEIR")
     assert (
         beir["dataset_snapshots"]["dataset"]["immutable_artifact"]["objectLockMode"] == "COMPLIANCE"
@@ -574,6 +726,91 @@ def _native_corpus_materializer(
         },
         "payloads": {corpus_role: corpus_payload},
     }
+
+
+def _execution_substrate_materializer(
+    suite_id: str,
+    _dataset_payloads: Mapping[str, bytes],
+    _dataset_snapshots: Mapping[str, Mapping[str, object]],
+    _corpus_payloads: Mapping[str, bytes],
+    _corpus_snapshots: Mapping[str, Mapping[str, object]],
+    _official_harness_payloads: Mapping[str, bytes],
+) -> Mapping[str, bytes]:
+    payloads = {
+        role: f"pinned-execution-substrate:{suite_id}:{role}".encode()
+        for role in MANDATORY_EXECUTION_SUBSTRATE_ROLES[suite_id]
+    }
+    revision = next(
+        entry.harness_revision
+        for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+        if entry.suite_id == suite_id
+    )
+    if suite_id == "CodeRAG-Bench":
+        payloads["execution-sandbox"] = json.dumps(
+            {
+                "dockerSocketMounted": False,
+                "imageDigest": "sha256:" + "1" * 64,
+                "imageReference": ("harbor.adapstory.com/serp/ds1000@sha256:" + "1" * 64),
+                "imagePurpose": "ds1000-official-execution",
+                "libraries": [
+                    {"name": name, "version": version}
+                    for name, version in (
+                        ("DateTime", "4.7"),
+                        ("gensim", "4.2.0"),
+                        ("matplotlib", "3.5.2"),
+                        ("numpy", "1.21.6"),
+                        ("openai", "0.23.0"),
+                        ("pandas", "1.3.5"),
+                        ("pandas-datareader", "0.10.0"),
+                        ("pathlib", "1.0.1"),
+                        ("scikit-learn", "1.0.2"),
+                        ("scipy", "1.7.3"),
+                        ("seaborn", "0.11.2"),
+                        ("statsmodels", "0.13.2"),
+                        ("tensorflow", "2.10.0"),
+                        ("tokenizers", "0.12.1"),
+                        ("torch", "1.12.1"),
+                        ("torchvision", "0.13.1"),
+                        ("tqdm", "4.64.1"),
+                        ("xgboost", "1.6.2"),
+                        ("Pillow", "9.2.0"),
+                    )
+                ],
+                "networkMode": "disabled",
+                "officialHarnessRevision": revision,
+                "pythonVersion": "3.7.10",
+                "readOnlyRootFilesystem": True,
+                "schema": "Ds1000SandboxImageInventory/v1",
+                "suiteId": suite_id,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    if suite_id == "SWE-bench Verified":
+        payloads["sandbox-image-set"] = json.dumps(
+            {
+                "dockerSocketMounted": False,
+                "executionMode": "prebuilt-per-instance-image",
+                "instances": [
+                    {
+                        "baseCommit": "2" * 40,
+                        "imageDigest": "sha256:" + "2" * 64,
+                        "imageReference": (
+                            "harbor.adapstory.com/serp/swe-django@sha256:" + "2" * 64
+                        ),
+                        "instanceId": "django__django-12345",
+                        "repository": "django/django",
+                    }
+                ],
+                "networkMode": "disabled",
+                "officialHarnessRevision": revision,
+                "schema": "SweBenchSandboxImageInventory/v1",
+                "suiteId": suite_id,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    return payloads
 
 
 def _supplemental_dataset_payloads() -> dict[str, bytes]:

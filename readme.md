@@ -36,7 +36,7 @@ SERP eval DAG contracts:
   | D16 `serp_policy_rollout_canary` | Planned gap | Policy rollout canary DAG is not implemented yet. |
   | D17 `serp_model_catalog_promotion` | Implemented immutable promotion authority in current source | Re-reads baseline/candidate CI release manifests by exact MinIO `VersionId` and SHA-256 under `COMPLIANCE` retention, validates the bounded replay boundary, and seals the only WORM promotion receipt that D19 may consume. |
   | D18 `serp_chaos_restore_game_day` | Planned gap | Restore/game-day DAG is not implemented yet. |
-  | D19 `serp_benchmark_improvement_wave` | Executor-owned paired-evaluation contract in current source | A restricted acquisition pod materializes the canonical catalog; the scheduler re-reads its exact COMPLIANCE catalog and receipt versions before it writes the scoreless paired request. Airflow rejects caller-supplied candidate scores. The pipeline executor persists a version-bound receipt separately from its control record; `blocked` never reaches keep/discard, scoreboard, or rollout. It must not be described as a validated improvement until every provisioned adapter has produced all-nine immutable paired evidence. |
+  | D19 `serp_benchmark_improvement_wave` | Executor-owned paired-evaluation graph in current source | A restricted acquisition pod materializes catalog v5 with exact COMPLIANCE execution-substrate role handles. The scheduler derives 90 suite/side/repetition work items, maps CodeRAG to one digest-pinned DS-1000 image and SWE-bench to digest-pinned per-instance images, and seals one result-set plan per code-suite repetition. The untrusted executor is a credential-free init container between trusted staging and a read-only publisher; arbitrary commands, mutable images, missing inventories, and incomplete all-nine evidence fail closed. |
   | D20 `serp_web_seed_crawl_refresh` | Implemented scheduled pipeline CLI bridge in current source | Uses a default stack-inventory anchored seed registry when no `dag_run.conf` is supplied, expands approved website `frontier_urls` into deterministic per-page fetch requests, selects due seeds from `refresh_policy` and optional `freshness_state`, writes deterministic seed/refresh artifacts, runs the packaged SERP pipeline CLI bridge only when sources are due, and emits a governed D5 trigger-conf artifact once indexed D20 evidence exists. The D5 trigger-conf carries `ADAPSTORY_SERP_BC21_BASE_URL` when the runtime env provides it, but approvals, evidence seal, benchmark gate, and idempotency remain required. Live robots/sitemap discovery, D4 child dispatch, and deployed GitOps image refresh remain planned; publish activation is handled by D5. |
 
 - `serp_nightly_regression_suite` is the D6 contract DAG. Its `dag_run.conf`
@@ -118,7 +118,10 @@ SERP eval DAG contracts:
   D17 receipt and both referenced release manifests before it derives the
   scoreless paired request.
   The DAG derives `airflow-plan.json`, `improvement-spec.json`, a restricted
-  acquisition-pod materialized `benchmark-catalog.json` and receipt, a
+  acquisition-pod materialized v5 `benchmark-catalog.json` and receipt. Every
+  ready suite has the exact role-keyed execution-substrate inventory retained
+  by immutable S3 path, VersionId, SHA-256, and COMPLIANCE mode; a missing or
+  malformed role blocks that suite. It then writes a
   scoreless `paired-eval-request.json` bound to both exact catalog
   `VersionId`/SHA-256 values, an executor-written version-bound
   `paired-eval-receipt.json`, and a separate `paired-eval-control.json` under a
@@ -126,6 +129,11 @@ SERP eval DAG contracts:
   sole result authority; its immutable receipt cannot share or be overwritten
   by the Airflow stdout control artifact. Unavailable adapters, missing pinned
   provenance, missing rights, or incomplete all-nine coverage are `blocked`.
+  CodeRAG and SWE-bench use sealed `SandboxWorkItemSet/v1` fan-out. The selected
+  digest-pinned image runs only its suite-specific staged standalone runner as
+  the second init container, with no Airflow/Pipeline import, credentials,
+  token, Docker socket, XCom mount, or environment injection. The trusted
+  publisher starts only after execution and reads the output volume read-only.
   A blocked receipt cannot emit a score, keep/discard decision, scoreboard, or
   rollout.
 - `serp_mandatory_benchmark_dataset_evidence_snapshot` persists source, raw
