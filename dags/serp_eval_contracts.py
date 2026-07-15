@@ -88,7 +88,7 @@ _PUBLIC_DOCS_LOCALE_PATH_SEGMENT = re.compile(r"^[a-z]{2}(?:-[a-z0-9]{2,8})?$", 
 _PUBLIC_DOCS_DEFAULT_TENANT_ID = "00000000-0000-4000-a000-000000000001"
 _PUBLIC_DOCS_DEFAULT_PACK_ID = "00000000-0000-4000-a000-000000000201"
 _PUBLIC_DOCS_DEFAULT_PACK_VERSION_ID = "018f5e13-2d73-7a77-a052-8d1bcbf96541"
-_PUBLIC_DOCS_DEFAULT_ACTOR_ID = "airflow-serp-public-docs-refresh"
+_PUBLIC_DOCS_DEFAULT_ACTOR_ID = "airflow-serp-public-docs-acquisition"
 _PUBLIC_DOCS_SEARCH_SERVE_SMOKE_ACTOR_ID = "00000000-0000-4000-a000-000000000202"
 _PUBLIC_DOCS_DEFAULT_ARTIFACT_ROOT = "/var/opt/adapstory/serp-public-docs-refresh"
 _PUBLIC_DOCS_STACK_INVENTORY_PATH = STACK_INVENTORY_SOURCE_PATH
@@ -1039,6 +1039,9 @@ def build_public_docs_seed_refresh_plan(
 ) -> SerpDagPlan:
     payload = _payload(conf)
     _reject_raw_secrets(payload)
+    actor_id = _required_str(payload, "actor_id")
+    if actor_id != _PUBLIC_DOCS_DEFAULT_ACTOR_ID:
+        raise ValueError("actor_id must match the public-docs acquisition workload identity")
     tenant_id = _required_uuid(payload, "tenant_id")
     generated_at = _required_datetime_string(payload, "generated_at")
     registry_resource_type = _required_resource_type(payload, "registry_resource_type")
@@ -1108,7 +1111,7 @@ def build_public_docs_seed_refresh_plan(
         crawler_discovery_workers,
     )
     plan_payload = {
-        "actor_id": _required_str(payload, "actor_id"),
+        "actor_id": actor_id,
         **(
             {"previous_active_pack_version_id": active_pack_version_id}
             if active_pack_version_id is not None

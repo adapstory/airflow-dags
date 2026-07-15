@@ -117,9 +117,11 @@ SERP eval DAG contracts:
   must never be supplied in a DAG run configuration or evidence artifact.
 - `serp_web_seed_crawl_refresh` is the D20 scheduled public-docs seed refresh
   DAG. When `dag_run.conf` is empty, it builds the default public-docs seed
-  registry from the stack-inventory anchored source set. Override
-  `dag_run.conf` may still provide tenant id, pack id/version, registry
-  resource identity, approved actor id, generated timestamp, a governed
+  registry from the stack-inventory anchored source set. Its actor is fixed to
+  `airflow-serp-public-docs-acquisition`, matching the projected Kubernetes
+  ServiceAccount identity authorized by BC-21; caller actor overrides fail
+  closed before execution. Override `dag_run.conf` may still provide tenant id,
+  pack id/version, registry resource identity, generated timestamp, a governed
   `seed_registry`, `index_mode` (`evidence-only` or `live`), `embedding_mode`
   (`deterministic-dev` or `live-gateway`), target store names
   (`qdrant_collection`, `opensearch_index`, `neo4j_database`), and either

@@ -2726,7 +2726,7 @@ def test_d20_writes_public_docs_publish_activation_trigger_conf_artifact(
         "tenant_id",
     }
     assert target_conf["activation_reason_code"] == "public-docs-d20-indexed"
-    assert target_conf["actor_id"] == "airflow-serp-public-docs-refresh"
+    assert target_conf["actor_id"] == "airflow-serp-public-docs-acquisition"
     assert target_conf["artifact_root_path"] == str(tmp_path)
     assert target_conf["generated_at"] == "2026-07-08T21:00:00Z"
     assert target_conf["pack_id"] == PACK_ID
@@ -3029,7 +3029,7 @@ def test_d20_bc21_pipeline_state_submit_accepts_quarantined_publishable_batch(
 
     assert submission_calls == [
         {
-            "actor_id": "airflow-serp-public-docs-refresh",
+            "actor_id": "airflow-serp-public-docs-acquisition",
             "catalog_source_id": "018f5e13-2d73-7a77-a052-8d1bcbf96599",
             "status": "indexed_with_quarantined_failures",
             "started_at": submission_calls[0]["started_at"],
@@ -3046,6 +3046,17 @@ def test_d20_default_conf_rejects_unsafe_env_bc21_base_url(
 
     with pytest.raises(ValueError, match="bc21_base_url must use https"):
         default_public_docs_seed_refresh_conf(generated_at="2026-07-08T21:00:00Z")
+
+
+def test_d20_rejects_actor_that_does_not_match_projected_workload_identity() -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["actor_id"] = "airflow-serp-public-docs-refresh"
+
+    with pytest.raises(
+        ValueError,
+        match="actor_id must match the public-docs acquisition workload identity",
+    ):
+        build_public_docs_seed_refresh_plan(conf)
 
 
 def test_d20_trigger_conf_rejects_invalid_seed_refresh_result(tmp_path: Path) -> None:
@@ -3685,7 +3696,7 @@ def test_post_activation_failure_rolls_back_to_direct_predecessor(
             "rollbackReasonCode": "public-docs-d5-post-activation-validation-failed",
             "rollbackRunId": "018f5e13-2d73-7a77-a052-8d1bcbf96609",
             "rolledBackAt": "2026-07-08T22:03:00Z",
-            "rolledBackBy": "airflow-serp-public-docs-refresh",
+            "rolledBackBy": "airflow-serp-public-docs-acquisition",
             "restoredPackVersionId": previous_pack_version_id,
             "tenantId": TENANT_ID,
         }
@@ -3702,7 +3713,7 @@ def test_post_activation_failure_rolls_back_to_direct_predecessor(
                 "rollbackReasonCode": "public-docs-d5-post-activation-validation-failed",
             },
             "headers": {
-                "X-Adapstory-Actor-Id": "airflow-serp-public-docs-refresh",
+                "X-Adapstory-Actor-Id": "airflow-serp-public-docs-acquisition",
                 "X-Adapstory-Tenant-Id": TENANT_ID,
                 "X-Fingerprint": artifact["payload"]["fingerprint"],
                 "X-Idempotency-Key": artifact["payload"]["idempotency_key"],
@@ -4570,6 +4581,7 @@ def test_default_public_docs_seed_refresh_conf_materializes_autonomous_d20_plan(
     plan = build_public_docs_seed_refresh_plan(conf)
     refresh_plan_artifact = write_public_docs_seed_refresh_plan_artifact(plan.to_canonical_json())
 
+    assert conf["actor_id"] == "airflow-serp-public-docs-acquisition"
     assert conf["seed_registry"]
     assert plan.payload["dag_id"] == "serp_web_seed_crawl_refresh"
     assert plan.payload["status"] == "ready_for_public_docs_seed_refresh"
@@ -6108,7 +6120,7 @@ def _d19_catalog_snapshot(plan: Any) -> dict[str, object]:
 
 def _public_docs_seed_refresh_conf() -> dict[str, Any]:
     return {
-        "actor_id": "airflow-serp-public-docs-refresh",
+        "actor_id": "airflow-serp-public-docs-acquisition",
         "artifact_root_path": "/var/opt/adapstory/serp-public-docs-refresh",
         "generated_at": "2026-07-08T21:00:00Z",
         "pack_id": PACK_ID,
@@ -6153,7 +6165,7 @@ def _public_docs_publish_activation_conf(seed_refresh_result_path: str) -> dict[
     return {
         "activation_idempotency_key": "018f5e13-2d73-7a77-a052-" + "8d1bcbf96603",
         "activation_reason_code": "public-docs-d20-indexed",
-        "actor_id": "airflow-serp-public-docs-refresh",
+        "actor_id": "airflow-serp-public-docs-acquisition",
         "approval_idempotency_key": "018f5e13-2d73-7a77-a052-" + "8d1bcbf96601",
         "artifact_root_path": "/var/opt/adapstory/serp-public-docs-publish",
         "benchmark_gate_export_sha256": "sha256:" + "c" * 64,
