@@ -1014,9 +1014,7 @@ def _d19_harness_task_ids() -> tuple[str, ...]:
                         for phase in ("prepare", "execute", "seal")
                     )
                 else:
-                    task_ids.append(
-                        f"run_official_harness_{slug}_{side}_{repetition}"
-                    )
+                    task_ids.append(f"run_official_harness_{slug}_{side}_{repetition}")
     return tuple(task_ids)
 
 
@@ -2701,9 +2699,7 @@ def _validate_benchmark_catalog_corpus_evidence(
                 )
             continue
         if not corpus_snapshots:
-            raise ValueError(
-                f"benchmark catalog ready suite requires corpus snapshots: {suite_id}"
-            )
+            raise ValueError(f"benchmark catalog ready suite requires corpus snapshots: {suite_id}")
         corpus_manifest = _required_mapping(native_manifest, "corpusManifest")
         if _required_str(corpus_manifest, "schema") != "NativeBenchmarkCorpusManifest/v1":
             raise ValueError(f"benchmark catalog corpus schema is unsupported: {suite_id}")
@@ -2725,10 +2721,13 @@ def _validate_benchmark_catalog_corpus_evidence(
                 _required_str(snapshot, "sha256"),
                 f"{suite_id}.corpus_snapshots.{source_id}.sha256",
             )
-            if _normalized_catalog_sha256_digest(
-                _required_str(source, "payloadSha256"),
-                f"{suite_id}.corpusManifest.payloadSha256",
-            ) != digest:
+            if (
+                _normalized_catalog_sha256_digest(
+                    _required_str(source, "payloadSha256"),
+                    f"{suite_id}.corpusManifest.payloadSha256",
+                )
+                != digest
+            ):
                 raise ValueError(f"benchmark catalog corpus digest mismatch: {suite_id}")
             if _required_str(snapshot, "url") != (
                 f"derived://native-corpus/{suite_id}/{source_id}"

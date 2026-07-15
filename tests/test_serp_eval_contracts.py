@@ -5912,9 +5912,7 @@ def test_serp_improvement_dag_passes_exact_s3_values_to_the_evaluator_pod(
         if "value" in env_var.kwargs
     }
 
-    assert module.D19_AGGREGATOR_WORKLOAD_SERVICE_ACCOUNT == (
-        "airflow-serp-benchmark-aggregator"
-    )
+    assert module.D19_AGGREGATOR_WORKLOAD_SERVICE_ACCOUNT == ("airflow-serp-benchmark-aggregator")
     assert (
         module.D19_AGGREGATOR_WORKLOAD_LABELS["adapstory.com/serp-network-profile"]
         == "benchmark-aggregator"
@@ -5932,9 +5930,7 @@ def test_serp_improvement_dag_passes_exact_s3_values_to_the_evaluator_pod(
 
 
 def test_d19_serializes_runs_and_caps_expensive_parallelism() -> None:
-    source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(
-        encoding="utf-8"
-    )
+    source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     dag_call = next(
         node for node in ast.walk(tree) if isinstance(node, ast.Call) and _matches_call(node, "DAG")
@@ -6005,8 +6001,7 @@ def test_d19_builds_and_registers_server_owned_exact_nine_before_request(
     )
 
     aggregator_env = {
-        item.kwargs["name"]: item.kwargs.get("value")
-        for item in module.d19_aggregator_env_vars()
+        item.kwargs["name"]: item.kwargs.get("value") for item in module.d19_aggregator_env_vars()
     }
     assert "ADAPSTORY_SERP_BC21_BASE_URL" not in aggregator_env
     assert "ADAPSTORY_SERP_SERVICE_ACCOUNT_TOKEN_PATH" not in aggregator_env
@@ -6104,9 +6099,7 @@ def test_d19_routes_code_suites_through_credential_isolated_sandbox_chains(
     module = importlib.import_module("dags.serp_benchmark_improvement_wave")
     module = importlib.reload(module)
 
-    assert module.D19_CODE_SANDBOX_SUITES == frozenset(
-        {"CodeRAG-Bench", "SWE-bench Verified"}
-    )
+    assert module.D19_CODE_SANDBOX_SUITES == frozenset({"CodeRAG-Bench", "SWE-bench Verified"})
     assert len(module.D19_STANDARD_HARNESS_RUN_TASKS) == 70
     assert len(module.D19_CODE_SANDBOX_PREPARE_TASKS) == 20
     assert len(module.D19_CODE_SANDBOX_TASKS) == 20
@@ -6118,9 +6111,7 @@ def test_d19_routes_code_suites_through_credential_isolated_sandbox_chains(
         kwargs = sandbox_task.kwargs
         assert kwargs["service_account_name"] == "airflow-serp-benchmark-code-sandbox"
         assert kwargs["automount_service_account_token"] is False
-        assert kwargs["labels"]["adapstory.com/serp-network-profile"] == (
-            "benchmark-code-sandbox"
-        )
+        assert kwargs["labels"]["adapstory.com/serp-network-profile"] == ("benchmark-code-sandbox")
         assert kwargs["do_xcom_push"] is True
         assert kwargs["cmds"] == [
             "python",
@@ -6152,19 +6143,20 @@ def test_d19_routes_code_suites_through_credential_isolated_sandbox_chains(
         }
         assert executor.kwargs["security_context"].kwargs["read_only_root_filesystem"] is True
         assert executor.kwargs["security_context"].kwargs["run_as_non_root"] is True
-        assert executor.kwargs["resources"].kwargs["limits"] == (
-            module.D19_OFFICIAL_HARNESS_LIMITS[suite_id]
+        assert (
+            executor.kwargs["resources"].kwargs["limits"]
+            == (module.D19_OFFICIAL_HARNESS_LIMITS[suite_id])
         )
-        assert module.D19_CODE_SANDBOX_PREPARE_TASKS[identity].kwargs[
-            "service_account_name"
-        ] == "airflow-serp-benchmark-aggregator"
-        assert module.D19_CODE_SANDBOX_SEAL_TASKS[identity].kwargs[
-            "service_account_name"
-        ] == "airflow-serp-benchmark-aggregator"
+        assert (
+            module.D19_CODE_SANDBOX_PREPARE_TASKS[identity].kwargs["service_account_name"]
+            == "airflow-serp-benchmark-aggregator"
+        )
+        assert (
+            module.D19_CODE_SANDBOX_SEAL_TASKS[identity].kwargs["service_account_name"]
+            == "airflow-serp-benchmark-aggregator"
+        )
 
-    source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(
-        encoding="utf-8"
-    )
+    source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(encoding="utf-8")
     assert "prepare_task >> sandbox_task >> seal_task >> write_assembly_plan" in source
 
 
@@ -6262,7 +6254,7 @@ def test_d19_assembly_plan_seals_exact_canonical_ninety_without_scores(
                 "receiptEvidence": evidence(f"operation/receipts/{index}", "b"),
             }
         )
-    plan = {
+    plan: dict[str, Any] = {
         "dag_id": "serp_benchmark_improvement_wave",
         "operation_id": "operation",
         "artifact_paths": {

@@ -264,8 +264,10 @@ def d19_code_sandbox_runtime_image() -> str:
     repository = conf.get("kubernetes_executor", "worker_container_repository").strip()
     digest = os.environ.get("ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST", "").strip()
     normalized = digest.removeprefix("sha256:")
-    if not repository or len(normalized) != 64 or any(
-        character not in "0123456789abcdef" for character in normalized
+    if (
+        not repository
+        or len(normalized) != 64
+        or any(character not in "0123456789abcdef" for character in normalized)
     ):
         raise ValueError("D19 code sandbox requires an immutable runtime image digest")
     return f"{repository}@sha256:{normalized}"
@@ -510,10 +512,7 @@ build_exact_nine_benchmark_packs = KubernetesPodOperator(
         "--benchmark-catalog",
         "{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog')['artifactPath'] }}",
         "--benchmark-catalog-version-id",
-        (
-            "{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog')"
-            "['artifactVersionId'] }}"
-        ),
+        ("{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog')['artifactVersionId'] }}"),
         "--benchmark-catalog-sha256",
         (
             "sha256:{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog')"
@@ -707,9 +706,7 @@ def _official_harness_task_id(suite_id: str, side: str, repetition: int) -> str:
     return f"run_official_harness_{slug}_{side}_{repetition}"
 
 
-def _code_sandbox_task_id(
-    phase: str, suite_id: str, side: str, repetition: int
-) -> str:
+def _code_sandbox_task_id(phase: str, suite_id: str, side: str, repetition: int) -> str:
     slug = suite_id.casefold().replace(" ", "_").replace("-", "_")
     return f"{phase}_code_sandbox_{slug}_{side}_{repetition}"
 
@@ -720,16 +717,10 @@ def _final_harness_task_id(suite_id: str, side: str, repetition: int) -> str:
     return _official_harness_task_id(suite_id, side, repetition)
 
 
-D19_STANDARD_HARNESS_RUN_TASKS: dict[
-    tuple[str, str, int], KubernetesPodOperator
-] = {}
-D19_CODE_SANDBOX_PREPARE_TASKS: dict[
-    tuple[str, str, int], KubernetesPodOperator
-] = {}
+D19_STANDARD_HARNESS_RUN_TASKS: dict[tuple[str, str, int], KubernetesPodOperator] = {}
+D19_CODE_SANDBOX_PREPARE_TASKS: dict[tuple[str, str, int], KubernetesPodOperator] = {}
 D19_CODE_SANDBOX_TASKS: dict[tuple[str, str, int], KubernetesPodOperator] = {}
-D19_CODE_SANDBOX_SEAL_TASKS: dict[
-    tuple[str, str, int], KubernetesPodOperator
-] = {}
+D19_CODE_SANDBOX_SEAL_TASKS: dict[tuple[str, str, int], KubernetesPodOperator] = {}
 D19_OFFICIAL_HARNESS_RUN_TASKS: dict[tuple[str, str, int], KubernetesPodOperator] = {}
 for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARNESS_WORK_ITEMS):
     identity = (suite_id, side, repetition)
@@ -781,9 +772,7 @@ for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARN
             dag=dag,
         )
         sandbox_work_item_root = (
-            "{{ ti.xcom_pull(task_ids='"
-            + prepare_task_id
-            + "')['sandboxWorkItemEvidence']"
+            "{{ ti.xcom_pull(task_ids='" + prepare_task_id + "')['sandboxWorkItemEvidence']"
         )
         sandbox_image = d19_code_sandbox_runtime_image()
         stage_container = k8s.V1Container(
@@ -886,9 +875,7 @@ for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARN
             dag=dag,
         )
         sandbox_result_root = (
-            "{{ ti.xcom_pull(task_ids='"
-            + sandbox_task_id
-            + "')['sandboxResultEvidence']"
+            "{{ ti.xcom_pull(task_ids='" + sandbox_task_id + "')['sandboxResultEvidence']"
         )
         seal_task = KubernetesPodOperator(
             task_id=seal_task_id,
