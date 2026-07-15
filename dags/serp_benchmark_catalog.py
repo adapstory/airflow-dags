@@ -262,7 +262,7 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         suite_id="rusBEIR",
         dataset_id="kngrg/rus-scifact+kngrg/rus-scifact-qrels",
         dataset_revision=(
-            "75b33d32f2f13f058d0598d6d78f0c3d3afc03d9+" "5e0c312c9fb7304a2dc91ec7fd648b3ace5c329f"
+            "75b33d32f2f13f058d0598d6d78f0c3d3afc03d9+5e0c312c9fb7304a2dc91ec7fd648b3ace5c329f"
         ),
         dataset_source_url=(
             "https://huggingface.co/datasets/kngrg/rus-scifact/raw/"

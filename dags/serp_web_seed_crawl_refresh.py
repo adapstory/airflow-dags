@@ -28,9 +28,9 @@ from dags.serp_eval_contracts import (
     write_public_docs_seed_registry_artifact,
 )
 from dags.serp_evidence_workload_identity import (
+    bc21_authorized_minio_executor_config,
     kubernetes_pod_launcher_executor_config,
     minio_web_identity_env_vars,
-    minio_web_identity_executor_config,
     minio_web_identity_volume_mounts,
     minio_web_identity_volumes,
 )
@@ -79,7 +79,7 @@ PUBLIC_DOCS_ACQUISITION_WORKLOAD_LABELS = {
     "release": "airflow",
     "tier": "airflow",
 }
-PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG = minio_web_identity_executor_config(
+PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG = bc21_authorized_minio_executor_config(
     service_account_name=PUBLIC_DOCS_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT,
     labels=PUBLIC_DOCS_ACQUISITION_WORKLOAD_LABELS,
 )

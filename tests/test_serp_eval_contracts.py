@@ -2321,7 +2321,7 @@ def test_public_docs_crawl_state_uses_a_dedicated_s3_security_prefix() -> None:
     plan = build_public_docs_seed_refresh_plan(conf)
 
     assert plan.payload["public_docs_crawl_state_path"] == (
-        "s3://airflow-serp-evidence/serp-evals/" "public-docs-crawl-state/state.json"
+        "s3://airflow-serp-evidence/serp-evals/public-docs-crawl-state/state.json"
     )
 
 
@@ -5160,6 +5160,10 @@ def test_serp_public_docs_dag_runs_default_seed_registry_pipeline_path() -> None
     assert "airflow-artifact-store" not in source
     assert "PUBLIC_DOCS_ACQUISITION_WORKLOAD_LABELS" in source
     assert "airflow-serp-public-docs-acquisition" in source
+    assert "bc21_authorized_minio_executor_config" in source
+    assert (
+        "PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG = bc21_authorized_minio_executor_config(" in source
+    )
 
 
 def test_serp_public_docs_dag_retries_transient_executor_api_outages() -> None:
