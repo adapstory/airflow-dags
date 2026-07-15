@@ -3951,7 +3951,9 @@ def test_public_docs_publish_activation_writes_search_serve_smoke_artifact(
     conf["search_serve_base_url"] = (
         "http://prod-serp-mcp-gateway-svc.env-prod.svc.cluster.local:8000"
     )
+    conf["search_serve_actor_id"] = "00000000-0000-4000-a000-000000000203"
     plan = build_public_docs_publish_activation_plan(conf)
+    assert plan.payload["search_serve_actor_id"] == conf["search_serve_actor_id"]
     receipt_path = Path(plan.payload["artifact_paths"]["public_docs_publish_activation_receipt"])
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
     receipt_path.write_text(
@@ -4008,6 +4010,8 @@ def test_public_docs_publish_activation_writes_search_serve_smoke_artifact(
     assert captured["url"].endswith("/api/serp/search/v1/query")
     assert captured["attempts"] == 2
     assert "selected_pack_version_ids" not in captured["body"]
+    assert captured["body"]["actor_id"] == conf["search_serve_actor_id"]
+    assert captured["body"]["auth_subject_id"] == "00000000-0000-4000-a000-000000000202"
     assert captured["body"]["auth_subject_type"] == "service"
     assert captured["body"]["tenant_scope"] == "public"
     assert captured["body"]["metadata"]["expected_pack_version_id"] == PACK_VERSION_ID
@@ -5584,6 +5588,7 @@ def test_public_docs_pipeline_runner_env_contract_survives_native_template_rende
 
     for name, value in numeric_values.items():
         assert values[name] == f'"{value}"'
+    assert values["ADAPSTORY_SERP_SEARCH_SERVE_ACTOR_ID"] == "test"
     expected_cli_spec_template = (
         "{{ ti.xcom_pull(task_ids='dispatch_pipeline_seed_refresh_handoff') | tojson | urlencode }}"
     )
@@ -5668,6 +5673,7 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         "ADAPSTORY_SERP_QDRANT_TIMEOUT_SECONDS",
         "ADAPSTORY_SERP_QDRANT_UPSERT_BATCH_SIZE",
         "ADAPSTORY_SERP_QDRANT_URL",
+        "ADAPSTORY_SERP_SEARCH_SERVE_ACTOR_ID",
         "ADAPSTORY_SERP_SEARCH_SERVE_BASE_URL",
         "ADAPSTORY_SERP_PUBLIC_DOCS_RETRY_DELAY_SECONDS",
         "ADAPSTORY_SERP_SOURCE_CURL_FALLBACK_ENABLED",

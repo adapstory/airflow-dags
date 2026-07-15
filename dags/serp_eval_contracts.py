@@ -111,7 +111,8 @@ _PUBLIC_DOCS_DEFAULT_TENANT_ID = "00000000-0000-4000-a000-000000000001"
 _PUBLIC_DOCS_DEFAULT_PACK_ID = "00000000-0000-4000-a000-000000000201"
 _PUBLIC_DOCS_DEFAULT_PACK_VERSION_ID = "018f5e13-2d73-7a77-a052-8d1bcbf96541"
 _PUBLIC_DOCS_DEFAULT_ACTOR_ID = "airflow-serp-public-docs-acquisition"
-_PUBLIC_DOCS_SEARCH_SERVE_SMOKE_ACTOR_ID = "00000000-0000-4000-a000-000000000202"
+_PUBLIC_DOCS_DEFAULT_SEARCH_SERVE_ACTOR_ID = "00000000-0000-4000-a000-000000000203"
+_PUBLIC_DOCS_SEARCH_SERVE_SMOKE_SUBJECT_ID = "00000000-0000-4000-a000-000000000202"
 _PUBLIC_DOCS_DEFAULT_ARTIFACT_ROOT = "/var/opt/adapstory/serp-public-docs-refresh"
 _PUBLIC_DOCS_STACK_INVENTORY_PATH = STACK_INVENTORY_SOURCE_PATH
 _PUBLIC_DOCS_SITEMAP_FETCH_TIMEOUT_SECONDS = 8
@@ -135,6 +136,7 @@ _PUBLIC_DOCS_DEFAULT_CRAWLER_DISCOVERY_WORKERS = 6
 _PUBLIC_DOCS_MAX_CRAWLER_DISCOVERY_WORKERS = 16
 _ARTIFACT_ROOT_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_ROOT"
 _PUBLIC_DOCS_SEARCH_SERVE_BASE_URL_ENV = "ADAPSTORY_SERP_SEARCH_SERVE_BASE_URL"
+_PUBLIC_DOCS_SEARCH_SERVE_ACTOR_ID_ENV = "ADAPSTORY_SERP_SEARCH_SERVE_ACTOR_ID"
 _PUBLIC_DOCS_SEARCH_SERVE_DEFAULT_BASE_URL = (
     "http://prod-serp-mcp-gateway-svc.env-prod.svc.cluster.local:8000"
 )
@@ -1419,6 +1421,7 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
         default=_PUBLIC_DOCS_DEFAULT_NEO4J_DATABASE,
     )
     search_serve_base_url = _public_docs_search_serve_base_url(payload)
+    search_serve_actor_id = _public_docs_search_serve_actor_id(payload)
     operation_id = _operation_id(
         "serp-airflow-publish-signed-pack",
         tenant_id,
@@ -1434,6 +1437,7 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
         evidence_bundle_id,
         evidence_seal_hash,
         benchmark_gate_export_sha256,
+        search_serve_actor_id,
     )
     plan_payload = {
         "activation_idempotency_key": str(activation_idempotency_key),
@@ -1511,6 +1515,7 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
         ),
         "registry_resource_id": str(registry_resource_id),
         "registry_resource_type": registry_resource_type,
+        "search_serve_actor_id": search_serve_actor_id,
         "search_serve_base_url": search_serve_base_url,
         "status": "ready_for_publish_activation_handoff",
         "tasks": _tasks(
@@ -4310,13 +4315,14 @@ def _public_docs_search_serve_smoke_request(plan: Mapping[str, Any]) -> dict[str
             ).encode("utf-8")
         ).hexdigest()
     )
+    search_serve_actor_id = str(_required_uuid(plan, "search_serve_actor_id"))
     return {
-        "actor_id": _PUBLIC_DOCS_SEARCH_SERVE_SMOKE_ACTOR_ID,
+        "actor_id": search_serve_actor_id,
         "auth_context_version": "airflow-public-docs-smoke@2026.07.1",
         "auth_issuer": "airflow://serp-public-docs",
         "auth_method": "airflow-dag-task",
         "auth_session_id": _required_str(plan, "operation_id"),
-        "auth_subject_id": _PUBLIC_DOCS_SEARCH_SERVE_SMOKE_ACTOR_ID,
+        "auth_subject_id": _PUBLIC_DOCS_SEARCH_SERVE_SMOKE_SUBJECT_ID,
         "auth_subject_type": "service",
         "authorization_decision_id": "authz:" + request_id,
         "authorization_effect": "allow",
@@ -7100,6 +7106,17 @@ def _public_docs_search_serve_base_url(payload: Mapping[str, Any]) -> str:
         {"search_serve_base_url": value},
         "search_serve_base_url",
     ).rstrip("/")
+
+
+def _public_docs_search_serve_actor_id(payload: Mapping[str, Any]) -> str:
+    value = payload.get(
+        "search_serve_actor_id",
+        os.environ.get(
+            _PUBLIC_DOCS_SEARCH_SERVE_ACTOR_ID_ENV,
+            _PUBLIC_DOCS_DEFAULT_SEARCH_SERVE_ACTOR_ID,
+        ),
+    )
+    return str(_required_uuid({"search_serve_actor_id": value}, "search_serve_actor_id"))
 
 
 def _is_plan_payload(value: Mapping[str, Any] | str) -> bool:
