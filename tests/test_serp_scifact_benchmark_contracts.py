@@ -38,53 +38,82 @@ def test_scifact_plan_binds_a_dedicated_benchmark_pack_to_versioned_evidence() -
     assert plan["artifact_paths"]["run_evidence"].endswith("/scifact-live-run.json")
 
 
-def test_scifact_dag_assigns_the_dedicated_workload_identity_to_each_bc21_task() -> None:
+def test_scifact_dag_assigns_each_phase_only_its_required_workload_identity() -> None:
     source = (
         Path(__file__).resolve().parents[1] / "dags" / "serp_beir_scifact_live_benchmark.py"
     ).read_text(encoding="utf-8")
     tree = ast.parse(source)
 
-    assignment = next(
-        node
+    assignments = {
+        target.id: node.value
         for node in tree.body
         if isinstance(node, ast.Assign)
-        and any(
-            isinstance(target, ast.Name) and target.id == "SCIFACT_EXECUTOR_CONFIG"
-            for target in node.targets
-        )
-    )
-    assert isinstance(assignment.value, ast.Call)
-    assert isinstance(assignment.value.func, ast.Name)
-    assert assignment.value.func.id == "bc21_authorized_minio_executor_config"
+        for target in node.targets
+        if isinstance(target, ast.Name) and target.id.endswith("_EXECUTOR_CONFIG")
+    }
+    assert {
+        "SCIFACT_ACQUISITION_EXECUTOR_CONFIG",
+        "SCIFACT_BUILDER_EXECUTOR_CONFIG",
+        "SCIFACT_ACTIVATOR_EXECUTOR_CONFIG",
+        "SCIFACT_AGGREGATOR_EXECUTOR_CONFIG",
+    } <= set(assignments)
+    for name in (
+        "SCIFACT_BUILDER_EXECUTOR_CONFIG",
+        "SCIFACT_ACTIVATOR_EXECUTOR_CONFIG",
+    ):
+        assignment = assignments[name]
+        assert isinstance(assignment, ast.Call)
+        assert isinstance(assignment.func, ast.Name)
+        assert assignment.func.id == "bc21_authorized_minio_executor_config"
+    for name in (
+        "SCIFACT_ACQUISITION_EXECUTOR_CONFIG",
+        "SCIFACT_AGGREGATOR_EXECUTOR_CONFIG",
+    ):
+        assignment = assignments[name]
+        assert isinstance(assignment, ast.Call)
+        assert isinstance(assignment.func, ast.Name)
+        assert assignment.func.id == "minio_web_identity_executor_config"
 
-    python_operator_calls = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "PythonOperator"
-    ]
-    assert len(python_operator_calls) == 6
-    for call in python_operator_calls:
+    task_executor_configs = {}
+    for call in ast.walk(tree):
+        if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)):
+            continue
+        if call.func.id != "PythonOperator":
+            continue
+        task_id = next(
+            keyword.value.value
+            for keyword in call.keywords
+            if keyword.arg == "task_id"
+            and isinstance(keyword.value, ast.Constant)
+            and isinstance(keyword.value.value, str)
+        )
         executor_config = next(
-            (keyword.value for keyword in call.keywords if keyword.arg == "executor_config"),
-            None,
+            keyword.value for keyword in call.keywords if keyword.arg == "executor_config"
         )
         assert isinstance(executor_config, ast.Name)
-        assert executor_config.id == "SCIFACT_EXECUTOR_CONFIG"
+        task_executor_configs[task_id] = executor_config.id
+
+    assert task_executor_configs == {
+        "build_scifact_benchmark_plan": "SCIFACT_AGGREGATOR_EXECUTOR_CONFIG",
+        "materialize_scifact_archive": "SCIFACT_ACQUISITION_EXECUTOR_CONFIG",
+        "prepare_scifact_benchmark_registry": "SCIFACT_BUILDER_EXECUTOR_CONFIG",
+        "submit_scifact_pipeline_state": "SCIFACT_BUILDER_EXECUTOR_CONFIG",
+        "activate_scifact_benchmark_pack": "SCIFACT_ACTIVATOR_EXECUTOR_CONFIG",
+        "seal_scifact_activation_evidence": "SCIFACT_AGGREGATOR_EXECUTOR_CONFIG",
+    }
 
 
-def test_scifact_kubernetes_tasks_use_separate_acquisition_and_evaluation_identities() -> None:
+def test_scifact_kubernetes_tasks_use_separate_indexer_and_evaluation_identities() -> None:
     source = (
         Path(__file__).resolve().parents[1] / "dags" / "serp_beir_scifact_live_benchmark.py"
     ).read_text(encoding="utf-8")
 
-    assert "SCIFACT_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT" in source
+    assert "SCIFACT_INDEXER_WORKLOAD_SERVICE_ACCOUNT" in source
     assert "SCIFACT_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT" in source
-    assert "SCIFACT_ACQUISITION_WORKLOAD_LABELS" in source
+    assert "SCIFACT_INDEXER_WORKLOAD_LABELS" in source
     assert "SCIFACT_EVALUATOR_WORKLOAD_LABELS" in source
     assert '"adapstory.com/serp-network-profile": "benchmark-indexer"' in source
-    assert "service_account_name=SCIFACT_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT" in source
+    assert "service_account_name=SCIFACT_INDEXER_WORKLOAD_SERVICE_ACCOUNT" in source
     assert "service_account_name=SCIFACT_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT" in source
 
 
@@ -131,7 +160,7 @@ def test_scifact_kubernetes_tasks_use_only_their_required_projected_tokens() -> 
     tree = ast.parse(source)
 
     assert "bc21_authorized_minio_executor_config" in source
-    assert "SCIFACT_EXECUTOR_CONFIG" in source
+    assert "SCIFACT_BUILDER_EXECUTOR_CONFIG" in source
 
     kubernetes_tasks = {
         next(

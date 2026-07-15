@@ -17,6 +17,7 @@ from dags.serp_evidence_workload_identity import (
     bc21_authorized_minio_executor_config,
     kubernetes_pod_launcher_executor_config,
     minio_web_identity_env_vars,
+    minio_web_identity_executor_config,
     minio_web_identity_volume_mounts,
     minio_web_identity_volumes,
 )
@@ -34,9 +35,41 @@ from dags.serp_web_seed_crawl_refresh import (
     pipeline_runner_runtime_env_vars,
 )
 
-SCIFACT_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-beir-scifact"
+SCIFACT_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-benchmark-acquisition"
+SCIFACT_BUILDER_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-benchmark-builder"
+SCIFACT_ACTIVATOR_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-benchmark-activator"
+SCIFACT_AGGREGATOR_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-benchmark-aggregator"
+SCIFACT_INDEXER_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-beir-scifact"
 SCIFACT_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-benchmark-evaluator"
 SCIFACT_ACQUISITION_WORKLOAD_LABELS = {
+    "adapstory.com/serp-evidence-workload": "true",
+    "adapstory.com/serp-network-profile": "benchmark-acquisition",
+    "component": "worker",
+    "release": "airflow",
+    "tier": "airflow",
+}
+SCIFACT_BUILDER_WORKLOAD_LABELS = {
+    "adapstory.com/serp-evidence-workload": "true",
+    "adapstory.com/serp-network-profile": "benchmark-builder",
+    "component": "worker",
+    "release": "airflow",
+    "tier": "airflow",
+}
+SCIFACT_ACTIVATOR_WORKLOAD_LABELS = {
+    "adapstory.com/serp-evidence-workload": "true",
+    "adapstory.com/serp-network-profile": "benchmark-activator",
+    "component": "worker",
+    "release": "airflow",
+    "tier": "airflow",
+}
+SCIFACT_AGGREGATOR_WORKLOAD_LABELS = {
+    "adapstory.com/serp-evidence-workload": "true",
+    "adapstory.com/serp-network-profile": "benchmark-aggregator",
+    "component": "worker",
+    "release": "airflow",
+    "tier": "airflow",
+}
+SCIFACT_INDEXER_WORKLOAD_LABELS = {
     "adapstory.com/serp-evidence-workload": "true",
     "adapstory.com/serp-network-profile": "benchmark-indexer",
     "component": "worker",
@@ -50,9 +83,21 @@ SCIFACT_EVALUATOR_WORKLOAD_LABELS = {
     "release": "airflow",
     "tier": "airflow",
 }
-SCIFACT_EXECUTOR_CONFIG = bc21_authorized_minio_executor_config(
+SCIFACT_ACQUISITION_EXECUTOR_CONFIG = minio_web_identity_executor_config(
     service_account_name=SCIFACT_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT,
     labels=SCIFACT_ACQUISITION_WORKLOAD_LABELS,
+)
+SCIFACT_BUILDER_EXECUTOR_CONFIG = bc21_authorized_minio_executor_config(
+    service_account_name=SCIFACT_BUILDER_WORKLOAD_SERVICE_ACCOUNT,
+    labels=SCIFACT_BUILDER_WORKLOAD_LABELS,
+)
+SCIFACT_ACTIVATOR_EXECUTOR_CONFIG = bc21_authorized_minio_executor_config(
+    service_account_name=SCIFACT_ACTIVATOR_WORKLOAD_SERVICE_ACCOUNT,
+    labels=SCIFACT_ACTIVATOR_WORKLOAD_LABELS,
+)
+SCIFACT_AGGREGATOR_EXECUTOR_CONFIG = minio_web_identity_executor_config(
+    service_account_name=SCIFACT_AGGREGATOR_WORKLOAD_SERVICE_ACCOUNT,
+    labels=SCIFACT_AGGREGATOR_WORKLOAD_LABELS,
 )
 _SCIFACT_EVALUATOR_ENV_NAMES = (
     "ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS",
@@ -127,7 +172,7 @@ dag = DAG(
 build_plan = PythonOperator(
     task_id="build_scifact_benchmark_plan",
     python_callable=build_scifact_plan_from_dag_run,
-    executor_config=SCIFACT_EXECUTOR_CONFIG,
+    executor_config=SCIFACT_AGGREGATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -135,7 +180,7 @@ materialize_archive = PythonOperator(
     task_id="materialize_scifact_archive",
     python_callable=materialize_scifact_archive,
     op_args=["{{ ti.xcom_pull(task_ids='build_scifact_benchmark_plan') }}"],
-    executor_config=SCIFACT_EXECUTOR_CONFIG,
+    executor_config=SCIFACT_ACQUISITION_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -146,7 +191,7 @@ prepare_registry = PythonOperator(
         "{{ ti.xcom_pull(task_ids='build_scifact_benchmark_plan') }}",
         "{{ ti.xcom_pull(task_ids='materialize_scifact_archive') }}",
     ],
-    executor_config=SCIFACT_EXECUTOR_CONFIG,
+    executor_config=SCIFACT_BUILDER_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -193,11 +238,11 @@ index_scifact = KubernetesPodOperator(
         _store_name("ADAPSTORY_SERP_PUBLIC_DOCS_NEO4J_DATABASE"),
     ],
     env_vars=scifact_indexer_env_vars(),
-    service_account_name=SCIFACT_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT,
+    service_account_name=SCIFACT_INDEXER_WORKLOAD_SERVICE_ACCOUNT,
     automount_service_account_token=False,
     volumes=SCIFACT_INDEXER_WEB_IDENTITY_VOLUMES,
     volume_mounts=SCIFACT_INDEXER_WEB_IDENTITY_VOLUME_MOUNTS,
-    labels=SCIFACT_ACQUISITION_WORKLOAD_LABELS,
+    labels=SCIFACT_INDEXER_WORKLOAD_LABELS,
     container_resources=SERP_PIPELINE_RUNNER_RESOURCES,
     container_security_context=k8s.V1SecurityContext(
         allow_privilege_escalation=False,
@@ -222,7 +267,7 @@ submit_pipeline_state = PythonOperator(
         "{{ ti.xcom_pull(task_ids='build_scifact_benchmark_plan') }}",
         "{{ ti.xcom_pull(task_ids='prepare_scifact_benchmark_registry') }}",
     ],
-    executor_config=SCIFACT_EXECUTOR_CONFIG,
+    executor_config=SCIFACT_BUILDER_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -234,7 +279,7 @@ activate_pack = PythonOperator(
         "{{ ti.xcom_pull(task_ids='prepare_scifact_benchmark_registry') }}",
         "{{ ti.xcom_pull(task_ids='submit_scifact_pipeline_state') }}",
     ],
-    executor_config=SCIFACT_EXECUTOR_CONFIG,
+    executor_config=SCIFACT_ACTIVATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -245,7 +290,7 @@ seal_activation = PythonOperator(
         "{{ ti.xcom_pull(task_ids='build_scifact_benchmark_plan') }}",
         "{{ ti.xcom_pull(task_ids='activate_scifact_benchmark_pack') }}",
     ],
-    executor_config=SCIFACT_EXECUTOR_CONFIG,
+    executor_config=SCIFACT_AGGREGATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
 
