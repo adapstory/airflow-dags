@@ -55,7 +55,7 @@ def test_scifact_dag_assigns_the_dedicated_workload_identity_to_each_bc21_task()
     )
     assert isinstance(assignment.value, ast.Call)
     assert isinstance(assignment.value.func, ast.Name)
-    assert assignment.value.func.id == "minio_web_identity_executor_config"
+    assert assignment.value.func.id == "bc21_authorized_minio_executor_config"
 
     python_operator_calls = [
         node
@@ -130,7 +130,7 @@ def test_scifact_kubernetes_tasks_use_only_their_required_projected_tokens() -> 
     ).read_text(encoding="utf-8")
     tree = ast.parse(source)
 
-    assert "minio_web_identity_executor_config" in source
+    assert "bc21_authorized_minio_executor_config" in source
     assert "SCIFACT_EXECUTOR_CONFIG" in source
 
     kubernetes_tasks = {
@@ -161,6 +161,20 @@ def test_scifact_kubernetes_tasks_use_only_their_required_projected_tokens() -> 
     )
     assert isinstance(evaluator_automount, ast.Constant)
     assert evaluator_automount.value is False
+
+
+def test_bc21_authorized_executor_projects_a_bounded_authorization_token() -> None:
+    source = (
+        Path(__file__).resolve().parents[1] / "dags" / "serp_evidence_workload_identity.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'BC21_WORKLOAD_TOKEN_FILE = "/var/run/secrets/adapstory/bc21-workload/token"' in source
+    assert 'BC21_WORKLOAD_TOKEN_VOLUME_NAME = "bc21-workload-token"' in source
+    assert 'BC21_WORKLOAD_TOKEN_AUDIENCE = "https://kubernetes.default.svc.cluster.local"' in source
+    assert "def bc21_authorized_minio_executor_config(" in source
+    assert 'name="ADAPSTORY_SERP_SERVICE_ACCOUNT_TOKEN_PATH"' in source
+    assert "audience=BC21_WORKLOAD_TOKEN_AUDIENCE" in source
+    assert "automount_service_account_token=False" in source
 
 
 def test_scifact_indexer_uses_web_identity_without_static_minio_credentials() -> None:

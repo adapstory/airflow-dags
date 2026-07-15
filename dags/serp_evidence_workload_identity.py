@@ -18,6 +18,10 @@ MINIO_WEB_IDENTITY_TOKEN_FILE = "/var/run/secrets/adapstory/minio-web-identity/t
 MINIO_WEB_IDENTITY_TOKEN_VOLUME_NAME = "minio-web-identity-token"
 MINIO_WEB_IDENTITY_AUDIENCE = "minio"
 MINIO_WEB_IDENTITY_EXPIRATION_SECONDS = 900
+BC21_WORKLOAD_TOKEN_FILE = "/var/run/secrets/adapstory/bc21-workload/token"
+BC21_WORKLOAD_TOKEN_VOLUME_NAME = "bc21-workload-token"
+BC21_WORKLOAD_TOKEN_AUDIENCE = "https://kubernetes.default.svc.cluster.local"
+BC21_WORKLOAD_TOKEN_EXPIRATION_SECONDS = 900
 EVIDENCE_BUCKET = "airflow-serp-evidence"
 EVIDENCE_PREFIX = "serp-evals/"
 TASK_LOG_BUCKET = "airflow-serp-artifacts"
@@ -105,12 +109,91 @@ def minio_web_identity_volume_mounts() -> list[k8s.V1VolumeMount]:
     ]
 
 
+def bc21_workload_env_vars() -> list[k8s.V1EnvVar]:
+    """Point BC-21 clients at their bounded projected authorization token."""
+
+    return [
+        k8s.V1EnvVar(
+            name="ADAPSTORY_SERP_SERVICE_ACCOUNT_TOKEN_PATH",
+            value=BC21_WORKLOAD_TOKEN_FILE,
+        )
+    ]
+
+
+def bc21_workload_volumes() -> list[k8s.V1Volume]:
+    """Project the Kubernetes API audience without ambient token mounting."""
+
+    return [
+        k8s.V1Volume(
+            name=BC21_WORKLOAD_TOKEN_VOLUME_NAME,
+            projected=k8s.V1ProjectedVolumeSource(
+                sources=[
+                    k8s.V1VolumeProjection(
+                        service_account_token=k8s.V1ServiceAccountTokenProjection(
+                            audience=BC21_WORKLOAD_TOKEN_AUDIENCE,
+                            expiration_seconds=BC21_WORKLOAD_TOKEN_EXPIRATION_SECONDS,
+                            path="token",
+                        )
+                    )
+                ]
+            ),
+        )
+    ]
+
+
+def bc21_workload_volume_mounts() -> list[k8s.V1VolumeMount]:
+    """Mount the BC-21 authorization token read-only at its explicit path."""
+
+    return [
+        k8s.V1VolumeMount(
+            name=BC21_WORKLOAD_TOKEN_VOLUME_NAME,
+            mount_path=BC21_WORKLOAD_TOKEN_FILE.rsplit("/", 1)[0],
+            read_only=True,
+        )
+    ]
+
+
 def minio_web_identity_executor_config(
     *,
     service_account_name: str,
     labels: Mapping[str, str],
 ) -> dict[str, Any]:
     """Return a KubernetesExecutor override with only a MinIO STS token."""
+
+    return _evidence_executor_config(
+        service_account_name=service_account_name,
+        labels=labels,
+        env_vars=minio_web_identity_env_vars(()),
+        volume_mounts=minio_web_identity_volume_mounts(),
+        volumes=minio_web_identity_volumes(),
+    )
+
+
+def bc21_authorized_minio_executor_config(
+    *,
+    service_account_name: str,
+    labels: Mapping[str, str],
+) -> dict[str, Any]:
+    """Build a no-ambient-token executor identity for BC-21 evidence tasks."""
+
+    return _evidence_executor_config(
+        service_account_name=service_account_name,
+        labels=labels,
+        env_vars=[*minio_web_identity_env_vars(()), *bc21_workload_env_vars()],
+        volume_mounts=[*minio_web_identity_volume_mounts(), *bc21_workload_volume_mounts()],
+        volumes=[*minio_web_identity_volumes(), *bc21_workload_volumes()],
+    )
+
+
+def _evidence_executor_config(
+    *,
+    service_account_name: str,
+    labels: Mapping[str, str],
+    env_vars: list[k8s.V1EnvVar],
+    volume_mounts: list[k8s.V1VolumeMount],
+    volumes: list[k8s.V1Volume],
+) -> dict[str, Any]:
+    """Return one least-privilege KubernetesExecutor pod override."""
 
     return {
         "pod_override": k8s.V1Pod(
@@ -120,12 +203,12 @@ def minio_web_identity_executor_config(
                 containers=[
                     k8s.V1Container(
                         name="base",
-                        env=minio_web_identity_env_vars(()),
-                        volume_mounts=minio_web_identity_volume_mounts(),
+                        env=env_vars,
+                        volume_mounts=volume_mounts,
                     )
                 ],
                 service_account_name=service_account_name,
-                volumes=minio_web_identity_volumes(),
+                volumes=volumes,
             ),
         )
     }

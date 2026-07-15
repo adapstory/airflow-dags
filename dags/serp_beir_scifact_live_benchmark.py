@@ -14,9 +14,9 @@ from airflow.sdk import DAG
 from kubernetes.client import models as k8s
 
 from dags.serp_evidence_workload_identity import (
+    bc21_authorized_minio_executor_config,
     kubernetes_pod_launcher_executor_config,
     minio_web_identity_env_vars,
-    minio_web_identity_executor_config,
     minio_web_identity_volume_mounts,
     minio_web_identity_volumes,
 )
@@ -50,7 +50,7 @@ SCIFACT_EVALUATOR_WORKLOAD_LABELS = {
     "release": "airflow",
     "tier": "airflow",
 }
-SCIFACT_EXECUTOR_CONFIG = minio_web_identity_executor_config(
+SCIFACT_EXECUTOR_CONFIG = bc21_authorized_minio_executor_config(
     service_account_name=SCIFACT_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT,
     labels=SCIFACT_ACQUISITION_WORKLOAD_LABELS,
 )
