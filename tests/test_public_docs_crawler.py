@@ -250,6 +250,110 @@ def test_crawler_preserves_directory_seed_base_and_ignores_non_navigation_hrefs(
     ]
 
 
+def test_crawler_confines_html_and_sitemap_discovery_to_version_seed_path() -> None:
+    root = "https://kafka.apache.org/43/"
+    current_guide = "https://kafka.apache.org/43/getting-started/"
+    current_config = "https://kafka.apache.org/43/configuration/"
+    historical_sitemap_page = "https://kafka.apache.org/37/"
+    historical_html_page = "https://kafka.apache.org/38/"
+    sitemap = "https://kafka.apache.org/sitemap.xml"
+    fetcher = FakeFetcher(
+        {
+            "https://kafka.apache.org/robots.txt": CrawlResponse(
+                200,
+                {"content-type": "text/plain"},
+                f"User-agent: *\nAllow: /\nSitemap: {sitemap}\n".encode(),
+            ),
+            sitemap: CrawlResponse(
+                200,
+                {"content-type": "application/xml"},
+                (
+                    "<urlset>"
+                    f"<url><loc>{root}</loc></url>"
+                    f"<url><loc>{current_guide}</loc></url>"
+                    f"<url><loc>{historical_sitemap_page}</loc></url>"
+                    "</urlset>"
+                ).encode(),
+            ),
+            root: CrawlResponse(
+                200,
+                {"content-type": "text/html"},
+                (
+                    f'<a href="{current_config}">current</a>'
+                    f'<a href="{historical_html_page}">historical</a>'
+                ).encode(),
+            ),
+            current_guide: CrawlResponse(200, {"content-type": "text/html"}, b"guide"),
+            current_config: CrawlResponse(200, {"content-type": "text/html"}, b"config"),
+        },
+        [],
+    )
+
+    evidence = crawl_public_docs(
+        seed_uri=root,
+        crawl_policy={
+            "allowed_domains": ["kafka.apache.org"],
+            "curated_frontier_urls": [],
+            "deny_patterns": [],
+            "max_depth": 2,
+            "max_pages": 10,
+            "respect_robots_txt": True,
+            "sitemap_discovery": True,
+            "user_agent": "serp-test/1",
+        },
+        previous_state={},
+        fetcher=fetcher,
+    )
+
+    requested_urls = [url for url, _ in fetcher.requests]
+    assert evidence["changed_urls"] == [root, current_config, current_guide]
+    assert evidence["pages"][historical_html_page]["reason"] == "CRAWL_POLICY_DENIED"
+    assert historical_sitemap_page not in requested_urls
+    assert historical_html_page not in requested_urls
+    assert sitemap in requested_urls
+
+
+def test_crawler_allows_an_explicit_curated_frontier_without_opening_sibling_paths() -> None:
+    root = "https://docs.example.com/latest/"
+    curated = "https://docs.example.com/release-notes/"
+    unrelated = "https://docs.example.com/legacy/"
+    fetcher = FakeFetcher(
+        {
+            "https://docs.example.com/robots.txt": CrawlResponse(404, {}, b""),
+            "https://docs.example.com/latest/sitemap.xml": CrawlResponse(404, {}, b""),
+            root: CrawlResponse(
+                200,
+                {"content-type": "text/html"},
+                (
+                    f'<a href="{curated}">curated</a>' f'<a href="{unrelated}">unrelated</a>'
+                ).encode(),
+            ),
+            curated: CrawlResponse(200, {"content-type": "text/html"}, b"release notes"),
+        },
+        [],
+    )
+
+    evidence = crawl_public_docs(
+        seed_uri=root,
+        crawl_policy={
+            "allowed_domains": ["docs.example.com"],
+            "curated_frontier_urls": [curated],
+            "deny_patterns": [],
+            "max_depth": 1,
+            "max_pages": 5,
+            "respect_robots_txt": True,
+            "sitemap_discovery": True,
+            "user_agent": "serp-test/1",
+        },
+        previous_state={},
+        fetcher=fetcher,
+    )
+
+    assert evidence["changed_urls"] == [root, curated]
+    assert evidence["pages"][unrelated]["reason"] == "CRAWL_POLICY_DENIED"
+    assert unrelated not in [url for url, _ in fetcher.requests]
+
+
 def test_crawler_ignores_linked_media_assets_for_quarantine() -> None:
     root = "https://neo4j.com/docs/"
     guide = "https://neo4j.com/docs/operations-manual/current/"

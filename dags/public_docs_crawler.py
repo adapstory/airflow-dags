@@ -10,7 +10,7 @@ from urllib.parse import urldefrag, urljoin, urlparse, urlunparse
 from urllib.robotparser import RobotFileParser
 from xml.etree import ElementTree
 
-CRAWLER_CONTRACT_VERSION = "2026.07.1"
+CRAWLER_CONTRACT_VERSION = "2026.07.2"
 _MAX_DISCOVERY_BYTES = 1_000_000
 _MAX_SITEMAP_DEPTH = 2
 _NON_DOCUMENT_ASSET_SUFFIXES = frozenset(
@@ -69,8 +69,8 @@ def crawl_public_docs(
 ) -> dict[str, Any]:
     """Crawl a governed public-docs website and produce replayable change evidence."""
 
-    policy = _validate_policy(crawl_policy)
     seed_uri = _canonical_url(seed_uri)
+    policy = _with_governed_path_scopes(_validate_policy(crawl_policy), seed_uri)
     _require_allowed_url(seed_uri, policy)
     robots_url = _canonical_url(urljoin(seed_uri, "/robots.txt"))
     robots_response = fetcher(robots_url, {"User-Agent": str(policy["user_agent"])})
@@ -92,7 +92,7 @@ def crawl_public_docs(
         return _blocked_evidence("ROBOTS_DENIED", seed_uri)
 
     sitemap_urls = _sitemap_urls(seed_uri, robot_parser)
-    sitemap_pages, authoritative_discovery = _discover_sitemap_pages(
+    sitemap_pages, authoritative_discovery, sitemap_blocked_pages = _discover_sitemap_pages(
         sitemap_urls=sitemap_urls,
         robot_parser=robot_parser,
         policy=policy,
@@ -102,13 +102,15 @@ def crawl_public_docs(
         (url, 0 if url == seed_uri else 1) for url in [seed_uri, *sitemap_pages]
     )
     queued = set(queue_url for queue_url, _ in queue)
-    pages: dict[str, dict[str, Any]] = {}
+    pages: dict[str, dict[str, Any]] = {
+        url: _page_report(url, "blocked", "CRAWL_POLICY_DENIED") for url in sitemap_blocked_pages
+    }
     state: dict[str, dict[str, Any]] = {}
     changed_urls: list[str] = []
     unchanged_urls: list[str] = []
     deleted_urls: list[str] = []
     failed_urls: list[str] = []
-    blocked_urls: list[str] = []
+    blocked_urls: list[str] = list(sitemap_blocked_pages)
     crawled_urls: set[str] = set()
     max_pages = int(policy["max_pages"])
     max_depth = int(policy["max_depth"])
@@ -198,6 +200,12 @@ def crawl_public_docs(
             "policy": robots_policy,
             "url": robots_url,
         },
+        "crawl_scope": {
+            "seed_path_prefix": _crawl_path_prefix(seed_uri),
+            "curated_path_prefixes": [
+                _crawl_path_prefix(url) for url in policy["curated_frontier_urls"]
+            ],
+        },
         "discovery_complete": discovery_complete,
         "authoritative_discovery": authoritative_discovery,
         "changed_urls": sorted(set(changed_urls)),
@@ -242,8 +250,14 @@ def _validate_policy(policy: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("user_agent is required")
     max_depth = _bounded_int(policy, "max_depth", 0, 5)
     max_pages = _bounded_int(policy, "max_pages", 1, 500)
+    curated_frontier_urls = policy.get("curated_frontier_urls", [])
+    if not isinstance(curated_frontier_urls, list) or not all(
+        isinstance(value, str) and value.strip() for value in curated_frontier_urls
+    ):
+        raise ValueError("curated_frontier_urls must be a list of non-empty strings")
     return {
         "allowed_domains": allowed_domains,
+        "curated_frontier_urls": curated_frontier_urls,
         "deny_patterns": deny_patterns,
         "max_depth": max_depth,
         "max_pages": max_pages,
@@ -272,8 +286,9 @@ def _discover_sitemap_pages(
     robot_parser: RobotFileParser,
     policy: Mapping[str, Any],
     fetcher: Fetcher,
-) -> tuple[list[str], bool]:
+) -> tuple[list[str], bool, list[str]]:
     pages: list[str] = []
+    blocked_pages: list[str] = []
     queue: deque[tuple[str, int]] = deque((url, 0) for url in sitemap_urls)
     seen: set[str] = set()
     authoritative = False
@@ -282,9 +297,9 @@ def _discover_sitemap_pages(
         if sitemap_url in seen or depth > _MAX_SITEMAP_DEPTH:
             continue
         seen.add(sitemap_url)
-        if not _is_allowed_url(sitemap_url, policy) or not robot_parser.can_fetch(
-            str(policy["user_agent"]), sitemap_url
-        ):
+        if not _is_allowed_discovery_resource_url(
+            sitemap_url, policy
+        ) or not robot_parser.can_fetch(str(policy["user_agent"]), sitemap_url):
             continue
         response = fetcher(sitemap_url, {"User-Agent": str(policy["user_agent"])})
         if response.status_code != 200 or len(response.body) > _MAX_DISCOVERY_BYTES:
@@ -313,7 +328,13 @@ def _discover_sitemap_pages(
                     pages.append(candidate)
                     if len(pages) >= int(policy["max_pages"]):
                         break
-    return list(dict.fromkeys(pages)), authoritative
+                elif _is_same_domain(candidate, policy):
+                    blocked_pages.append(candidate)
+    return (
+        list(dict.fromkeys(pages)),
+        authoritative,
+        list(dict.fromkeys(blocked_pages)),
+    )
 
 
 def _classify_response(
@@ -453,6 +474,23 @@ def _is_same_domain(url: str, policy: Mapping[str, Any]) -> bool:
 
 
 def _is_allowed_url(url: str, policy: Mapping[str, Any]) -> bool:
+    if not _is_allowed_discovery_resource_url(url, policy):
+        return False
+    canonical_url = _canonical_url(url)
+    parsed = urlparse(canonical_url)
+    scopes = policy.get("allowed_url_scopes")
+    if not isinstance(scopes, list):
+        return False
+    return any(
+        isinstance(scope, tuple)
+        and len(scope) == 3
+        and parsed.hostname == scope[0]
+        and (canonical_url == scope[1] or parsed.path.startswith(scope[2]))
+        for scope in scopes
+    )
+
+
+def _is_allowed_discovery_resource_url(url: str, policy: Mapping[str, Any]) -> bool:
     if not _is_same_domain(url, policy):
         return False
     parsed = urlparse(url)
@@ -462,6 +500,38 @@ def _is_allowed_url(url: str, policy: Mapping[str, Any]) -> bool:
     return not any(
         pattern in path_and_query or pattern in url for pattern in policy["deny_patterns"]
     )
+
+
+def _with_governed_path_scopes(policy: dict[str, Any], seed_uri: str) -> dict[str, Any]:
+    seed_host = urlparse(seed_uri).hostname
+    scope_urls = [seed_uri, *policy["curated_frontier_urls"]]
+    scopes: list[tuple[str, str, str]] = []
+    normalized_curated_urls: list[str] = []
+    for index, raw_url in enumerate(scope_urls):
+        url = _canonical_url(raw_url)
+        if not _is_allowed_discovery_resource_url(url, policy):
+            label = "seed_uri" if index == 0 else "curated_frontier_urls"
+            raise ValueError(f"{label} is outside crawl policy")
+        hostname = urlparse(url).hostname
+        if hostname != seed_host:
+            raise ValueError("curated_frontier_urls host must match seed_uri host")
+        if hostname is None:
+            raise ValueError("governed crawl scope requires a hostname")
+        scopes.append((hostname, url, _crawl_path_prefix(url)))
+        if index > 0:
+            normalized_curated_urls.append(url)
+    return {
+        **policy,
+        "allowed_url_scopes": scopes,
+        "curated_frontier_urls": normalized_curated_urls,
+    }
+
+
+def _crawl_path_prefix(url: str) -> str:
+    path = urlparse(url).path or "/"
+    if path == "/" or path.endswith("/"):
+        return path
+    return f"{path}/"
 
 
 def _is_crawl_document_url(url: str) -> bool:
