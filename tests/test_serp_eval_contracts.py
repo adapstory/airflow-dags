@@ -2052,14 +2052,28 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
         "write_paired_eval_request",
         "materialize_official_harness_work_items",
         *[
-            (
-                "run_official_harness_"
-                f"{suite_id.casefold().replace(' ', '_').replace('-', '_')}_"
-                f"{side}_{repetition}"
-            )
+            task_id
             for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
             for repetition in range(1, 6)
             for side in ("baseline", "candidate")
+            for task_id in (
+                (
+                    "prepare_code_sandbox_"
+                    f"{suite_id.casefold().replace(' ', '_').replace('-', '_')}_"
+                    f"{side}_{repetition}",
+                    "execute_code_sandbox_"
+                    f"{suite_id.casefold().replace(' ', '_').replace('-', '_')}_"
+                    f"{side}_{repetition}",
+                    f"seal_code_sandbox_{suite_id.casefold().replace(' ', '_').replace('-', '_')}_"
+                    f"{side}_{repetition}",
+                )
+                if suite_id in {"CodeRAG-Bench", "SWE-bench Verified"}
+                else (
+                    "run_official_harness_"
+                    f"{suite_id.casefold().replace(' ', '_').replace('-', '_')}_"
+                    f"{side}_{repetition}",
+                )
+            )
         ],
         "write_paired_evaluation_assembly_plan",
         "assemble_paired_execution_manifest",
@@ -6060,7 +6074,7 @@ def test_d19_runs_exact_ninety_server_owned_official_harness_work_items(
         "cwd-benchmark-data": {"cpu": "4000m", "memory": "8Gi"},
         "rusBEIR": {"cpu": "4000m", "memory": "8Gi"},
     }
-    for (suite_id, _side, _repetition), task in tasks.items():
+    for (suite_id, _side, _repetition), task in module.D19_STANDARD_HARNESS_RUN_TASKS.items():
         assert task.kwargs["service_account_name"] == ("airflow-serp-benchmark-model-runner")
         assert task.kwargs["automount_service_account_token"] is False
         assert task.kwargs["do_xcom_push"] is True
@@ -6073,6 +6087,85 @@ def test_d19_runs_exact_ninety_server_owned_official_harness_work_items(
         assert task.kwargs["security_context"].kwargs["run_as_non_root"] is True
         assert task.kwargs["container_security_context"].kwargs["read_only_root_filesystem"] is True
         assert task.kwargs["container_resources"].kwargs["limits"] == expected_limits[suite_id]
+
+
+def test_d19_routes_code_suites_through_credential_isolated_sandbox_chains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    for name, value in {
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT": "http://minio:9000",
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION": "us-east-1",
+        "ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST": "sha256:" + "d" * 64,
+        "ADAPSTORY_SERP_BC21_BASE_URL": "http://context-platform:8080/api/bc-21/serp/v1",
+        "ADAPSTORY_OLLAMA_BASE_URL": "http://ollama.ollama.svc.cluster.local:11434",
+    }.items():
+        monkeypatch.setenv(name, value)
+    module = importlib.import_module("dags.serp_benchmark_improvement_wave")
+    module = importlib.reload(module)
+
+    assert module.D19_CODE_SANDBOX_SUITES == frozenset(
+        {"CodeRAG-Bench", "SWE-bench Verified"}
+    )
+    assert len(module.D19_STANDARD_HARNESS_RUN_TASKS) == 70
+    assert len(module.D19_CODE_SANDBOX_PREPARE_TASKS) == 20
+    assert len(module.D19_CODE_SANDBOX_TASKS) == 20
+    assert len(module.D19_CODE_SANDBOX_SEAL_TASKS) == 20
+    assert len(module.D19_OFFICIAL_HARNESS_RUN_TASKS) == 90
+    for identity, sandbox_task in module.D19_CODE_SANDBOX_TASKS.items():
+        suite_id, _side, _repetition = identity
+        assert suite_id in module.D19_CODE_SANDBOX_SUITES
+        kwargs = sandbox_task.kwargs
+        assert kwargs["service_account_name"] == "airflow-serp-benchmark-code-sandbox"
+        assert kwargs["automount_service_account_token"] is False
+        assert kwargs["labels"]["adapstory.com/serp-network-profile"] == (
+            "benchmark-code-sandbox"
+        )
+        assert kwargs["do_xcom_push"] is True
+        assert kwargs["cmds"] == [
+            "python",
+            "-m",
+            "adapstory_serp_pipeline.orchestration.official_harness_execution",
+        ]
+        assert kwargs["arguments"][0] == "publish-code-sandbox-result"
+        assert kwargs["arguments"][-2:] == ["--xcom-output", "/airflow/xcom/return.json"]
+        assert not any(
+            "OLLAMA" in env.kwargs.get("name", "")
+            or "BC21" in env.kwargs.get("name", "")
+            or "MCP" in env.kwargs.get("name", "")
+            for env in kwargs["env_vars"]
+        )
+        init_container = kwargs["init_containers"][0]
+        assert init_container.kwargs["name"] == "stage-code-sandbox"
+        assert init_container.kwargs["args"][0] == "stage-code-sandbox"
+        full_spec = kwargs["full_pod_spec"].kwargs["spec"]
+        assert full_spec.kwargs["share_process_namespace"] is False
+        executor = full_spec.kwargs["containers"][1]
+        assert executor.kwargs["name"] == "sandbox-executor"
+        assert executor.kwargs["args"][0] == "execute-code-sandbox"
+        assert executor.kwargs["env"] == []
+        assert executor.kwargs["env_from"] == []
+        assert {mount.kwargs["mount_path"] for mount in executor.kwargs["volume_mounts"]} == {
+            "/sandbox/input",
+            "/sandbox/output",
+            "/tmp",
+        }
+        assert executor.kwargs["security_context"].kwargs["read_only_root_filesystem"] is True
+        assert executor.kwargs["security_context"].kwargs["run_as_non_root"] is True
+        assert executor.kwargs["resources"].kwargs["limits"] == (
+            module.D19_OFFICIAL_HARNESS_LIMITS[suite_id]
+        )
+        assert module.D19_CODE_SANDBOX_PREPARE_TASKS[identity].kwargs[
+            "service_account_name"
+        ] == "airflow-serp-benchmark-aggregator"
+        assert module.D19_CODE_SANDBOX_SEAL_TASKS[identity].kwargs[
+            "service_account_name"
+        ] == "airflow-serp-benchmark-aggregator"
+
+    source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(
+        encoding="utf-8"
+    )
+    assert "prepare_task >> sandbox_task >> seal_task >> write_assembly_plan" in source
 
 
 def test_d19_model_runner_has_only_minio_and_ollama_runtime_env(

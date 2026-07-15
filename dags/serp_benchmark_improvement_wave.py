@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -55,10 +56,12 @@ D19_OFFICIAL_HARNESS_WORK_ITEMS = tuple(
     for repetition in range(1, 6)
     for side in ("baseline", "candidate")
 )
+D19_CODE_SANDBOX_SUITES = frozenset({"CodeRAG-Bench", "SWE-bench Verified"})
 
 D19_AGGREGATOR_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-benchmark-aggregator"
 D19_BUILDER_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-benchmark-builder"
 D19_MODEL_RUNNER_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-benchmark-model-runner"
+D19_CODE_SANDBOX_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-benchmark-code-sandbox"
 D19_AGGREGATOR_WORKLOAD_LABELS = {
     "adapstory.com/serp-evidence-workload": "true",
     "adapstory.com/serp-network-profile": "benchmark-aggregator",
@@ -69,6 +72,13 @@ D19_AGGREGATOR_WORKLOAD_LABELS = {
 D19_MODEL_RUNNER_WORKLOAD_LABELS = {
     "adapstory.com/serp-evidence-workload": "true",
     "adapstory.com/serp-network-profile": "benchmark-model-runner",
+    "component": "worker",
+    "release": "airflow",
+    "tier": "airflow",
+}
+D19_CODE_SANDBOX_WORKLOAD_LABELS = {
+    "adapstory.com/serp-evidence-workload": "true",
+    "adapstory.com/serp-network-profile": "benchmark-code-sandbox",
     "component": "worker",
     "release": "airflow",
     "tier": "airflow",
@@ -145,6 +155,67 @@ D19_MODEL_RUNNER_VOLUME_MOUNTS = [
     *minio_web_identity_volume_mounts(),
     *hardened_runtime_volume_mounts(),
 ]
+D19_CODE_SANDBOX_INPUT_VOLUME = k8s.V1Volume(
+    name="d19-code-sandbox-input",
+    empty_dir=k8s.V1EmptyDirVolumeSource(size_limit="4Gi"),
+)
+D19_CODE_SANDBOX_OUTPUT_VOLUME = k8s.V1Volume(
+    name="d19-code-sandbox-output",
+    empty_dir=k8s.V1EmptyDirVolumeSource(size_limit="1Gi"),
+)
+D19_CODE_SANDBOX_TMP_VOLUME = k8s.V1Volume(
+    name="d19-code-sandbox-tmp",
+    empty_dir=k8s.V1EmptyDirVolumeSource(size_limit="1Gi"),
+)
+D19_CODE_SANDBOX_VOLUMES = [
+    *minio_web_identity_volumes(),
+    D19_CODE_SANDBOX_INPUT_VOLUME,
+    D19_CODE_SANDBOX_OUTPUT_VOLUME,
+    D19_CODE_SANDBOX_TMP_VOLUME,
+]
+D19_CODE_SANDBOX_PUBLISHER_VOLUME_MOUNTS = [
+    *minio_web_identity_volume_mounts(),
+    k8s.V1VolumeMount(
+        name="d19-code-sandbox-output",
+        mount_path="/sandbox/output",
+        read_only=True,
+    ),
+    k8s.V1VolumeMount(
+        name="d19-code-sandbox-tmp",
+        mount_path="/tmp",
+        read_only=False,
+    ),
+]
+D19_CODE_SANDBOX_STAGE_VOLUME_MOUNTS = [
+    *minio_web_identity_volume_mounts(),
+    k8s.V1VolumeMount(
+        name="d19-code-sandbox-input",
+        mount_path="/sandbox/input",
+        read_only=False,
+    ),
+    k8s.V1VolumeMount(
+        name="d19-code-sandbox-tmp",
+        mount_path="/tmp",
+        read_only=False,
+    ),
+]
+D19_CODE_SANDBOX_EXECUTOR_VOLUME_MOUNTS = [
+    k8s.V1VolumeMount(
+        name="d19-code-sandbox-input",
+        mount_path="/sandbox/input",
+        read_only=True,
+    ),
+    k8s.V1VolumeMount(
+        name="d19-code-sandbox-output",
+        mount_path="/sandbox/output",
+        read_only=False,
+    ),
+    k8s.V1VolumeMount(
+        name="d19-code-sandbox-tmp",
+        mount_path="/tmp",
+        read_only=False,
+    ),
+]
 D19_AGGREGATOR_EXECUTOR_CONFIG = minio_web_identity_executor_config(
     service_account_name=D19_AGGREGATOR_WORKLOAD_SERVICE_ACCOUNT,
     labels=D19_AGGREGATOR_WORKLOAD_LABELS,
@@ -185,6 +256,19 @@ def d19_official_harness_runner_resources(
         requests={"cpu": "1000m", "memory": "2Gi"},
         limits=dict(limits),
     )
+
+
+def d19_code_sandbox_runtime_image() -> str:
+    """Return the exact allowlisted Airflow runtime image by immutable digest."""
+
+    repository = conf.get("kubernetes_executor", "worker_container_repository").strip()
+    digest = os.environ.get("ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST", "").strip()
+    normalized = digest.removeprefix("sha256:")
+    if not repository or len(normalized) != 64 or any(
+        character not in "0123456789abcdef" for character in normalized
+    ):
+        raise ValueError("D19 code sandbox requires an immutable runtime image digest")
+    return f"{repository}@sha256:{normalized}"
 
 
 def validate_benchmark_improvement_wave_plan(**context: Any) -> dict[str, Any]:
@@ -623,12 +707,239 @@ def _official_harness_task_id(suite_id: str, side: str, repetition: int) -> str:
     return f"run_official_harness_{slug}_{side}_{repetition}"
 
 
+def _code_sandbox_task_id(
+    phase: str, suite_id: str, side: str, repetition: int
+) -> str:
+    slug = suite_id.casefold().replace(" ", "_").replace("-", "_")
+    return f"{phase}_code_sandbox_{slug}_{side}_{repetition}"
+
+
+def _final_harness_task_id(suite_id: str, side: str, repetition: int) -> str:
+    if suite_id in D19_CODE_SANDBOX_SUITES:
+        return _code_sandbox_task_id("seal", suite_id, side, repetition)
+    return _official_harness_task_id(suite_id, side, repetition)
+
+
+D19_STANDARD_HARNESS_RUN_TASKS: dict[
+    tuple[str, str, int], KubernetesPodOperator
+] = {}
+D19_CODE_SANDBOX_PREPARE_TASKS: dict[
+    tuple[str, str, int], KubernetesPodOperator
+] = {}
+D19_CODE_SANDBOX_TASKS: dict[tuple[str, str, int], KubernetesPodOperator] = {}
+D19_CODE_SANDBOX_SEAL_TASKS: dict[
+    tuple[str, str, int], KubernetesPodOperator
+] = {}
 D19_OFFICIAL_HARNESS_RUN_TASKS: dict[tuple[str, str, int], KubernetesPodOperator] = {}
 for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARNESS_WORK_ITEMS):
+    identity = (suite_id, side, repetition)
     work_item_root = (
         "{{ ti.xcom_pull(task_ids='materialize_official_harness_work_items')"
         f"['workItems'][{work_item_index}]['workItemEvidence']"
     )
+    if suite_id in D19_CODE_SANDBOX_SUITES:
+        prepare_task_id = _code_sandbox_task_id("prepare", suite_id, side, repetition)
+        sandbox_task_id = _code_sandbox_task_id("execute", suite_id, side, repetition)
+        seal_task_id = _code_sandbox_task_id("seal", suite_id, side, repetition)
+        prepare_task = KubernetesPodOperator(
+            task_id=prepare_task_id,
+            name=f"serp-d19-prepare-code-sandbox-{work_item_index + 1:02d}",
+            namespace=conf.get("kubernetes_executor", "namespace"),
+            image=current_airflow_runtime_image(),
+            cmds=[
+                "python",
+                "-m",
+                "adapstory_serp_pipeline.orchestration.official_harness_execution",
+            ],
+            arguments=[
+                "prepare-code-sandbox",
+                "--work-item",
+                work_item_root + "['artifactPath'] }}",
+                "--work-item-version-id",
+                work_item_root + "['artifactVersionId'] }}",
+                "--work-item-sha256",
+                work_item_root + "['artifactSha256'] }}",
+            ],
+            env_vars=d19_aggregator_env_vars(),
+            service_account_name=D19_AGGREGATOR_WORKLOAD_SERVICE_ACCOUNT,
+            automount_service_account_token=False,
+            volumes=D19_AGGREGATOR_VOLUMES,
+            volume_mounts=D19_AGGREGATOR_VOLUME_MOUNTS,
+            labels=D19_AGGREGATOR_WORKLOAD_LABELS,
+            container_resources=D19_NATIVE_ADAPTER_RUNNER_RESOURCES,
+            security_context=hardened_runtime_pod_security_context(),
+            container_security_context=hardened_runtime_container_security_context(),
+            do_xcom_push=True,
+            get_logs=True,
+            log_events_on_failure=True,
+            random_name_suffix=True,
+            reattach_on_restart=True,
+            on_kill_action="keep_pod",
+            on_finish_action="delete_pod",
+            retries=0,
+            executor_config=kubernetes_pod_launcher_executor_config(),
+            dag=dag,
+        )
+        sandbox_work_item_root = (
+            "{{ ti.xcom_pull(task_ids='"
+            + prepare_task_id
+            + "')['sandboxWorkItemEvidence']"
+        )
+        sandbox_image = d19_code_sandbox_runtime_image()
+        stage_container = k8s.V1Container(
+            name="stage-code-sandbox",
+            image=sandbox_image,
+            command=[
+                "python",
+                "-m",
+                "adapstory_serp_pipeline.orchestration.official_harness_execution",
+            ],
+            args=[
+                "stage-code-sandbox",
+                "--sandbox-work-item",
+                sandbox_work_item_root + "['artifactPath'] }}",
+                "--sandbox-work-item-version-id",
+                sandbox_work_item_root + "['artifactVersionId'] }}",
+                "--sandbox-work-item-sha256",
+                sandbox_work_item_root + "['artifactSha256'] }}",
+                "--input-dir",
+                "/sandbox/input",
+            ],
+            env=d19_aggregator_env_vars(),
+            env_from=[],
+            resources=D19_NATIVE_ADAPTER_RUNNER_RESOURCES,
+            security_context=hardened_runtime_container_security_context(),
+            volume_mounts=D19_CODE_SANDBOX_STAGE_VOLUME_MOUNTS,
+        )
+        sandbox_executor = k8s.V1Container(
+            name="sandbox-executor",
+            image=sandbox_image,
+            command=[
+                "python",
+                "-m",
+                "adapstory_serp_pipeline.orchestration.official_harness_execution",
+            ],
+            args=[
+                "execute-code-sandbox",
+                "--input-manifest",
+                "/sandbox/input/sandbox-work-item.json",
+                "--output-result",
+                "/sandbox/output/sandbox-result.json",
+            ],
+            env=[],
+            env_from=[],
+            resources=d19_official_harness_runner_resources(suite_id),
+            security_context=hardened_runtime_container_security_context(),
+            volume_mounts=D19_CODE_SANDBOX_EXECUTOR_VOLUME_MOUNTS,
+        )
+        sandbox_task = KubernetesPodOperator(
+            task_id=sandbox_task_id,
+            name=f"serp-d19-execute-code-sandbox-{work_item_index + 1:02d}",
+            namespace=conf.get("kubernetes_executor", "namespace"),
+            image=sandbox_image,
+            cmds=[
+                "python",
+                "-m",
+                "adapstory_serp_pipeline.orchestration.official_harness_execution",
+            ],
+            arguments=[
+                "publish-code-sandbox-result",
+                "--sandbox-work-item",
+                sandbox_work_item_root + "['artifactPath'] }}",
+                "--sandbox-work-item-version-id",
+                sandbox_work_item_root + "['artifactVersionId'] }}",
+                "--sandbox-work-item-sha256",
+                sandbox_work_item_root + "['artifactSha256'] }}",
+                "--result",
+                "/sandbox/output/sandbox-result.json",
+                "--xcom-output",
+                "/airflow/xcom/return.json",
+            ],
+            env_vars=d19_aggregator_env_vars(),
+            service_account_name=D19_CODE_SANDBOX_WORKLOAD_SERVICE_ACCOUNT,
+            automount_service_account_token=False,
+            volumes=D19_CODE_SANDBOX_VOLUMES,
+            volume_mounts=D19_CODE_SANDBOX_PUBLISHER_VOLUME_MOUNTS,
+            labels=D19_CODE_SANDBOX_WORKLOAD_LABELS,
+            container_resources=D19_NATIVE_ADAPTER_RUNNER_RESOURCES,
+            security_context=hardened_runtime_pod_security_context(),
+            container_security_context=hardened_runtime_container_security_context(),
+            init_containers=[stage_container],
+            full_pod_spec=k8s.V1Pod(
+                spec=k8s.V1PodSpec(
+                    automount_service_account_token=False,
+                    containers=[k8s.V1Container(name="base"), sandbox_executor],
+                    share_process_namespace=False,
+                )
+            ),
+            do_xcom_push=True,
+            get_logs=True,
+            container_logs=["base", "sandbox-executor"],
+            init_container_logs=["stage-code-sandbox"],
+            log_events_on_failure=True,
+            random_name_suffix=True,
+            reattach_on_restart=True,
+            on_kill_action="keep_pod",
+            on_finish_action="delete_pod",
+            retries=0,
+            executor_config=kubernetes_pod_launcher_executor_config(),
+            dag=dag,
+        )
+        sandbox_result_root = (
+            "{{ ti.xcom_pull(task_ids='"
+            + sandbox_task_id
+            + "')['sandboxResultEvidence']"
+        )
+        seal_task = KubernetesPodOperator(
+            task_id=seal_task_id,
+            name=f"serp-d19-seal-code-receipt-{work_item_index + 1:02d}",
+            namespace=conf.get("kubernetes_executor", "namespace"),
+            image=current_airflow_runtime_image(),
+            cmds=[
+                "python",
+                "-m",
+                "adapstory_serp_pipeline.orchestration.official_harness_execution",
+            ],
+            arguments=[
+                "seal-code-receipt",
+                "--work-item",
+                work_item_root + "['artifactPath'] }}",
+                "--work-item-version-id",
+                work_item_root + "['artifactVersionId'] }}",
+                "--work-item-sha256",
+                work_item_root + "['artifactSha256'] }}",
+                "--sandbox-result",
+                sandbox_result_root + "['artifactPath'] }}",
+                "--sandbox-result-version-id",
+                sandbox_result_root + "['artifactVersionId'] }}",
+                "--sandbox-result-sha256",
+                sandbox_result_root + "['artifactSha256'] }}",
+            ],
+            env_vars=d19_aggregator_env_vars(),
+            service_account_name=D19_AGGREGATOR_WORKLOAD_SERVICE_ACCOUNT,
+            automount_service_account_token=False,
+            volumes=D19_AGGREGATOR_VOLUMES,
+            volume_mounts=D19_AGGREGATOR_VOLUME_MOUNTS,
+            labels=D19_AGGREGATOR_WORKLOAD_LABELS,
+            container_resources=D19_NATIVE_ADAPTER_RUNNER_RESOURCES,
+            security_context=hardened_runtime_pod_security_context(),
+            container_security_context=hardened_runtime_container_security_context(),
+            do_xcom_push=True,
+            get_logs=True,
+            log_events_on_failure=True,
+            random_name_suffix=True,
+            reattach_on_restart=True,
+            on_kill_action="keep_pod",
+            on_finish_action="delete_pod",
+            retries=0,
+            executor_config=kubernetes_pod_launcher_executor_config(),
+            dag=dag,
+        )
+        D19_CODE_SANDBOX_PREPARE_TASKS[identity] = prepare_task
+        D19_CODE_SANDBOX_TASKS[identity] = sandbox_task
+        D19_CODE_SANDBOX_SEAL_TASKS[identity] = seal_task
+        D19_OFFICIAL_HARNESS_RUN_TASKS[identity] = seal_task
+        continue
     runner = KubernetesPodOperator(
         task_id=_official_harness_task_id(suite_id, side, repetition),
         name=f"serp-d19-official-harness-{work_item_index + 1:02d}",
@@ -669,10 +980,11 @@ for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARN
         executor_config=kubernetes_pod_launcher_executor_config(),
         dag=dag,
     )
-    D19_OFFICIAL_HARNESS_RUN_TASKS[(suite_id, side, repetition)] = runner
+    D19_STANDARD_HARNESS_RUN_TASKS[identity] = runner
+    D19_OFFICIAL_HARNESS_RUN_TASKS[identity] = runner
 
 runner_task_ids = [
-    _official_harness_task_id(suite_id, side, repetition)
+    _final_harness_task_id(suite_id, side, repetition)
     for suite_id, side, repetition in D19_OFFICIAL_HARNESS_WORK_ITEMS
 ]
 write_assembly_plan = PythonOperator(
@@ -813,7 +1125,12 @@ load_catalog >> write_request
 load_promotion >> write_request
 load_exact_nine_evaluation_binding >> write_request
 write_request >> materialize_official_harness_work_items
-for official_harness_runner in D19_OFFICIAL_HARNESS_RUN_TASKS.values():
-    materialize_official_harness_work_items >> official_harness_runner >> write_assembly_plan
+for standard_runner in D19_STANDARD_HARNESS_RUN_TASKS.values():
+    materialize_official_harness_work_items >> standard_runner >> write_assembly_plan
+for identity, prepare_task in D19_CODE_SANDBOX_PREPARE_TASKS.items():
+    sandbox_task = D19_CODE_SANDBOX_TASKS[identity]
+    seal_task = D19_CODE_SANDBOX_SEAL_TASKS[identity]
+    materialize_official_harness_work_items >> prepare_task
+    prepare_task >> sandbox_task >> seal_task >> write_assembly_plan
 write_assembly_plan >> assemble_paired_execution_manifest
 assemble_paired_execution_manifest >> run_paired_evaluation >> notify_governance

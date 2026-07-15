@@ -41,6 +41,7 @@ MANDATORY_SERP_BENCHMARK_SUITES = (
     "cwd-benchmark-data",
     "rusBEIR",
 )
+_D19_CODE_SANDBOX_SUITES = frozenset({"CodeRAG-Bench", "SWE-bench Verified"})
 SERP_NORMALIZED_GATE_FLOOR = 0.75
 GATEWAY_CLI_MODULE = "adapstory_serp_mcp_gateway.airflow_eval_cli"
 GATEWAY_CLI_PYTHON = "python"
@@ -989,16 +990,7 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
                 "load_exact_nine_evaluation_binding",
                 "write_paired_eval_request",
                 "materialize_official_harness_work_items",
-                *(
-                    (
-                        "run_official_harness_"
-                        f"{suite_id.casefold().replace(' ', '_').replace('-', '_')}_"
-                        f"{side}_{repetition}"
-                    )
-                    for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
-                    for repetition in range(1, 6)
-                    for side in ("baseline", "candidate")
-                ),
+                *_d19_harness_task_ids(),
                 "write_paired_evaluation_assembly_plan",
                 "assemble_paired_execution_manifest",
                 "run_paired_benchmark_evaluation",
@@ -1008,6 +1000,24 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
         "tenant_id": str(tenant_id),
     }
     return SerpDagPlan(plan_payload)
+
+
+def _d19_harness_task_ids() -> tuple[str, ...]:
+    task_ids: list[str] = []
+    for suite_id in MANDATORY_SERP_BENCHMARK_SUITES:
+        slug = suite_id.casefold().replace(" ", "_").replace("-", "_")
+        for repetition in range(1, 6):
+            for side in ("baseline", "candidate"):
+                if suite_id in _D19_CODE_SANDBOX_SUITES:
+                    task_ids.extend(
+                        f"{phase}_code_sandbox_{slug}_{side}_{repetition}"
+                        for phase in ("prepare", "execute", "seal")
+                    )
+                else:
+                    task_ids.append(
+                        f"run_official_harness_{slug}_{side}_{repetition}"
+                    )
+    return tuple(task_ids)
 
 
 def _immutable_evidence_reference(payload: Mapping[str, Any], field_name: str) -> dict[str, str]:
