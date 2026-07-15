@@ -26,6 +26,7 @@ from dags.serp_eval_contracts import (
     MANDATORY_SERP_BENCHMARK_SUITES,
     build_benchmark_improvement_wave_plan,
     governance_notification_pending,
+    load_benchmark_pack_lifecycle_result_snapshot,
     load_materialized_benchmark_catalog_snapshot,
     load_model_catalog_promotion_snapshot,
     write_airflow_plan_artifact,
@@ -82,6 +83,10 @@ D19_BUILDER_WORKLOAD_LABELS = {
 D19_NATIVE_ADAPTER_RUNNER_RESOURCES = k8s.V1ResourceRequirements(
     requests={"cpu": "500m", "memory": "1Gi"},
     limits={"cpu": "1000m", "memory": "3Gi"},
+)
+D19_PACK_BUILDER_RESOURCES = k8s.V1ResourceRequirements(
+    requests={"cpu": "1000m", "memory": "2Gi"},
+    limits={"cpu": "8000m", "memory": "16Gi"},
 )
 D19_OFFICIAL_HARNESS_LIMITS: Mapping[str, Mapping[str, str]] = {
     "APIBench": {"cpu": "2000m", "memory": "4Gi"},
@@ -150,10 +155,7 @@ D19_EVALUATOR_EXECUTOR_CONFIG = minio_web_identity_executor_config(
 def d19_evaluator_env_vars() -> list[k8s.V1EnvVar]:
     """Return the minimal STS-only runtime contract for paired evaluation."""
 
-    return [
-        *minio_web_identity_env_vars(_D19_EVALUATOR_ENV_NAMES),
-        *bc21_workload_env_vars(),
-    ]
+    return minio_web_identity_env_vars(_D19_EVALUATOR_ENV_NAMES)
 
 
 def d19_model_runner_env_vars() -> list[k8s.V1EnvVar]:
@@ -186,10 +188,14 @@ def d19_official_harness_runner_resources(
     )
 
 
-def validate_benchmark_improvement_wave_plan(**context: Any) -> str:
+def validate_benchmark_improvement_wave_plan(**context: Any) -> dict[str, Any]:
     dag_run = context.get("dag_run")
     conf = getattr(dag_run, "conf", None) or {}
-    return write_airflow_plan_artifact(build_benchmark_improvement_wave_plan(conf))
+    plan_json = write_airflow_plan_artifact(build_benchmark_improvement_wave_plan(conf))
+    plan = json.loads(plan_json)
+    if not isinstance(plan, dict):
+        raise ValueError("D19 Airflow plan must be an object")
+    return plan
 
 
 def load_materialized_benchmark_catalog(plan_json: str) -> dict[str, Any]:
@@ -201,22 +207,40 @@ def load_model_catalog_promotion(plan_json: str) -> dict[str, Any]:
 
 
 def write_paired_eval_request(
-    plan_json: str,
+    plan_json: Mapping[str, Any] | str,
     catalog_snapshot: dict[str, Any],
     promotion_snapshot: dict[str, Any],
+    lifecycle_result: dict[str, Any],
 ) -> dict[str, Any]:
-    return write_paired_eval_request_artifact(plan_json, catalog_snapshot, promotion_snapshot)
+    return write_paired_eval_request_artifact(
+        plan_json,
+        catalog_snapshot,
+        promotion_snapshot,
+        lifecycle_result,
+    )
+
+
+def load_exact_nine_evaluation_binding_snapshot(
+    plan_json: Mapping[str, Any] | str,
+    promotion_snapshot: Mapping[str, Any],
+    lifecycle_pointer: Mapping[str, Any],
+) -> dict[str, Any]:
+    return load_benchmark_pack_lifecycle_result_snapshot(
+        plan_json,
+        promotion_snapshot,
+        lifecycle_pointer,
+    )
 
 
 def write_paired_evaluation_assembly_plan(
-    plan_json: str,
+    plan_json: Mapping[str, Any] | str,
     request_snapshot: Mapping[str, Any],
     work_item_plan: Mapping[str, Any],
     run_results: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     """Seal the exact 90 server-owned work-item/receipt pairs for aggregation."""
 
-    plan = json.loads(plan_json)
+    plan = dict(plan_json) if isinstance(plan_json, Mapping) else json.loads(plan_json)
     if not isinstance(plan, Mapping):
         raise ValueError("D19 assembly plan input must be an object")
     if plan.get("dag_id") != "serp_benchmark_improvement_wave":
@@ -344,7 +368,10 @@ materialize_catalog = KubernetesPodOperator(
     cmds=["python", "-m", "dags.serp_benchmark_catalog_materializer"],
     arguments=[
         "--plan-json-urlencoded",
-        "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') | urlencode }}",
+        (
+            "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') "
+            "| tojson | urlencode }}"
+        ),
     ],
     env_vars=benchmark_catalog_acquisition_env_vars(),
     service_account_name=BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT,
@@ -383,6 +410,138 @@ load_promotion = PythonOperator(
     dag=dag,
 )
 
+build_exact_nine_benchmark_packs = KubernetesPodOperator(
+    task_id="build_exact_nine_benchmark_packs",
+    name="serp-d19-build-exact-nine-benchmark-packs",
+    namespace=conf.get("kubernetes_executor", "namespace"),
+    image=current_airflow_runtime_image(),
+    cmds=[
+        "python",
+        "-m",
+        "adapstory_serp_pipeline.registry.bc21_benchmark_pack_lifecycle_cli",
+    ],
+    arguments=[
+        "build-exact-nine",
+        "--benchmark-catalog",
+        "{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog')['artifactPath'] }}",
+        "--benchmark-catalog-version-id",
+        (
+            "{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog')"
+            "['artifactVersionId'] }}"
+        ),
+        "--benchmark-catalog-sha256",
+        (
+            "sha256:{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog')"
+            "['artifactSha256'] }}"
+        ),
+        "--promotion",
+        (
+            "{{ ti.xcom_pull(task_ids='load_model_catalog_promotion')"
+            "['promotionEvidence']['s3Uri'] }}"
+        ),
+        "--promotion-version-id",
+        (
+            "{{ ti.xcom_pull(task_ids='load_model_catalog_promotion')"
+            "['promotionEvidence']['versionId'] }}"
+        ),
+        "--promotion-sha256",
+        (
+            "{{ ti.xcom_pull(task_ids='load_model_catalog_promotion')"
+            "['promotionEvidence']['sha256'] }}"
+        ),
+        "--result-output",
+        (
+            "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan')"
+            "['artifact_paths']['benchmark_pack_build_result'] }}"
+        ),
+    ],
+    env_vars=d19_builder_env_vars(),
+    service_account_name=D19_BUILDER_WORKLOAD_SERVICE_ACCOUNT,
+    automount_service_account_token=False,
+    volumes=D19_BUILDER_VOLUMES,
+    volume_mounts=D19_BUILDER_VOLUME_MOUNTS,
+    labels=D19_BUILDER_WORKLOAD_LABELS,
+    container_resources=D19_PACK_BUILDER_RESOURCES,
+    security_context=hardened_runtime_pod_security_context(),
+    container_security_context=hardened_runtime_container_security_context(),
+    do_xcom_push=True,
+    get_logs=True,
+    log_events_on_failure=True,
+    random_name_suffix=True,
+    reattach_on_restart=True,
+    on_kill_action="keep_pod",
+    on_finish_action="delete_pod",
+    retries=0,
+    executor_config=kubernetes_pod_launcher_executor_config(),
+    dag=dag,
+)
+
+register_exact_nine_evaluation_binding = KubernetesPodOperator(
+    task_id="register_exact_nine_evaluation_binding",
+    name="serp-d19-register-exact-nine-evaluation-binding",
+    namespace=conf.get("kubernetes_executor", "namespace"),
+    image=current_airflow_runtime_image(),
+    cmds=[
+        "python",
+        "-m",
+        "adapstory_serp_pipeline.registry.bc21_benchmark_pack_lifecycle_cli",
+    ],
+    arguments=[
+        "register-binding",
+        "--lifecycle-input",
+        (
+            "{{ ti.xcom_pull(task_ids='build_exact_nine_benchmark_packs')"
+            "['packBuildResultEvidence']['artifactPath'] }}"
+        ),
+        "--lifecycle-input-version-id",
+        (
+            "{{ ti.xcom_pull(task_ids='build_exact_nine_benchmark_packs')"
+            "['packBuildResultEvidence']['artifactVersionId'] }}"
+        ),
+        "--lifecycle-input-sha256",
+        (
+            "{{ ti.xcom_pull(task_ids='build_exact_nine_benchmark_packs')"
+            "['packBuildResultEvidence']['artifactSha256'] }}"
+        ),
+        "--result-output",
+        (
+            "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan')"
+            "['artifact_paths']['benchmark_pack_lifecycle_result'] }}"
+        ),
+    ],
+    env_vars=d19_builder_env_vars(),
+    service_account_name=D19_BUILDER_WORKLOAD_SERVICE_ACCOUNT,
+    automount_service_account_token=False,
+    volumes=D19_BUILDER_VOLUMES,
+    volume_mounts=D19_BUILDER_VOLUME_MOUNTS,
+    labels=D19_BUILDER_WORKLOAD_LABELS,
+    container_resources=D19_PACK_BUILDER_RESOURCES,
+    security_context=hardened_runtime_pod_security_context(),
+    container_security_context=hardened_runtime_container_security_context(),
+    do_xcom_push=True,
+    get_logs=True,
+    log_events_on_failure=True,
+    random_name_suffix=True,
+    reattach_on_restart=True,
+    on_kill_action="keep_pod",
+    on_finish_action="delete_pod",
+    retries=0,
+    executor_config=kubernetes_pod_launcher_executor_config(),
+    dag=dag,
+)
+
+load_exact_nine_evaluation_binding = PythonOperator(
+    task_id="load_exact_nine_evaluation_binding",
+    python_callable=load_exact_nine_evaluation_binding_snapshot,
+    op_args=[
+        "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') }}",
+        "{{ ti.xcom_pull(task_ids='load_model_catalog_promotion') }}",
+        "{{ ti.xcom_pull(task_ids='register_exact_nine_evaluation_binding') }}",
+    ],
+    executor_config=D19_EVALUATOR_EXECUTOR_CONFIG,
+    dag=dag,
+)
+
 write_request = PythonOperator(
     task_id="write_paired_eval_request",
     python_callable=write_paired_eval_request,
@@ -390,6 +549,7 @@ write_request = PythonOperator(
         "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') }}",
         "{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog') }}",
         "{{ ti.xcom_pull(task_ids='load_model_catalog_promotion') }}",
+        "{{ ti.xcom_pull(task_ids='load_exact_nine_evaluation_binding') }}",
     ],
     executor_config=D19_EVALUATOR_EXECUTOR_CONFIG,
     dag=dag,
@@ -418,6 +578,21 @@ materialize_official_harness_work_items = KubernetesPodOperator(
         (
             "{{ ti.xcom_pull(task_ids='write_paired_eval_request')"
             "['requestEvidence']['artifactSha256'] }}"
+        ),
+        "--lifecycle-result",
+        (
+            "{{ ti.xcom_pull(task_ids='register_exact_nine_evaluation_binding')"
+            "['lifecycleResultEvidence']['artifactPath'] }}"
+        ),
+        "--lifecycle-result-version-id",
+        (
+            "{{ ti.xcom_pull(task_ids='register_exact_nine_evaluation_binding')"
+            "['lifecycleResultEvidence']['artifactVersionId'] }}"
+        ),
+        "--lifecycle-result-sha256",
+        (
+            "{{ ti.xcom_pull(task_ids='register_exact_nine_evaluation_binding')"
+            "['lifecycleResultEvidence']['artifactSha256'] }}"
         ),
     ],
     env_vars=d19_evaluator_env_vars(),
@@ -629,8 +804,13 @@ notify_governance = PythonOperator(
 
 validate_plan >> materialize_catalog >> load_catalog
 validate_plan >> load_promotion
+load_catalog >> build_exact_nine_benchmark_packs
+load_promotion >> build_exact_nine_benchmark_packs
+build_exact_nine_benchmark_packs >> register_exact_nine_evaluation_binding
+register_exact_nine_evaluation_binding >> load_exact_nine_evaluation_binding
 load_catalog >> write_request
 load_promotion >> write_request
+load_exact_nine_evaluation_binding >> write_request
 write_request >> materialize_official_harness_work_items
 for official_harness_runner in D19_OFFICIAL_HARNESS_RUN_TASKS.values():
     materialize_official_harness_work_items >> official_harness_runner >> write_assembly_plan

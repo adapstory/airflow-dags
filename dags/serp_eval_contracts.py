@@ -92,7 +92,9 @@ _ALLOWED_DATASET_DISTRIBUTION_RULES = {
 _UNATTESTED_LICENSE_MARKERS = ("pending", "unknown", "noassertion", "unlicensed")
 _DATASET_RIGHTS_STATUSES = frozenset({"attested", "rights-unverified"})
 _RIGHTS_UNVERIFIED_DISTRIBUTION_RULE = "internal-only-no-redistribution"
-_CATALOG_EXECUTION_STATUSES = frozenset({"ready", "rights-policy-blocked"})
+_CATALOG_EXECUTION_STATUSES = frozenset(
+    {"corpus-evidence-blocked", "ready", "rights-policy-blocked"}
+)
 _CATALOG_BLOCKING_REASON_ORDER = ("rights-policy-blocked",)
 _FORBIDDEN_INLINE_D19_FIELDS = frozenset(
     {
@@ -1219,6 +1221,39 @@ def load_model_catalog_promotion_snapshot(
     return {"promotionEvidence": receipt_evidence, "promotion": normalized}
 
 
+def load_benchmark_pack_lifecycle_result_snapshot(
+    plan_json: Mapping[str, Any] | str,
+    promotion_snapshot: Mapping[str, Any],
+    lifecycle_pointer: Mapping[str, Any],
+    *,
+    s3_client: Any | None = None,
+) -> dict[str, Any]:
+    """Read and validate the server-owned exact-nine BC21 binding result."""
+
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != "serp_benchmark_improvement_wave":
+        raise ValueError("plan dag_id does not match D19 lifecycle result loader")
+    evidence = _immutable_evidence_reference(lifecycle_pointer, "lifecycleResultEvidence")
+    artifact_paths = _required_artifact_paths(plan, ("benchmark_pack_lifecycle_result",))
+    if evidence["artifactPath"] != artifact_paths["benchmark_pack_lifecycle_result"]:
+        raise ValueError("D19 lifecycle result artifact path does not match plan")
+    client = s3_client or _s3_read_client(evidence["artifactPath"])
+    payload, observed_version_id = _read_compliance_locked_s3_bytes(
+        client,
+        evidence["artifactPath"],
+        field_name="benchmark pack lifecycle result",
+        version_id=evidence["artifactVersionId"],
+    )
+    if observed_version_id != evidence["artifactVersionId"]:
+        raise ValueError("D19 lifecycle result VersionId does not match evidence")
+    if "sha256:" + sha256(payload).hexdigest() != evidence["artifactSha256"]:
+        raise ValueError("D19 lifecycle result SHA-256 does not match evidence")
+    lifecycle_result = _json_object(payload.decode("utf-8"), "lifecycle_result")
+    promotion = _validated_d19_promotion_snapshot(plan, promotion_snapshot)
+    return _validated_d19_lifecycle_result(plan, promotion, lifecycle_result)
+
+
 def _load_governed_evaluation_release(
     evidence: Mapping[str, Any],
     *,
@@ -2258,6 +2293,10 @@ def materialize_live_benchmark_catalog_artifact(
         [str, Mapping[str, bytes], Mapping[str, Mapping[str, object]]], Mapping[str, object]
     ]
     | None = None,
+    native_corpus_materializer: Callable[
+        [str, Mapping[str, bytes], Mapping[str, Mapping[str, object]]], Mapping[str, object]
+    ]
+    | None = None,
 ) -> dict[str, Any]:
     """Capture all upstream benchmark licensing evidence in immutable storage.
 
@@ -2310,6 +2349,11 @@ def materialize_live_benchmark_catalog_artifact(
             if native_adapter_materializer is None
             else native_adapter_materializer
         ),
+        native_corpus_materializer=(
+            _native_corpus_materializer
+            if native_corpus_materializer is None
+            else native_corpus_materializer
+        ),
     )
     writer = write_immutable_evidence_snapshot if snapshot_writer is None else snapshot_writer
     snapshot = writer(
@@ -2328,6 +2372,7 @@ def materialize_live_benchmark_catalog_artifact(
         for suite in suites
         if _required_str(suite, "execution_status") != "ready"
     ]
+    result["officialHarnessLineage"] = _catalog_official_harness_lineage(suites)
     result["suiteSummary"] = _catalog_suite_summary(suites)
     return result
 
@@ -2342,6 +2387,28 @@ def _native_adapter_materializer(
     from adapstory_serp_pipeline.benchmark.native_adapters import (  # type: ignore[import-not-found]
         build_native_case_manifest,
     )
+
+
+def _native_corpus_materializer(
+    suite_id: str,
+    dataset_payloads: Mapping[str, bytes],
+    dataset_snapshots: Mapping[str, Mapping[str, object]],
+) -> Mapping[str, object]:
+    """Derive only query-independent corpus bytes inside the isolated workload."""
+
+    from adapstory_serp_pipeline.benchmark.native_corpus import (  # type: ignore[import-not-found]
+        derive_native_benchmark_corpus,
+    )
+
+    materialization = derive_native_benchmark_corpus(
+        suite_id=suite_id,
+        dataset_payloads=dataset_payloads,
+        dataset_snapshots=dataset_snapshots,
+    )
+    return {
+        "manifest": dict(materialization.manifest),
+        "payloads": dict(materialization.payloads),
+    }
 
     return cast(
         Mapping[str, object],
@@ -2391,7 +2458,7 @@ def load_materialized_benchmark_catalog_snapshot(
         )
     except UnicodeDecodeError as exc:
         raise ValueError("benchmark catalog materialization receipt is not UTF-8 JSON") from exc
-    if _required_str(receipt, "contractVersion") != "serp-benchmark-catalog-materializer/v3":
+    if _required_str(receipt, "contractVersion") != "serp-benchmark-catalog-materializer/v4":
         raise ValueError("benchmark catalog materialization receipt contract is unsupported")
     if _required_str(receipt, "dagId") != _required_str(plan, "dag_id"):
         raise ValueError("benchmark catalog materialization receipt dagId does not match plan")
@@ -2421,6 +2488,8 @@ def load_materialized_benchmark_catalog_snapshot(
         raise ValueError("benchmark catalog object is not UTF-8 JSON") from exc
     if _required_str(catalog, "catalog_status") != _required_str(catalog_snapshot, "catalogStatus"):
         raise ValueError("benchmark catalog receipt status does not match catalog object")
+    if _required_str(catalog, "contract_version") != "serp-benchmark-catalog/v4":
+        raise ValueError("benchmark catalog contract is unsupported")
     suites = _required_object_list(catalog, "suites")
     suite_ids = [_required_str(suite, "suite_id") for suite in suites]
     if suite_ids != list(MANDATORY_SERP_BENCHMARK_SUITES):
@@ -2431,6 +2500,12 @@ def load_materialized_benchmark_catalog_snapshot(
         catalog_snapshot.get("suiteSummary")
     ) != _catalog_suite_summary(suites):
         raise ValueError("benchmark catalog receipt suite summary does not match catalog object")
+    if normalize_benchmark_catalog_official_harness_lineage(
+        catalog_snapshot.get("officialHarnessLineage")
+    ) != _catalog_official_harness_lineage(suites):
+        raise ValueError(
+            "benchmark catalog receipt official harness lineage does not match catalog object"
+        )
     actual_blocking_suite_ids = [
         _required_str(suite, "suite_id")
         for suite in suites
@@ -2501,6 +2576,63 @@ def normalize_benchmark_catalog_suite_summary(value: object) -> list[dict[str, s
     return normalized
 
 
+def normalize_benchmark_catalog_official_harness_lineage(
+    value: object,
+) -> list[dict[str, str]]:
+    """Validate the exact official harness source and code-license lineage."""
+
+    required_fields = {
+        "entrypoint",
+        "harnessLicenseId",
+        "harnessLicenseSha256",
+        "harnessLicenseStatus",
+        "harnessSourceArchiveSha256",
+        "revision",
+        "suiteId",
+    }
+    if not isinstance(value, list):
+        raise ValueError("benchmark catalog official harness lineage must be a list")
+    normalized: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, Mapping) or set(item) != required_fields:
+            raise ValueError("benchmark catalog official harness lineage has an invalid shape")
+        revision = _required_str(item, "revision")
+        if len(revision) != 40 or any(
+            character not in "0123456789abcdef" for character in revision
+        ):
+            raise ValueError("benchmark catalog official harness revision must be a git SHA")
+        license_status = _required_str(item, "harnessLicenseStatus")
+        if license_status not in {"ATTESTED", "UNDECLARED"}:
+            raise ValueError("benchmark catalog official harness license status is unsupported")
+        normalized.append(
+            {
+                "entrypoint": _required_str(item, "entrypoint"),
+                "harnessLicenseId": _required_str(item, "harnessLicenseId"),
+                "harnessLicenseSha256": _normalized_catalog_sha256_digest(
+                    _required_str(item, "harnessLicenseSha256"),
+                    "harnessLicenseSha256",
+                ),
+                "harnessLicenseStatus": license_status,
+                "harnessSourceArchiveSha256": _normalized_catalog_sha256_digest(
+                    _required_str(item, "harnessSourceArchiveSha256"),
+                    "harnessSourceArchiveSha256",
+                ),
+                "revision": revision,
+                "suiteId": _required_str(item, "suiteId"),
+            }
+        )
+    if [item["suiteId"] for item in normalized] != list(MANDATORY_SERP_BENCHMARK_SUITES):
+        raise ValueError("benchmark catalog official harness lineage must use canonical order")
+    return normalized
+
+
+def _normalized_catalog_sha256_digest(value: str, field_name: str) -> str:
+    normalized = value.removeprefix("sha256:")
+    if not re.fullmatch(r"[a-f0-9]{64}", normalized):
+        raise ValueError(f"benchmark catalog {field_name} must be a SHA-256 digest")
+    return f"sha256:{normalized}"
+
+
 def _catalog_suite_summary(suites: Sequence[Mapping[str, Any]]) -> list[dict[str, str]]:
     return normalize_benchmark_catalog_suite_summary(
         [
@@ -2513,6 +2645,34 @@ def _catalog_suite_summary(suites: Sequence[Mapping[str, Any]]) -> list[dict[str
             for suite in suites
         ]
     )
+
+
+def _catalog_official_harness_lineage(
+    suites: Sequence[Mapping[str, Any]],
+) -> list[dict[str, str]]:
+    lineage: list[dict[str, str]] = []
+    for suite in suites:
+        official_harness = _required_mapping(suite, "official_harness")
+        source_archive_snapshot = _required_mapping(
+            official_harness, "source_archive_snapshot"
+        )
+        license_snapshot = _required_mapping(official_harness, "license_snapshot")
+        lineage.append(
+            {
+                "entrypoint": _required_str(official_harness, "entrypoint"),
+                "harnessLicenseId": _required_str(official_harness, "license_id"),
+                "harnessLicenseSha256": _required_str(license_snapshot, "sha256"),
+                "harnessLicenseStatus": _required_str(
+                    official_harness, "license_status"
+                ),
+                "harnessSourceArchiveSha256": _required_str(
+                    source_archive_snapshot, "sha256"
+                ),
+                "revision": _required_str(official_harness, "revision"),
+                "suiteId": _required_str(suite, "suite_id"),
+            }
+        )
+    return normalize_benchmark_catalog_official_harness_lineage(lineage)
 
 
 def _catalog_blocking_reason_by_suite(
@@ -2535,7 +2695,14 @@ def _catalog_blocking_reason_by_suite(
             )
         if execution_status == "ready":
             continue
-        reasons[suite_id] = execution_status
+        reason = _required_str(suite, "blocking_reason")
+        if not reason.startswith(
+            ("query-independent-corpus-unavailable: ", "rights-policy-blocked: ")
+        ):
+            raise ValueError(
+                "catalog-evidence-invalid: blocking_reason is unsupported for " + suite_id
+            )
+        reasons[suite_id] = reason
     return reasons
 
 

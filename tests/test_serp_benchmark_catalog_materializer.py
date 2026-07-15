@@ -61,6 +61,18 @@ def test_catalog_materializer_seals_catalog_snapshot_in_immutable_receipt() -> N
             "catalogStatus": "ready",
             "blockingSuiteIds": [],
             "objectLockMode": "COMPLIANCE",
+            "officialHarnessLineage": [
+                {
+                    "entrypoint": f"official/{suite_id}/score.py",
+                    "harnessLicenseId": "Apache-2.0",
+                    "harnessLicenseSha256": "sha256:" + "b" * 64,
+                    "harnessLicenseStatus": "ATTESTED",
+                    "harnessSourceArchiveSha256": "sha256:" + "c" * 64,
+                    "revision": "d" * 40,
+                    "suiteId": suite_id,
+                }
+                for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+            ],
             "suiteSummary": [
                 {
                     "distributionRule": "internal-only-no-redistribution",
@@ -98,6 +110,18 @@ def test_catalog_materializer_seals_catalog_snapshot_in_immutable_receipt() -> N
                 "blockingSuiteIds": [],
                 "catalogStatus": "ready",
                 "objectLockMode": "COMPLIANCE",
+                "officialHarnessLineage": [
+                    {
+                        "entrypoint": f"official/{suite_id}/score.py",
+                        "harnessLicenseId": "Apache-2.0",
+                        "harnessLicenseSha256": "sha256:" + "b" * 64,
+                        "harnessLicenseStatus": "ATTESTED",
+                        "harnessSourceArchiveSha256": "sha256:" + "c" * 64,
+                        "revision": "d" * 40,
+                        "suiteId": suite_id,
+                    }
+                    for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+                ],
                 "suiteSummary": [
                     {
                         "distributionRule": "internal-only-no-redistribution",
@@ -108,7 +132,7 @@ def test_catalog_materializer_seals_catalog_snapshot_in_immutable_receipt() -> N
                     for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
                 ],
             },
-            "contractVersion": "serp-benchmark-catalog-materializer/v3",
+            "contractVersion": "serp-benchmark-catalog-materializer/v4",
             "dagId": "serp_nightly_regression_suite",
             "operationId": "op-1",
         },

@@ -5066,12 +5066,15 @@ def test_serp_dag_files_declare_expected_airflow_contracts(
             "validate_benchmark_improvement_wave_plan",
             "load_materialized_benchmark_catalog",
             "load_model_catalog_promotion",
+            "load_exact_nine_evaluation_binding",
             "write_paired_eval_request",
             "write_paired_evaluation_assembly_plan",
             "notify_governance_eval_surfaces",
         ]
         assert _keyword_values(tree, "KubernetesPodOperator", "task_id") == [
             "materialize_live_benchmark_catalog",
+            "build_exact_nine_benchmark_packs",
+            "register_exact_nine_evaluation_binding",
             "materialize_official_harness_work_items",
             "assemble_paired_execution_manifest",
             "run_paired_benchmark_evaluation",
@@ -5827,8 +5830,76 @@ def test_serp_improvement_dag_passes_exact_s3_values_to_the_evaluator_pod(
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_WEB_IDENTITY_TOKEN_FILE": (
             "/var/run/secrets/adapstory/minio-web-identity/token"
         ),
-        "ADAPSTORY_SERP_SERVICE_ACCOUNT_TOKEN_PATH": "/var/run/secrets/adapstory/bc21-workload/token",
     }
+
+
+def test_d19_builds_and_registers_server_owned_exact_nine_before_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    for name, value in {
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT": "http://minio:9000",
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION": "us-east-1",
+        "ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST": "sha256:" + "d" * 64,
+        "ADAPSTORY_SERP_BC21_BASE_URL": "http://context-platform:8080/api/bc-21/serp/v1",
+        "ADAPSTORY_SERP_MCP_GATEWAY_BASE_URL": (
+            "http://prod-serp-mcp-gateway-svc.env-prod.svc.cluster.local:8000"
+        ),
+        "ADAPSTORY_OLLAMA_BASE_URL": "http://ollama.ollama.svc.cluster.local:11434",
+    }.items():
+        monkeypatch.setenv(name, value)
+    module = importlib.import_module("dags.serp_benchmark_improvement_wave")
+    module = importlib.reload(module)
+
+    builder = module.build_exact_nine_benchmark_packs.kwargs
+    registrar = module.register_exact_nine_evaluation_binding.kwargs
+    expected_module = [
+        "python",
+        "-m",
+        "adapstory_serp_pipeline.registry.bc21_benchmark_pack_lifecycle_cli",
+    ]
+    for task in (builder, registrar):
+        assert task["cmds"] == expected_module
+        assert task["service_account_name"] == "airflow-serp-benchmark-builder"
+        assert task["automount_service_account_token"] is False
+        assert task["do_xcom_push"] is True
+        assert task["labels"]["adapstory.com/serp-network-profile"] == "benchmark-builder"
+        assert task["security_context"].kwargs["run_as_non_root"] is True
+        assert task["container_security_context"].kwargs["read_only_root_filesystem"] is True
+    assert builder["arguments"][0] == "build-exact-nine"
+    assert registrar["arguments"][0] == "register-binding"
+    assert "--lifecycle-input" in registrar["arguments"]
+    assert "--result-output" in builder["arguments"]
+    assert "--result-output" in registrar["arguments"]
+
+    builder_env = {
+        item.kwargs["name"]: item.kwargs.get("value") for item in module.d19_builder_env_vars()
+    }
+    assert builder_env["ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST"] == "sha256:" + "d" * 64
+    assert builder_env["ADAPSTORY_SERP_BC21_BASE_URL"] == (
+        "http://context-platform:8080/api/bc-21/serp/v1"
+    )
+    assert builder_env["ADAPSTORY_OLLAMA_BASE_URL"] == (
+        "http://ollama.ollama.svc.cluster.local:11434"
+    )
+    assert "ADAPSTORY_SERP_MCP_GATEWAY_BASE_URL" not in builder_env
+    assert not any(
+        "QDRANT" in name or "OPENSEARCH" in name or "NEO4J" in name for name in builder_env
+    )
+
+    evaluator_env = {
+        item.kwargs["name"]: item.kwargs.get("value") for item in module.d19_evaluator_env_vars()
+    }
+    assert "ADAPSTORY_SERP_BC21_BASE_URL" not in evaluator_env
+    assert "ADAPSTORY_SERP_SERVICE_ACCOUNT_TOKEN_PATH" not in evaluator_env
+    source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(encoding="utf-8")
+    assert "load_catalog >> build_exact_nine_benchmark_packs" in source
+    assert "load_promotion >> build_exact_nine_benchmark_packs" in source
+    assert "build_exact_nine_benchmark_packs >> register_exact_nine_evaluation_binding" in source
+    assert "register_exact_nine_evaluation_binding >> load_exact_nine_evaluation_binding" in source
+    assert '"--lifecycle-result"' in source
+    assert '"--lifecycle-result-version-id"' in source
+    assert '"--lifecycle-result-sha256"' in source
 
 
 def test_d19_runs_exact_ninety_server_owned_official_harness_work_items(
@@ -6437,76 +6508,6 @@ def _d19_lifecycle_result(promotion_snapshot: Mapping[str, Any]) -> dict[str, An
         ],
         "indexedReceiptCount": 18,
         "productionActivationRequested": False,
-    }
-
-    baseline_replay = {
-        "featureFlags": ["serp.d19.dry_run"],
-        "guardrailBundleVersion": "guardrails@2026.07.1",
-        "judgeModelId": "judge-serp-rubric",
-        "judgeModelVersion": "judge@2026.07.1",
-        "judgePromptTemplateVersion": "judge-template@2026.07.1",
-        "policyBundleVersion": "policy@2026.07.1",
-        "providerRouteId": "llm-gateway://eval/judge-serp-rubric",
-        "rerankerProfileVersion": "reranker@2026.07.1",
-        "retrievalProfileVersion": "hybrid@2026.07.1",
-    }
-    candidate_replay = {**baseline_replay, "rerankerProfileVersion": "reranker@2026.07.2"}
-
-    def binding(
-        release_id: str, evaluation_run_id: str, replay: Mapping[str, object]
-    ) -> dict[str, object]:
-        return {
-            "evidence": {
-                "artifactPath": (
-                    f"s3://airflow-serp-evidence/serp-evals/model-releases/{release_id}.json"
-                ),
-                "artifactSha256": "sha256:" + "d" * 64,
-                "artifactVersionId": f"{release_id}-version-001",
-            },
-            "release": {
-                "ciRuntime": {
-                    "airflowDagsRef": "a" * 40,
-                    "configMediaType": "application/vnd.docker.container.image.v1+json",
-                    "digest": "sha256:" + "e" * 64,
-                    "jenkinsBuildUrl": "https://jenkins.adapstory.com/job/infra-build/123/",
-                    "manifestMediaType": "application/vnd.docker.distribution.manifest.v2+json",
-                    "repository": "harbor.adapstory.com/adapstory/airflow",
-                    "result": "SUCCESS",
-                    "serpContextBenchmarkRef": "b" * 40,
-                    "serpMcpGatewayRef": "f" * 40,
-                    "serpPipelineRef": "c" * 40,
-                    "tag": "3.3.0-runtime-test",
-                },
-                "component": "reranker-profile-public-docs",
-                "evaluationRunId": evaluation_run_id,
-                "model": {
-                    "catalogEntryId": "model-catalog://serp/judge-serp-rubric@2026.07.1",
-                    "modelId": "judge-serp-rubric",
-                    "modelVersion": "judge@2026.07.1",
-                },
-                "registryResourceId": REGISTRY_RESOURCE_ID,
-                "registryResourceType": "workflow",
-                "releaseId": release_id,
-                "replay": dict(replay),
-                "runtime": {
-                    "imageDigest": "sha256:" + "e" * 64,
-                    "sourceRevision": "f" * 40,
-                },
-                "tenantId": TENANT_ID,
-            },
-        }
-
-    return {
-        "promotionEvidence": plan.payload["model_promotion_evidence"],
-        "promotion": {
-            "baselineRelease": binding(
-                "baseline-reranker", "evalrun_public_reranker_baseline_001", baseline_replay
-            ),
-            "candidateRelease": binding(
-                "candidate-reranker-v2", "candidate-reranker-v2-run-001", candidate_replay
-            ),
-            "promotionId": "public-docs-reranker-eval-001",
-        },
     }
 
 

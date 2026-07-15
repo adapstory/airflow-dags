@@ -10,11 +10,12 @@ from urllib.parse import unquote
 
 from dags.serp_eval_contracts import (
     materialize_live_benchmark_catalog_artifact,
+    normalize_benchmark_catalog_official_harness_lineage,
     normalize_benchmark_catalog_suite_summary,
     write_immutable_evidence_snapshot,
 )
 
-BENCHMARK_CATALOG_MATERIALIZER_CONTRACT_VERSION = "serp-benchmark-catalog-materializer/v3"
+BENCHMARK_CATALOG_MATERIALIZER_CONTRACT_VERSION = "serp-benchmark-catalog-materializer/v4"
 
 CatalogMaterializer = Callable[[Mapping[str, Any] | str], dict[str, Any]]
 ReceiptWriter = Callable[..., dict[str, Any]]
@@ -44,6 +45,9 @@ def materialize_benchmark_catalog_receipt(
             "blockingSuiteIds": _required_str_list(catalog_snapshot, "blockingSuiteIds"),
             "catalogStatus": _required_str(catalog_snapshot, "catalogStatus"),
             "objectLockMode": _required_str(catalog_snapshot, "objectLockMode"),
+            "officialHarnessLineage": normalize_benchmark_catalog_official_harness_lineage(
+                catalog_snapshot.get("officialHarnessLineage")
+            ),
             "suiteSummary": suite_summary,
         },
         "contractVersion": BENCHMARK_CATALOG_MATERIALIZER_CONTRACT_VERSION,

@@ -176,6 +176,7 @@ def test_huggingface_dataset_artifact_uses_pinned_xet_aware_client(
 
 
 def test_catalog_covers_every_mandatory_suite_with_explicit_licensing_boundary() -> None:
+    assert BENCHMARK_CATALOG_CONTRACT_VERSION == "serp-benchmark-catalog/v4"
     assert tuple(entry.suite_id for entry in MANDATORY_BENCHMARK_SUITE_CATALOG) == (
         MANDATORY_SERP_BENCHMARK_SUITES
     )
@@ -196,10 +197,11 @@ def test_catalog_covers_every_mandatory_suite_with_explicit_licensing_boundary()
         for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
         for _, url in entry.supplemental_dataset_artifacts
     )
-    assert all(
-        entry.adapter_source_url.startswith("https://")
-        for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
-    )
+    assert all(entry.harness_repository_url.startswith("https://") for entry in MANDATORY_BENCHMARK_SUITE_CATALOG)
+    assert all(entry.harness_source_archive_url.startswith("https://") for entry in MANDATORY_BENCHMARK_SUITE_CATALOG)
+    assert all(entry.harness_license_url.startswith("https://") for entry in MANDATORY_BENCHMARK_SUITE_CATALOG)
+    assert all(entry.harness_entrypoint for entry in MANDATORY_BENCHMARK_SUITE_CATALOG)
+    assert all(entry.harness_license_id for entry in MANDATORY_BENCHMARK_SUITE_CATALOG)
     assert all(entry.distribution_rule for entry in MANDATORY_BENCHMARK_SUITE_CATALOG)
 
 
@@ -231,6 +233,19 @@ def test_catalog_pins_each_upstream_dataset_to_an_immutable_revision() -> None:
         for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
         for _, url in entry.supplemental_dataset_artifacts
     )
+    assert all(
+        len(entry.harness_revision) == 40
+        and all(character in "0123456789abcdef" for character in entry.harness_revision)
+        for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+    )
+    assert all(
+        entry.harness_revision in entry.harness_source_archive_url
+        for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+    )
+    assert all(
+        entry.harness_revision in entry.harness_license_url
+        for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+    )
 
 
 def test_live_catalog_allows_rights_unverified_internal_runs() -> None:
@@ -253,18 +268,14 @@ def test_live_catalog_allows_rights_unverified_internal_runs() -> None:
         }
     )
     payload_by_url.update(_supplemental_dataset_payloads())
-    payload_by_url.update(
-        {
-            entry.adapter_source_url: f"adapter:{entry.suite_id}".encode()
-            for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
-        }
-    )
+    payload_by_url.update(_official_harness_payloads())
 
     evidence = build_live_benchmark_catalog_evidence(
         observed_at="2026-07-13T00:00:00Z",
         fetch_bytes=payload_by_url.__getitem__,
         snapshot_bytes=_snapshot_bytes,
         native_adapter_materializer=_native_adapter_materializer,
+        native_corpus_materializer=_native_corpus_materializer,
     )
     suites = cast(list[dict[str, Any]], evidence["suites"])
 
@@ -273,6 +284,52 @@ def test_live_catalog_allows_rights_unverified_internal_runs() -> None:
     assert [item["suite_id"] for item in suites] == list(MANDATORY_SERP_BENCHMARK_SUITES)
     assert all(item["source_snapshot"]["sha256"].startswith("sha256:") for item in suites)
     assert all(item["license_snapshot"]["sha256"].startswith("sha256:") for item in suites)
+    assert all(
+        item["official_harness"]["source_archive_snapshot"]["sha256"].startswith("sha256:")
+        for item in suites
+    )
+    assert all(
+        item["official_harness"]["license_snapshot"]["sha256"].startswith("sha256:")
+        for item in suites
+    )
+    assert all(
+        item["native_adapter_manifest"]["officialHarness"]
+        == {
+            "entrypoint": item["official_harness"]["entrypoint"],
+            "licenseEvidence": item["official_harness"]["license_snapshot"]["immutable_artifact"],
+            "licenseId": item["official_harness"]["license_id"],
+            "licenseStatus": item["official_harness"]["license_status"],
+            "repositoryUrl": item["official_harness"]["repository_url"],
+            "revision": item["official_harness"]["revision"],
+            "sourceArchiveEvidence": item["official_harness"]["source_archive_snapshot"]["immutable_artifact"],
+        }
+        for item in suites
+    )
+    assert all(
+        item["native_adapter_manifest"]["corpusManifest"]["schema"]
+        == "NativeBenchmarkCorpusManifest/v1"
+        for item in suites
+    )
+    assert all(len(item["corpus_snapshots"]) == 1 for item in suites)
+    assert {
+        item["suite_id"]: next(iter(item["corpus_snapshots"].values()))["corpus_role"]
+        for item in suites
+    } == {
+        "APIBench": "api-documentation",
+        "ARES": "context-corpus",
+        "BEIR": "beir-corpus",
+        "CodeRAG-Bench": "documentation-corpus",
+        "RAGBench": "source-context",
+        "RepoQA": "repository-code",
+        "SWE-bench Verified": "base-commit-repository",
+        "cwd-benchmark-data": "reference-graph",
+        "rusBEIR": "beir-corpus",
+    }
+    assert all(
+        snapshot["immutable_artifact"]["objectLockMode"] == "COMPLIANCE"
+        for item in suites
+        for snapshot in item["corpus_snapshots"].values()
+    )
     assert all(
         all(
             snapshot["sha256"].startswith("sha256:")
@@ -297,6 +354,7 @@ def test_catalog_refuses_to_mark_a_snapshot_ready_without_native_adapter_evidenc
             observed_at="2026-07-13T00:00:00Z",
             fetch_bytes=lambda _url: b"upstream-bytes",
             snapshot_bytes=_snapshot_bytes,
+            native_corpus_materializer=_native_corpus_materializer,
         )
 
 
@@ -318,6 +376,7 @@ def test_live_catalog_retains_immutable_source_and_license_snapshots() -> None:
         }
     )
     payload_by_url.update(_supplemental_dataset_payloads())
+    payload_by_url.update(_official_harness_payloads())
     calls: list[tuple[str, str, str, bytes]] = []
 
     def snapshot_bytes(
@@ -339,10 +398,11 @@ def test_live_catalog_retains_immutable_source_and_license_snapshots() -> None:
         fetch_bytes=payload_by_url.__getitem__,
         snapshot_bytes=snapshot_bytes,
         native_adapter_materializer=_native_adapter_materializer,
+        native_corpus_materializer=_native_corpus_materializer,
     )
     suites = cast(list[dict[str, Any]], evidence["suites"])
 
-    assert len(calls) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 3) + 2
+    assert len(calls) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 6) + 2
     beir = next(item for item in suites if item["suite_id"] == "BEIR")
     assert (
         beir["dataset_snapshots"]["dataset"]["immutable_artifact"]["objectLockMode"] == "COMPLIANCE"
@@ -351,6 +411,12 @@ def test_live_catalog_retains_immutable_source_and_license_snapshots() -> None:
     assert beir["license_snapshot"]["immutable_artifact"]["artifactVersionId"] == (
         "version-BEIR-license"
     )
+    assert beir["official_harness"]["source_archive_snapshot"]["immutable_artifact"][
+        "artifactVersionId"
+    ] == "version-BEIR-harness-source-archive"
+    assert beir["official_harness"]["license_snapshot"]["immutable_artifact"][
+        "artifactVersionId"
+    ] == "version-BEIR-harness-license"
 
 
 def _snapshot_bytes(
@@ -383,11 +449,62 @@ def _native_adapter_materializer(
     }
 
 
+def _native_corpus_materializer(
+    suite_id: str,
+    payloads: Mapping[str, bytes],
+    _snapshots: Mapping[str, Mapping[str, object]],
+) -> dict[str, object]:
+    role_by_suite = {
+        "APIBench": "api-documentation",
+        "ARES": "context-corpus",
+        "BEIR": "beir-corpus",
+        "CodeRAG-Bench": "documentation-corpus",
+        "RAGBench": "source-context",
+        "RepoQA": "repository-code",
+        "SWE-bench Verified": "base-commit-repository",
+        "cwd-benchmark-data": "reference-graph",
+        "rusBEIR": "beir-corpus",
+    }
+    corpus_role = role_by_suite[suite_id]
+    corpus_payload = b'{"documentId":"doc-1","text":"query-independent corpus"}\n'
+    return {
+        "manifest": {
+            "datasetSha256BySource": {
+                source_id: "sha256:" + sha256(payload).hexdigest()
+                for source_id, payload in payloads.items()
+            },
+            "schema": "NativeBenchmarkCorpusManifest/v1",
+            "sources": [
+                {
+                    "corpusRole": corpus_role,
+                    "documentCount": 1,
+                    "payloadSha256": "sha256:" + sha256(corpus_payload).hexdigest(),
+                    "sourceId": corpus_role,
+                }
+            ],
+            "status": "materialized",
+            "suiteId": suite_id,
+        },
+        "payloads": {corpus_role: corpus_payload},
+    }
+
+
 def _supplemental_dataset_payloads() -> dict[str, bytes]:
     return {
         url: f"dataset-bytes:{entry.suite_id}:{source_id}".encode()
         for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
         for source_id, url in entry.supplemental_dataset_artifacts
+    }
+
+
+def _official_harness_payloads() -> dict[str, bytes]:
+    return {
+        url: f"official-harness:{entry.suite_id}:{evidence_type}".encode()
+        for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+        for evidence_type, url in (
+            ("source-archive", entry.harness_source_archive_url),
+            ("license", entry.harness_license_url),
+        )
     }
 
 
