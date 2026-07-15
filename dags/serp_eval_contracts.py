@@ -1059,17 +1059,28 @@ def load_model_catalog_promotion_snapshot(
     if _required_str(plan, "dag_id") != "serp_benchmark_improvement_wave":
         raise ValueError("plan dag_id does not match D19 promotion receipt loader")
     receipt_evidence = _immutable_evidence_reference(plan, "model_promotion_evidence")
-    client = s3_client or _s3_client(receipt_evidence["artifactPath"])
+    receipt_client = s3_client or _s3_client(receipt_evidence["artifactPath"])
     receipt = _load_immutable_json_evidence(
         receipt_evidence,
         field_name="model_promotion_evidence",
-        s3_client=client,
+        s3_client=receipt_client,
     )
     normalized = _validated_model_promotion_receipt(receipt, plan)
-    for role in ("baselineRelease", "candidateRelease"):
+    release_evidence = tuple(
+        (
+            role,
+            _immutable_evidence_reference(normalized[role], "evidence"),
+        )
+        for role in ("baselineRelease", "candidateRelease")
+    )
+    release_client = s3_client or _s3_client(
+        receipt_evidence["artifactPath"],
+        *(evidence["artifactPath"] for _, evidence in release_evidence),
+    )
+    for role, evidence in release_evidence:
         recorded = normalized[role]
         actual = _load_governed_model_release(
-            recorded["evidence"], field_name=f"{role}.evidence", s3_client=client
+            evidence, field_name=f"{role}.evidence", s3_client=release_client
         )
         if _canonical_json(actual) != _canonical_json(recorded):
             raise ValueError(f"D17 {role} no longer matches the immutable release manifest")

@@ -7,6 +7,7 @@ from hashlib import sha256
 
 import pytest
 
+import dags.serp_eval_contracts as serp_eval_contracts
 from dags.serp_eval_contracts import (
     MANDATORY_SERP_BENCHMARK_SUITES,
     build_benchmark_improvement_wave_plan,
@@ -97,7 +98,9 @@ def test_d19_requires_d17_promotion_evidence_and_rejects_legacy_selection_fields
         build_benchmark_improvement_wave_plan(invalid)
 
 
-def test_d17_reloads_exact_worm_release_manifests_before_sealing_receipt() -> None:
+def test_d19_reassumes_only_exact_d17_and_ci_evidence_prefixes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     baseline = _release_manifest("baseline-reranker", "baseline-run", "reranker@2026.07.1")
     candidate = _release_manifest("candidate-reranker", "candidate-run", "reranker@2026.07.2")
     conf = _promotion_conf()
@@ -166,9 +169,8 @@ def test_d17_reloads_exact_worm_release_manifests_before_sealing_receipt() -> No
         "artifactVersionId": "d17-promotion-version",
     }
     d19_plan = build_benchmark_improvement_wave_plan(d19_conf)
-    d19_client = _FakeS3(
+    receipt_client = _FakeS3(
         {
-            **client._objects,
             (
                 "airflow-serp-evidence",
                 "serp-evals/model-releases/d17-promotion.json",
@@ -176,14 +178,38 @@ def test_d17_reloads_exact_worm_release_manifests_before_sealing_receipt() -> No
             ): receipt_bytes,
         }
     )
+    release_client = _FakeS3(client._objects)
+    scopes: list[tuple[str, ...]] = []
 
-    promotion = load_model_catalog_promotion_snapshot(
-        d19_plan.to_canonical_json(), s3_client=d19_client
-    )
+    def scoped_client(*artifact_paths: str) -> _FakeS3:
+        scopes.append(artifact_paths)
+        if artifact_paths == (
+            "s3://airflow-serp-evidence/serp-evals/model-releases/d17-promotion.json",
+        ):
+            return receipt_client
+        if artifact_paths == (
+            "s3://airflow-serp-evidence/serp-evals/model-releases/d17-promotion.json",
+            "s3://airflow-serp-evidence/serp-evals/model-releases/baseline.json",
+            "s3://airflow-serp-evidence/serp-evals/model-releases/candidate.json",
+        ):
+            return release_client
+        raise AssertionError(f"unexpected evidence scope: {artifact_paths!r}")
+
+    monkeypatch.setattr(serp_eval_contracts, "_s3_client", scoped_client)
+
+    promotion = load_model_catalog_promotion_snapshot(d19_plan.to_canonical_json())
 
     promoted_releases = promotion["promotion"]
     assert promoted_releases["baselineRelease"]["release"]["releaseId"] == "baseline-reranker"
     assert promoted_releases["candidateRelease"]["release"]["releaseId"] == "candidate-reranker"
+    assert scopes == [
+        ("s3://airflow-serp-evidence/serp-evals/model-releases/d17-promotion.json",),
+        (
+            "s3://airflow-serp-evidence/serp-evals/model-releases/d17-promotion.json",
+            "s3://airflow-serp-evidence/serp-evals/model-releases/baseline.json",
+            "s3://airflow-serp-evidence/serp-evals/model-releases/candidate.json",
+        ),
+    ]
 
 
 def test_d17_rejects_a_release_manifest_without_signed_ci_runtime_provenance() -> None:
