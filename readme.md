@@ -34,7 +34,7 @@ SERP eval DAG contracts:
   | D14 `serp_break_glass_expiry_reconcile` | Planned gap | Emergency override expiry/reconcile DAG is not implemented yet. |
   | D15 `serp_offline_bundle_build_publish` | Planned gap | Offline bundle build/publish DAG is not implemented yet. |
   | D16 `serp_policy_rollout_canary` | Planned gap | Policy rollout canary DAG is not implemented yet. |
-  | D17 `serp_model_catalog_promotion` | Planned gap | Model promotion/deprecation DAG is not implemented yet. |
+  | D17 `serp_model_catalog_promotion` | Implemented immutable promotion authority in current source | Re-reads baseline/candidate CI release manifests by exact MinIO `VersionId` and SHA-256 under `COMPLIANCE` retention, validates the bounded replay boundary, and seals the only WORM promotion receipt that D19 may consume. |
   | D18 `serp_chaos_restore_game_day` | Planned gap | Restore/game-day DAG is not implemented yet. |
   | D19 `serp_benchmark_improvement_wave` | Executor-owned paired-evaluation contract in current source | A restricted acquisition pod materializes the canonical catalog; the scheduler re-reads its exact COMPLIANCE catalog and receipt versions before it writes the scoreless paired request. Airflow rejects caller-supplied candidate scores. The pipeline executor persists a version-bound receipt separately from its control record; `blocked` never reaches keep/discard, scoreboard, or rollout. It must not be described as a validated improvement until every provisioned adapter has produced all-nine immutable paired evidence. |
   | D20 `serp_web_seed_crawl_refresh` | Implemented scheduled pipeline CLI bridge in current source | Uses a default stack-inventory anchored seed registry when no `dag_run.conf` is supplied, expands approved website `frontier_urls` into deterministic per-page fetch requests, selects due seeds from `refresh_policy` and optional `freshness_state`, writes deterministic seed/refresh artifacts, runs the packaged SERP pipeline CLI bridge only when sources are due, and emits a governed D5 trigger-conf artifact once indexed D20 evidence exists. The D5 trigger-conf carries `ADAPSTORY_SERP_BC21_BASE_URL` when the runtime env provides it, but approvals, evidence seal, benchmark gate, and idempotency remain required. Live robots/sitemap discovery, D4 child dispatch, and deployed GitOps image refresh remain planned; publish activation is handled by D5. |
@@ -90,13 +90,25 @@ SERP eval DAG contracts:
   runner without shell expansion, persists stdout, then builds BC-21 registry
   submissions for the same rollup. Its plan state is
   `ready_for_po_capacity_approval`; it is not a 1M production approval.
+- `serp_model_catalog_promotion` is the D17 model-governance authority. Its
+  `dag_run.conf` accepts only tenant/resource identity, promotion id, generated
+  timestamp, evidence root, and two immutable baseline/candidate release
+  pointers (`artifactPath`, `artifactSha256`, `artifactVersionId`). It does not
+  accept model ids, profile strings, scores, or approval booleans from the
+  caller. The DAG re-reads both manifests with exact `VersionId` plus
+  `COMPLIANCE` retention, validates that their tenant/resource/component and
+  non-reranker replay boundary match, then seals a WORM promotion receipt.
+  Release manifest production belongs to the signed CI/release path; a missing
+  candidate release is a real block, never a reason to invent a candidate.
 - `serp_benchmark_improvement_wave` is the D19 fail-closed improvement
   contract DAG. Its `dag_run.conf` provides tenant id, improvement spec id,
-  baseline/candidate run ids, registry resource identity, approved actor id,
-  generated timestamp, rollback policy ref, positive max benchmark run budget,
-  every mandatory suite id, replay profile versions, judge model/template
-  versions, feature flags, policy/guardrail bundle versions, and provider/model
-  route ids. It rejects every `candidate_evaluation` score/result payload.
+  registry resource identity, approved actor id, generated timestamp, rollback
+  policy ref, positive max benchmark run budget, every mandatory suite id, and
+  the exact D17 WORM `model_promotion_evidence` pointer. It rejects every
+  caller-supplied baseline/candidate/replay/model-governance selection and every
+  `candidate_evaluation` score/result payload. The D19 scheduler re-reads that
+  D17 receipt and both referenced release manifests before it derives the
+  scoreless paired request.
   The DAG derives `airflow-plan.json`, `improvement-spec.json`, a restricted
   acquisition-pod materialized `benchmark-catalog.json` and receipt, a
   scoreless `paired-eval-request.json` bound to both exact catalog

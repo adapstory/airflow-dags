@@ -24,6 +24,7 @@ from dags.serp_eval_contracts import (
     build_benchmark_improvement_wave_plan,
     governance_notification_pending,
     load_materialized_benchmark_catalog_snapshot,
+    load_model_catalog_promotion_snapshot,
     write_airflow_plan_artifact,
     write_improvement_spec_artifact,
     write_paired_eval_request_artifact,
@@ -73,16 +74,24 @@ def validate_benchmark_improvement_wave_plan(**context: Any) -> str:
     return write_airflow_plan_artifact(build_benchmark_improvement_wave_plan(conf))
 
 
-def write_improvement_spec(plan_json: str) -> dict[str, Any]:
-    return write_improvement_spec_artifact(plan_json)
+def write_improvement_spec(plan_json: str, promotion_snapshot: dict[str, Any]) -> dict[str, Any]:
+    return write_improvement_spec_artifact(plan_json, promotion_snapshot)
 
 
 def load_materialized_benchmark_catalog(plan_json: str) -> dict[str, Any]:
     return load_materialized_benchmark_catalog_snapshot(plan_json)
 
 
-def write_paired_eval_request(plan_json: str, catalog_snapshot: dict[str, Any]) -> dict[str, Any]:
-    return write_paired_eval_request_artifact(plan_json, catalog_snapshot)
+def load_model_catalog_promotion(plan_json: str) -> dict[str, Any]:
+    return load_model_catalog_promotion_snapshot(plan_json)
+
+
+def write_paired_eval_request(
+    plan_json: str,
+    catalog_snapshot: dict[str, Any],
+    promotion_snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    return write_paired_eval_request_artifact(plan_json, catalog_snapshot, promotion_snapshot)
 
 
 default_args = {
@@ -112,7 +121,10 @@ validate_plan = PythonOperator(
 write_spec = PythonOperator(
     task_id="write_improvement_spec",
     python_callable=write_improvement_spec,
-    op_args=["{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') }}"],
+    op_args=[
+        "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') }}",
+        "{{ ti.xcom_pull(task_ids='load_model_catalog_promotion') }}",
+    ],
     executor_config=D19_EVALUATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
@@ -156,12 +168,21 @@ load_catalog = PythonOperator(
     dag=dag,
 )
 
+load_promotion = PythonOperator(
+    task_id="load_model_catalog_promotion",
+    python_callable=load_model_catalog_promotion,
+    op_args=["{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') }}"],
+    executor_config=D19_EVALUATOR_EXECUTOR_CONFIG,
+    dag=dag,
+)
+
 write_request = PythonOperator(
     task_id="write_paired_eval_request",
     python_callable=write_paired_eval_request,
     op_args=[
         "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') }}",
         "{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog') }}",
+        "{{ ti.xcom_pull(task_ids='load_model_catalog_promotion') }}",
     ],
     executor_config=D19_EVALUATOR_EXECUTOR_CONFIG,
     dag=dag,
@@ -219,7 +240,10 @@ notify_governance = PythonOperator(
 )
 
 validate_plan >> materialize_catalog >> load_catalog
+validate_plan >> load_promotion
 load_catalog >> write_spec
+load_promotion >> write_spec
 load_catalog >> write_request
+load_promotion >> write_request
 write_spec >> run_paired_evaluation
 write_request >> run_paired_evaluation >> notify_governance

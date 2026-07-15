@@ -1871,8 +1871,11 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
     assert plan.payload["normalized_gate_floor"] == SERP_NORMALIZED_GATE_FLOOR
     assert plan.payload["selected_suite_ids"] == list(MANDATORY_SERP_BENCHMARK_SUITES)
     assert plan.payload["improvement_spec_id"] == "improve-public-retrieval-reranker-v1"
-    assert plan.payload["candidate_id"] == "candidate-reranker-v2"
-    assert plan.payload["baseline_run_id"] == "evalrun_public_reranker_baseline_001"
+    assert plan.payload["model_promotion_evidence"] == {
+        "artifactPath": "s3://airflow-serp-evidence/serp-evals/model-releases/d17-promotion.json",
+        "artifactSha256": "sha256:" + "c" * 64,
+        "artifactVersionId": "d17-promotion-version-001",
+    }
     assert plan.payload["artifact_paths"] == {
         "airflow_plan": (
             "s3://airflow-serp-evidence/serp-evals/"
@@ -1903,6 +1906,7 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
         "validate_benchmark_improvement_wave_plan",
         "materialize_live_benchmark_catalog",
         "load_materialized_benchmark_catalog",
+        "load_model_catalog_promotion",
         "write_improvement_spec",
         "write_paired_eval_request",
         "run_paired_benchmark_evaluation",
@@ -1968,6 +1972,7 @@ def test_paired_eval_request_derives_canonical_catalog_bindings_as_worm_evidence
     request_artifact = write_paired_eval_request_artifact(
         plan.to_canonical_json(),
         _d19_catalog_snapshot(plan),
+        _d19_promotion_snapshot(plan),
     )
     request = request_artifact["payload"]
 
@@ -2025,7 +2030,9 @@ def test_write_benchmark_improvement_spec_never_persists_external_candidate_eval
     )
 
     plan_json = write_airflow_plan_artifact(plan)
-    spec_artifact = write_improvement_spec_artifact(json.loads(plan_json))
+    spec_artifact = write_improvement_spec_artifact(
+        json.loads(plan_json), _d19_promotion_snapshot(plan)
+    )
 
     assert persisted[-1][0] == plan.payload["artifact_paths"]["improvement_spec"]
     assert spec_artifact["payload"]["status"] == "awaiting-executor-derived-metrics"
@@ -2042,47 +2049,43 @@ def test_write_benchmark_improvement_spec_never_persists_external_candidate_eval
         "type": "benchmark-ratchet",
     }
     assert spec_artifact["payload"]["replay"] == {
-        "baselineRunId": conf["baseline_run_id"],
-        "candidateRunId": "candidate-reranker-v2-run-001",
-        "featureFlags": conf["feature_flags"],
-        "guardrailBundleVersion": conf["guardrail_bundle_version"],
-        "judgeModelId": conf["judge_model_id"],
-        "judgeModelVersion": conf["judge_model_version"],
-        "judgePromptTemplateVersion": conf["judge_prompt_template_version"],
-        "modelCatalogEntryId": conf["model_catalog_entry_id"],
-        "policyBundleVersion": conf["policy_bundle_version"],
-        "providerRouteId": conf["provider_route_id"],
-        "rerankerProfileVersion": conf["reranker_profile_version"],
-        "retrievalProfileVersion": conf["retrieval_profile_version"],
+        "baseline": _d19_promotion_snapshot(plan)["promotion"]["baselineRelease"]["release"][
+            "replay"
+        ],
+        "candidate": _d19_promotion_snapshot(plan)["promotion"]["candidateRelease"]["release"][
+            "replay"
+        ],
     }
     assert spec_artifact["payload"]["modelGovernance"] == {
-        "guardrailBundleVersion": conf["guardrail_bundle_version"],
-        "judgeModelId": conf["judge_model_id"],
-        "judgeModelVersion": conf["judge_model_version"],
-        "modelCatalogEntryId": conf["model_catalog_entry_id"],
-        "policyBundleVersion": conf["policy_bundle_version"],
-        "providerRouteId": conf["provider_route_id"],
-        "status": "approved-for-eval-dry-run",
+        "baselineReleaseId": "baseline-reranker",
+        "candidateReleaseId": "candidate-reranker-v2",
+        "promotionEvidence": plan.payload["model_promotion_evidence"],
+        "promotionId": "public-docs-reranker-eval-001",
+        "status": "approved-for-evaluation",
     }
     assert spec_artifact["payload"]["candidate"] == {
-        "id": conf["candidate_id"],
-        "runId": conf["candidate_run_id"],
+        "id": "candidate-reranker-v2",
+        "runId": "candidate-reranker-v2-run-001",
         "scoreAuthority": "executor-receipt-only",
     }
     assert "candidateEvaluation" not in spec_artifact["payload"]
 
 
-def test_build_benchmark_improvement_wave_plan_requires_replay_metadata() -> None:
+def test_build_benchmark_improvement_wave_plan_requires_d17_promotion_metadata() -> None:
     conf = _improvement_wave_conf()
-    del conf["judge_model_version"]
+    del conf["model_promotion_evidence"]
 
-    with pytest.raises(ValueError, match="judge_model_version is required"):
+    with pytest.raises(ValueError, match="model_promotion_evidence"):
         build_benchmark_improvement_wave_plan(conf)
 
 
 def test_build_benchmark_improvement_wave_plan_rejects_raw_secret_metadata() -> None:
     conf = _improvement_wave_conf()
-    conf["judge_model_id"] = "sk-abcdefghijklmnop"
+    conf["model_promotion_evidence"] = {
+        "artifactPath": "s3://airflow-serp-evidence/serp-evals/model-releases/d17-promotion.json",
+        "artifactSha256": "sha256:" + "c" * 64,
+        "artifactVersionId": "sk-abcdefghijklmnop",
+    }
 
     with pytest.raises(ValueError, match="dag run config must not contain raw secret material"):
         build_benchmark_improvement_wave_plan(conf)
@@ -4960,12 +4963,23 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
             ],
         ),
         (
+            "serp_model_catalog_promotion.py",
+            "serp_model_catalog_promotion",
+            [
+                "validate_model_catalog_promotion_plan",
+                "load_governed_model_releases",
+                "write_model_catalog_promotion_receipt",
+                "notify_governance_eval_surfaces",
+            ],
+        ),
+        (
             "serp_benchmark_improvement_wave.py",
             "serp_benchmark_improvement_wave",
             [
                 "validate_benchmark_improvement_wave_plan",
                 "materialize_live_benchmark_catalog",
                 "load_materialized_benchmark_catalog",
+                "load_model_catalog_promotion",
                 "write_improvement_spec",
                 "write_paired_eval_request",
                 "run_paired_benchmark_evaluation",
@@ -5022,6 +5036,7 @@ def test_serp_dag_files_declare_expected_airflow_contracts(
             "validate_benchmark_improvement_wave_plan",
             "write_improvement_spec",
             "load_materialized_benchmark_catalog",
+            "load_model_catalog_promotion",
             "write_paired_eval_request",
             "notify_governance_eval_surfaces",
         ]
@@ -5066,6 +5081,7 @@ def test_serp_dag_files_import_helpers_from_packaged_dags_namespace() -> None:
         "serp_mandatory_benchmark_dataset_evidence_snapshot.py",
         "serp_online_eval_rollup.py",
         "serp_tenant_golden_set_regression.py",
+        "serp_model_catalog_promotion.py",
         "serp_benchmark_improvement_wave.py",
         "serp_publish_signed_pack.py",
         "serp_web_seed_crawl_refresh.py",
@@ -6055,24 +6071,18 @@ def _improvement_wave_conf() -> dict[str, object]:
     return {
         "actor_id": "airflow-serp-eval-runner",
         "artifact_root_path": "s3://airflow-serp-evidence/serp-evals",
-        "baseline_run_id": "evalrun_public_reranker_baseline_001",
-        "candidate_id": "candidate-reranker-v2",
-        "candidate_run_id": "candidate-reranker-v2-run-001",
-        "feature_flags": ["serp.reranker.v2", "serp.d19.dry_run"],
         "generated_at": "2026-07-05T21:00:00Z",
-        "guardrail_bundle_version": "guardrails@2026.07.1",
         "improvement_spec_id": "improve-public-retrieval-reranker-v1",
-        "judge_model_id": "judge-serp-rubric",
-        "judge_model_version": "judge@2026.07.1",
-        "judge_prompt_template_version": "judge-template@2026.07.1",
         "max_benchmark_runs": 12,
-        "model_catalog_entry_id": "model-catalog://serp/judge-serp-rubric@2026.07.1",
-        "policy_bundle_version": "policy@2026.07.1",
-        "provider_route_id": "llm-gateway://eval/judge-serp-rubric",
+        "model_promotion_evidence": {
+            "artifactPath": (
+                "s3://airflow-serp-evidence/serp-evals/model-releases/d17-promotion.json"
+            ),
+            "artifactSha256": "sha256:" + "c" * 64,
+            "artifactVersionId": "d17-promotion-version-001",
+        },
         "registry_resource_id": REGISTRY_RESOURCE_ID,
         "registry_resource_type": "workflow",
-        "reranker_profile_version": "reranker@2026.07.1",
-        "retrieval_profile_version": "hybrid@2026.07.1",
         "rollback_policy_ref": "policy://rollback/last-validated-baseline@v1",
         "selected_suite_ids": list(MANDATORY_SERP_BENCHMARK_SUITES),
         "tenant_id": TENANT_ID,
@@ -6115,6 +6125,65 @@ def _d19_catalog_snapshot(plan: Any) -> dict[str, object]:
             }
             for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
         ],
+    }
+
+
+def _d19_promotion_snapshot(plan: Any) -> dict[str, object]:
+    baseline_replay = {
+        "featureFlags": ["serp.d19.dry_run"],
+        "guardrailBundleVersion": "guardrails@2026.07.1",
+        "judgeModelId": "judge-serp-rubric",
+        "judgeModelVersion": "judge@2026.07.1",
+        "judgePromptTemplateVersion": "judge-template@2026.07.1",
+        "policyBundleVersion": "policy@2026.07.1",
+        "providerRouteId": "llm-gateway://eval/judge-serp-rubric",
+        "rerankerProfileVersion": "reranker@2026.07.1",
+        "retrievalProfileVersion": "hybrid@2026.07.1",
+    }
+    candidate_replay = {**baseline_replay, "rerankerProfileVersion": "reranker@2026.07.2"}
+
+    def binding(
+        release_id: str, evaluation_run_id: str, replay: Mapping[str, object]
+    ) -> dict[str, object]:
+        return {
+            "evidence": {
+                "artifactPath": (
+                    f"s3://airflow-serp-evidence/serp-evals/model-releases/{release_id}.json"
+                ),
+                "artifactSha256": "sha256:" + "d" * 64,
+                "artifactVersionId": f"{release_id}-version-001",
+            },
+            "release": {
+                "component": "reranker-profile-public-docs",
+                "evaluationRunId": evaluation_run_id,
+                "model": {
+                    "catalogEntryId": "model-catalog://serp/judge-serp-rubric@2026.07.1",
+                    "modelId": "judge-serp-rubric",
+                    "modelVersion": "judge@2026.07.1",
+                },
+                "registryResourceId": REGISTRY_RESOURCE_ID,
+                "registryResourceType": "workflow",
+                "releaseId": release_id,
+                "replay": dict(replay),
+                "runtime": {
+                    "imageDigest": "sha256:" + "e" * 64,
+                    "sourceRevision": "f" * 40,
+                },
+                "tenantId": TENANT_ID,
+            },
+        }
+
+    return {
+        "promotionEvidence": plan.payload["model_promotion_evidence"],
+        "promotion": {
+            "baselineRelease": binding(
+                "baseline-reranker", "evalrun_public_reranker_baseline_001", baseline_replay
+            ),
+            "candidateRelease": binding(
+                "candidate-reranker-v2", "candidate-reranker-v2-run-001", candidate_replay
+            ),
+            "promotionId": "public-docs-reranker-eval-001",
+        },
     }
 
 
