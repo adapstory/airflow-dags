@@ -248,6 +248,60 @@ def test_public_docs_crawler_uses_configured_source_proxy(
     ]
 
 
+def test_public_docs_crawler_retries_transient_http_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[str] = []
+    delays: list[float] = []
+
+    class Response:
+        def __init__(self) -> None:
+            self.status = 200
+            self.headers = {"Content-Type": "text/html"}
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self, _size: int) -> bytes:
+            return b"<html>recovered</html>"
+
+    def open_request(request: Request, *, timeout: int) -> Response:
+        assert timeout > 0
+        attempts.append(request.full_url)
+        if len(attempts) == 1:
+            raise HTTPError(
+                request.full_url,
+                503,
+                "Service Unavailable",
+                hdrs=Message(),
+                fp=io.BytesIO(b"temporary"),
+            )
+        return Response()
+
+    monkeypatch.setattr(
+        serp_eval_contracts_module,
+        "_open_public_docs_crawler_request",
+        open_request,
+    )
+    monkeypatch.setattr(serp_eval_contracts_module, "sleep", delays.append)
+
+    response = _fetch_public_docs_crawler_response(
+        "https://doc.traefik.io/traefik/",
+        {"User-Agent": "serp-test/1"},
+    )
+
+    assert response.status_code == 200
+    assert response.body == b"<html>recovered</html>"
+    assert attempts == [
+        "https://doc.traefik.io/traefik/",
+        "https://doc.traefik.io/traefik/",
+    ]
+    assert delays == [0.5]
+
+
 def test_public_docs_crawler_discovery_scans_full_policy_before_bounding_ingestion_frontier(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6128,7 +6182,7 @@ def _d19_catalog_snapshot(plan: Any) -> dict[str, object]:
     }
 
 
-def _d19_promotion_snapshot(plan: Any) -> dict[str, object]:
+def _d19_promotion_snapshot(plan: Any) -> dict[str, Any]:
     baseline_replay = {
         "featureFlags": ["serp.d19.dry_run"],
         "guardrailBundleVersion": "guardrails@2026.07.1",

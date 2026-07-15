@@ -115,6 +115,8 @@ _PUBLIC_DOCS_SEARCH_SERVE_SMOKE_ACTOR_ID = "00000000-0000-4000-a000-000000000202
 _PUBLIC_DOCS_DEFAULT_ARTIFACT_ROOT = "/var/opt/adapstory/serp-public-docs-refresh"
 _PUBLIC_DOCS_STACK_INVENTORY_PATH = STACK_INVENTORY_SOURCE_PATH
 _PUBLIC_DOCS_SITEMAP_FETCH_TIMEOUT_SECONDS = 8
+_PUBLIC_DOCS_CRAWLER_FETCH_ATTEMPTS = 3
+_PUBLIC_DOCS_CRAWLER_RETRY_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
 _HUGGINGFACE_PROXY_CONNECT_TIMEOUT_SECONDS = 30.0
 _HUGGINGFACE_PROXY_READ_TIMEOUT_SECONDS = 120.0
 _HUGGINGFACE_PROXY_WRITE_TIMEOUT_SECONDS = 30.0
@@ -6617,28 +6619,40 @@ def _fetch_public_docs_crawler_response(
         url,
         headers={"Accept": "text/html,application/xml,text/plain,*/*", **dict(headers)},
     )
-    try:
-        with _open_public_docs_crawler_request(
-            request,
-            timeout=_PUBLIC_DOCS_SITEMAP_FETCH_TIMEOUT_SECONDS,
-        ) as response:
-            return CrawlResponse(
-                status_code=int(response.status),
-                headers={str(key): str(value) for key, value in response.headers.items()},
-                body=response.read(1_000_001),
-            )
-    except HTTPError as exc:
+    for attempt in range(1, _PUBLIC_DOCS_CRAWLER_FETCH_ATTEMPTS + 1):
         try:
-            body = exc.read(1_000_001)
-        except (OSError, TimeoutError):
-            body = b""
-        return CrawlResponse(
-            status_code=int(exc.code),
-            headers={str(key): str(value) for key, value in exc.headers.items()},
-            body=body,
-        )
-    except (URLError, OSError, TimeoutError):
-        return CrawlResponse(status_code=599, headers={}, body=b"")
+            with _open_public_docs_crawler_request(
+                request,
+                timeout=_PUBLIC_DOCS_SITEMAP_FETCH_TIMEOUT_SECONDS,
+            ) as response:
+                return CrawlResponse(
+                    status_code=int(response.status),
+                    headers={str(key): str(value) for key, value in response.headers.items()},
+                    body=response.read(1_000_001),
+                )
+        except HTTPError as exc:
+            if (
+                int(exc.code) in _PUBLIC_DOCS_CRAWLER_RETRY_STATUSES
+                and attempt < _PUBLIC_DOCS_CRAWLER_FETCH_ATTEMPTS
+            ):
+                exc.close()
+                sleep(0.5 * attempt)
+                continue
+            try:
+                body = exc.read(1_000_001)
+            except (OSError, TimeoutError):
+                body = b""
+            return CrawlResponse(
+                status_code=int(exc.code),
+                headers={str(key): str(value) for key, value in exc.headers.items()},
+                body=body,
+            )
+        except (URLError, OSError, TimeoutError):
+            if attempt < _PUBLIC_DOCS_CRAWLER_FETCH_ATTEMPTS:
+                sleep(0.5 * attempt)
+                continue
+            return CrawlResponse(status_code=599, headers={}, body=b"")
+    raise AssertionError("public docs crawler retry loop exhausted without a response")
 
 
 def _open_public_docs_crawler_request(
