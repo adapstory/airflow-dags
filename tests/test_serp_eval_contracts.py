@@ -5427,7 +5427,7 @@ def test_serp_public_docs_dag_dispatches_d5_natively_and_waits_for_completion() 
         "task_id": "trigger_public_docs_d5_publish_activation",
         "trigger_dag_id": "serp_publish_signed_pack",
         "wait_for_completion": True,
-        "skip_when_already_exists": True,
+        "skip_when_already_exists": False,
         "fail_when_dag_is_paused": True,
     }
     for name, expected in expected_values.items():

@@ -287,7 +287,7 @@ trigger_d5_publish_activation = TriggerDagRunOperator(
     wait_for_completion=True,
     allowed_states=["success"],
     failed_states=["failed"],
-    skip_when_already_exists=True,
+    skip_when_already_exists=False,
     fail_when_dag_is_paused=True,
     dag=dag,
 )
