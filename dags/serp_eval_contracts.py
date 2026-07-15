@@ -2388,6 +2388,15 @@ def _native_adapter_materializer(
         build_native_case_manifest,
     )
 
+    return cast(
+        Mapping[str, object],
+        build_native_case_manifest(
+            suite_id=suite_id,
+            dataset_payloads=dataset_payloads,
+            dataset_snapshots=dataset_snapshots,
+        ),
+    )
+
 
 def _native_corpus_materializer(
     suite_id: str,
@@ -2409,15 +2418,6 @@ def _native_corpus_materializer(
         "manifest": dict(materialization.manifest),
         "payloads": dict(materialization.payloads),
     }
-
-    return cast(
-        Mapping[str, object],
-        build_native_case_manifest(
-            suite_id=suite_id,
-            dataset_payloads=dataset_payloads,
-            dataset_snapshots=dataset_snapshots,
-        ),
-    )
 
 
 def load_materialized_benchmark_catalog_snapshot(
@@ -2653,21 +2653,15 @@ def _catalog_official_harness_lineage(
     lineage: list[dict[str, str]] = []
     for suite in suites:
         official_harness = _required_mapping(suite, "official_harness")
-        source_archive_snapshot = _required_mapping(
-            official_harness, "source_archive_snapshot"
-        )
+        source_archive_snapshot = _required_mapping(official_harness, "source_archive_snapshot")
         license_snapshot = _required_mapping(official_harness, "license_snapshot")
         lineage.append(
             {
                 "entrypoint": _required_str(official_harness, "entrypoint"),
                 "harnessLicenseId": _required_str(official_harness, "license_id"),
                 "harnessLicenseSha256": _required_str(license_snapshot, "sha256"),
-                "harnessLicenseStatus": _required_str(
-                    official_harness, "license_status"
-                ),
-                "harnessSourceArchiveSha256": _required_str(
-                    source_archive_snapshot, "sha256"
-                ),
+                "harnessLicenseStatus": _required_str(official_harness, "license_status"),
+                "harnessSourceArchiveSha256": _required_str(source_archive_snapshot, "sha256"),
                 "revision": _required_str(official_harness, "revision"),
                 "suiteId": _required_str(suite, "suite_id"),
             }

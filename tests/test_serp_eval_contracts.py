@@ -580,6 +580,7 @@ def test_catalog_materializer_accepts_dedicated_dataset_evidence_plan() -> None:
         snapshot_writer=snapshot_writer,
         snapshot_bytes_writer=snapshot_bytes_writer,
         native_adapter_materializer=_native_adapter_materializer,
+        native_corpus_materializer=_native_corpus_materializer,
     )
 
     assert result["catalogStatus"] == "ready"
@@ -593,7 +594,7 @@ def test_catalog_materializer_accepts_dedicated_dataset_evidence_plan() -> None:
         }
         for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
     ]
-    assert len(written) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 3) + 3
+    assert len(written) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 6) + 3
 
 
 def test_nightly_regression_plan_rejects_caller_supplied_suite_inputs() -> None:
@@ -641,6 +642,7 @@ def test_nightly_catalog_materialization_writes_all_live_evidence_before_native_
         snapshot_writer=snapshot_writer,
         snapshot_bytes_writer=snapshot_bytes_writer,
         native_adapter_materializer=_native_adapter_materializer,
+        native_corpus_materializer=_native_corpus_materializer,
     )
 
     assert result["catalogStatus"] == "ready"
@@ -649,7 +651,7 @@ def test_nightly_catalog_materialization_writes_all_live_evidence_before_native_
         MANDATORY_SERP_BENCHMARK_SUITES
     )
     assert written[-1]["artifact_path"] == plan.payload["artifact_paths"]["benchmark_catalog"]
-    assert len(written) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 3) + 3
+    assert len(written) == (len(MANDATORY_SERP_BENCHMARK_SUITES) * 6) + 3
 
 
 @pytest.mark.parametrize(
@@ -669,10 +671,19 @@ def test_load_materialized_catalog_binds_receipt_and_catalog_s3_versions(
     receipt_path = plan.payload["artifact_paths"]["benchmark_catalog_receipt"]
     catalog_payload = {
         "catalog_status": "ready",
+        "contract_version": "serp-benchmark-catalog/v4",
         "suites": [
             {
                 "distribution_rule": entry.distribution_rule,
                 "execution_status": "ready",
+                "official_harness": {
+                    "entrypoint": entry.harness_entrypoint,
+                    "license_id": entry.harness_license_id,
+                    "license_snapshot": {"sha256": "sha256:" + "b" * 64},
+                    "license_status": entry.harness_license_status,
+                    "revision": entry.harness_revision,
+                    "source_archive_snapshot": {"sha256": "sha256:" + "c" * 64},
+                },
                 "rights_status": entry.rights_status,
                 "suite_id": entry.suite_id,
             }
@@ -688,6 +699,18 @@ def test_load_materialized_catalog_binds_receipt_and_catalog_s3_versions(
             "blockingSuiteIds": [],
             "catalogStatus": "ready",
             "objectLockMode": "COMPLIANCE",
+            "officialHarnessLineage": [
+                {
+                    "entrypoint": entry.harness_entrypoint,
+                    "harnessLicenseId": entry.harness_license_id,
+                    "harnessLicenseSha256": "sha256:" + "b" * 64,
+                    "harnessLicenseStatus": entry.harness_license_status,
+                    "harnessSourceArchiveSha256": "sha256:" + "c" * 64,
+                    "revision": entry.harness_revision,
+                    "suiteId": entry.suite_id,
+                }
+                for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+            ],
             "suiteSummary": [
                 {
                     "distributionRule": entry.distribution_rule,
@@ -698,7 +721,7 @@ def test_load_materialized_catalog_binds_receipt_and_catalog_s3_versions(
                 for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
             ],
         },
-        "contractVersion": "serp-benchmark-catalog-materializer/v3",
+        "contractVersion": "serp-benchmark-catalog-materializer/v4",
         "dagId": plan.payload["dag_id"],
         "operationId": plan.payload["operation_id"],
     }
@@ -5750,8 +5773,8 @@ def test_serp_improvement_dag_runs_paired_evaluation_in_an_isolated_evaluator_po
         in source
     )
     assert "run_paired_evaluation = KubernetesPodOperator(" in source
-    assert "service_account_name=D19_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT" in source
-    assert "labels=D19_EVALUATOR_WORKLOAD_LABELS" in source
+    assert "service_account_name=D19_AGGREGATOR_WORKLOAD_SERVICE_ACCOUNT" in source
+    assert "labels=D19_AGGREGATOR_WORKLOAD_LABELS" in source
     tree = ast.parse(source)
     evaluator = next(
         call
@@ -5772,8 +5795,8 @@ def test_serp_improvement_dag_runs_paired_evaluation_in_an_isolated_evaluator_po
     )
     assert isinstance(evaluator_automount, ast.Constant)
     assert evaluator_automount.value is False
-    assert "volumes=D19_EVALUATOR_VOLUMES" in source
-    assert "volume_mounts=D19_EVALUATOR_VOLUME_MOUNTS" in source
+    assert "volumes=D19_AGGREGATOR_VOLUMES" in source
+    assert "volume_mounts=D19_AGGREGATOR_VOLUME_MOUNTS" in source
     assert "security_context=hardened_runtime_pod_security_context()" in source
     assert "container_security_context=hardened_runtime_container_security_context()" in source
     assert "bc21_workload_env_vars()" in source
@@ -5818,9 +5841,17 @@ def test_serp_improvement_dag_passes_exact_s3_values_to_the_evaluator_pod(
 
     values = {
         env_var.kwargs["name"]: env_var.kwargs["value"]
-        for env_var in module.d19_evaluator_env_vars()
+        for env_var in module.d19_aggregator_env_vars()
         if "value" in env_var.kwargs
     }
+
+    assert module.D19_AGGREGATOR_WORKLOAD_SERVICE_ACCOUNT == (
+        "airflow-serp-benchmark-aggregator"
+    )
+    assert (
+        module.D19_AGGREGATOR_WORKLOAD_LABELS["adapstory.com/serp-network-profile"]
+        == "benchmark-aggregator"
+    )
 
     assert values == {
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT": ("http://minio.env-prod.svc.cluster.local:9000"),
@@ -5831,6 +5862,25 @@ def test_serp_improvement_dag_passes_exact_s3_values_to_the_evaluator_pod(
             "/var/run/secrets/adapstory/minio-web-identity/token"
         ),
     }
+
+
+def test_d19_serializes_runs_and_caps_expensive_parallelism() -> None:
+    source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+    dag_call = next(
+        node for node in ast.walk(tree) if isinstance(node, ast.Call) and _matches_call(node, "DAG")
+    )
+    integer_keywords = {
+        keyword.arg: keyword.value.value
+        for keyword in dag_call.keywords
+        if keyword.arg in {"max_active_runs", "max_active_tasks"}
+        and isinstance(keyword.value, ast.Constant)
+        and isinstance(keyword.value.value, int)
+    }
+
+    assert integer_keywords == {"max_active_runs": 1, "max_active_tasks": 2}
 
 
 def test_d19_builds_and_registers_server_owned_exact_nine_before_request(
@@ -5887,11 +5937,21 @@ def test_d19_builds_and_registers_server_owned_exact_nine_before_request(
         "QDRANT" in name or "OPENSEARCH" in name or "NEO4J" in name for name in builder_env
     )
 
-    evaluator_env = {
-        item.kwargs["name"]: item.kwargs.get("value") for item in module.d19_evaluator_env_vars()
+    aggregator_env = {
+        item.kwargs["name"]: item.kwargs.get("value")
+        for item in module.d19_aggregator_env_vars()
     }
-    assert "ADAPSTORY_SERP_BC21_BASE_URL" not in evaluator_env
-    assert "ADAPSTORY_SERP_SERVICE_ACCOUNT_TOKEN_PATH" not in evaluator_env
+    assert "ADAPSTORY_SERP_BC21_BASE_URL" not in aggregator_env
+    assert "ADAPSTORY_SERP_SERVICE_ACCOUNT_TOKEN_PATH" not in aggregator_env
+    for task in (
+        module.materialize_official_harness_work_items,
+        module.assemble_paired_execution_manifest,
+        module.run_paired_evaluation,
+    ):
+        assert task.kwargs["service_account_name"] == "airflow-serp-benchmark-aggregator"
+        assert task.kwargs["labels"]["adapstory.com/serp-network-profile"] == (
+            "benchmark-aggregator"
+        )
     source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(encoding="utf-8")
     assert "load_catalog >> build_exact_nine_benchmark_packs" in source
     assert "load_promotion >> build_exact_nine_benchmark_packs" in source
@@ -5962,7 +6022,7 @@ def test_d19_runs_exact_ninety_server_owned_official_harness_work_items(
         assert task.kwargs["container_resources"].kwargs["limits"] == expected_limits[suite_id]
 
 
-def test_d19_model_runner_has_only_minio_mcp_and_ollama_runtime_env(
+def test_d19_model_runner_has_only_minio_and_ollama_runtime_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_airflow_import_stubs(monkeypatch)
@@ -5984,10 +6044,8 @@ def test_d19_model_runner_has_only_minio_mcp_and_ollama_runtime_env(
         item.kwargs["name"]: item.kwargs.get("value") for item in module.d19_model_runner_env_vars()
     }
     assert values["ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST"] == "sha256:" + "d" * 64
-    assert values["ADAPSTORY_SERP_MCP_GATEWAY_BASE_URL"] == (
-        "http://prod-serp-mcp-gateway-svc.env-prod.svc.cluster.local:8000"
-    )
     assert values["ADAPSTORY_OLLAMA_BASE_URL"] == ("http://ollama.ollama.svc.cluster.local:11434")
+    assert "ADAPSTORY_SERP_MCP_GATEWAY_BASE_URL" not in values
     assert "ADAPSTORY_SERP_SERVICE_ACCOUNT_TOKEN_PATH" not in values
     assert "ADAPSTORY_SERP_BC21_BASE_URL" not in values
     assert not any("QDRANT" in name or "OPENSEARCH" in name or "NEO4J" in name for name in values)
@@ -6439,6 +6497,46 @@ def _native_adapter_materializer(
         "caseManifestSha256": "sha256:" + ("a" * 64),
         "status": "materialized",
         "suiteId": suite_id,
+    }
+
+
+def _native_corpus_materializer(
+    suite_id: str,
+    payloads: Mapping[str, bytes],
+    snapshots: Mapping[str, Mapping[str, object]],
+) -> Mapping[str, object]:
+    assert set(payloads) == set(snapshots)
+    role = {
+        "APIBench": "api-documentation",
+        "ARES": "context-corpus",
+        "BEIR": "beir-corpus",
+        "CodeRAG-Bench": "documentation-corpus",
+        "RAGBench": "source-context",
+        "RepoQA": "repository-code",
+        "SWE-bench Verified": "base-commit-repository",
+        "cwd-benchmark-data": "reference-graph",
+        "rusBEIR": "beir-corpus",
+    }[suite_id]
+    corpus = b'{"documentId":"doc-1","text":"query-independent corpus"}\n'
+    return {
+        "manifest": {
+            "datasetSha256BySource": {
+                source_id: "sha256:" + sha256(payload).hexdigest()
+                for source_id, payload in payloads.items()
+            },
+            "schema": "NativeBenchmarkCorpusManifest/v1",
+            "sources": [
+                {
+                    "corpusRole": role,
+                    "documentCount": 1,
+                    "payloadSha256": "sha256:" + sha256(corpus).hexdigest(),
+                    "sourceId": "corpus",
+                }
+            ],
+            "status": "materialized",
+            "suiteId": suite_id,
+        },
+        "payloads": {"corpus": corpus},
     }
 
 

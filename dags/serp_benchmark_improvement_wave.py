@@ -56,12 +56,12 @@ D19_OFFICIAL_HARNESS_WORK_ITEMS = tuple(
     for side in ("baseline", "candidate")
 )
 
-D19_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-benchmark-evaluator"
+D19_AGGREGATOR_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-benchmark-aggregator"
 D19_BUILDER_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-benchmark-builder"
 D19_MODEL_RUNNER_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-benchmark-model-runner"
-D19_EVALUATOR_WORKLOAD_LABELS = {
+D19_AGGREGATOR_WORKLOAD_LABELS = {
     "adapstory.com/serp-evidence-workload": "true",
-    "adapstory.com/serp-network-profile": "benchmark-evaluator",
+    "adapstory.com/serp-network-profile": "benchmark-aggregator",
     "component": "worker",
     "release": "airflow",
     "tier": "airflow",
@@ -101,7 +101,7 @@ D19_OFFICIAL_HARNESS_LIMITS: Mapping[str, Mapping[str, str]] = {
 }
 if tuple(D19_OFFICIAL_HARNESS_LIMITS) != MANDATORY_SERP_BENCHMARK_SUITES:
     raise RuntimeError("D19 resource limits must cover the canonical mandatory nine")
-_D19_EVALUATOR_ENV_NAMES = (
+_D19_AGGREGATOR_ENV_NAMES = (
     "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT",
     "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION",
     "ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST",
@@ -117,14 +117,13 @@ _D19_MODEL_RUNNER_ENV_NAMES = (
     "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT",
     "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION",
     "ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST",
-    "ADAPSTORY_SERP_MCP_GATEWAY_BASE_URL",
     "ADAPSTORY_OLLAMA_BASE_URL",
 )
-D19_EVALUATOR_VOLUMES = [
+D19_AGGREGATOR_VOLUMES = [
     *minio_web_identity_volumes(),
     *hardened_runtime_volumes(),
 ]
-D19_EVALUATOR_VOLUME_MOUNTS = [
+D19_AGGREGATOR_VOLUME_MOUNTS = [
     *minio_web_identity_volume_mounts(),
     *hardened_runtime_volume_mounts(),
 ]
@@ -146,20 +145,20 @@ D19_MODEL_RUNNER_VOLUME_MOUNTS = [
     *minio_web_identity_volume_mounts(),
     *hardened_runtime_volume_mounts(),
 ]
-D19_EVALUATOR_EXECUTOR_CONFIG = minio_web_identity_executor_config(
-    service_account_name=D19_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT,
-    labels=D19_EVALUATOR_WORKLOAD_LABELS,
+D19_AGGREGATOR_EXECUTOR_CONFIG = minio_web_identity_executor_config(
+    service_account_name=D19_AGGREGATOR_WORKLOAD_SERVICE_ACCOUNT,
+    labels=D19_AGGREGATOR_WORKLOAD_LABELS,
 )
 
 
-def d19_evaluator_env_vars() -> list[k8s.V1EnvVar]:
-    """Return the minimal STS-only runtime contract for paired evaluation."""
+def d19_aggregator_env_vars() -> list[k8s.V1EnvVar]:
+    """Return the minimal STS-only runtime contract for trusted aggregation."""
 
-    return minio_web_identity_env_vars(_D19_EVALUATOR_ENV_NAMES)
+    return minio_web_identity_env_vars(_D19_AGGREGATOR_ENV_NAMES)
 
 
 def d19_model_runner_env_vars() -> list[k8s.V1EnvVar]:
-    """Expose only MinIO STS plus the two governed model-serving endpoints."""
+    """Expose only MinIO STS plus the governed in-cluster Ollama endpoint."""
 
     return minio_web_identity_env_vars(_D19_MODEL_RUNNER_ENV_NAMES)
 
@@ -348,6 +347,8 @@ dag = DAG(
     description="SERP D19 benchmark ratchet keep/discard contract",
     schedule=None,
     catchup=False,
+    max_active_runs=1,
+    max_active_tasks=2,
     is_paused_upon_creation=False,
     render_template_as_native_obj=True,
     tags=["serp", "evals", "benchmark", "improvement"],
@@ -356,7 +357,7 @@ dag = DAG(
 validate_plan = PythonOperator(
     task_id="validate_benchmark_improvement_wave_plan",
     python_callable=validate_benchmark_improvement_wave_plan,
-    executor_config=D19_EVALUATOR_EXECUTOR_CONFIG,
+    executor_config=D19_AGGREGATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -398,7 +399,7 @@ load_catalog = PythonOperator(
     task_id="load_materialized_benchmark_catalog",
     python_callable=load_materialized_benchmark_catalog,
     op_args=["{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') }}"],
-    executor_config=D19_EVALUATOR_EXECUTOR_CONFIG,
+    executor_config=D19_AGGREGATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -406,7 +407,7 @@ load_promotion = PythonOperator(
     task_id="load_model_catalog_promotion",
     python_callable=load_model_catalog_promotion,
     op_args=["{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') }}"],
-    executor_config=D19_EVALUATOR_EXECUTOR_CONFIG,
+    executor_config=D19_AGGREGATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -538,7 +539,7 @@ load_exact_nine_evaluation_binding = PythonOperator(
         "{{ ti.xcom_pull(task_ids='load_model_catalog_promotion') }}",
         "{{ ti.xcom_pull(task_ids='register_exact_nine_evaluation_binding') }}",
     ],
-    executor_config=D19_EVALUATOR_EXECUTOR_CONFIG,
+    executor_config=D19_AGGREGATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -551,7 +552,7 @@ write_request = PythonOperator(
         "{{ ti.xcom_pull(task_ids='load_model_catalog_promotion') }}",
         "{{ ti.xcom_pull(task_ids='load_exact_nine_evaluation_binding') }}",
     ],
-    executor_config=D19_EVALUATOR_EXECUTOR_CONFIG,
+    executor_config=D19_AGGREGATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -595,12 +596,12 @@ materialize_official_harness_work_items = KubernetesPodOperator(
             "['lifecycleResultEvidence']['artifactSha256'] }}"
         ),
     ],
-    env_vars=d19_evaluator_env_vars(),
-    service_account_name=D19_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT,
+    env_vars=d19_aggregator_env_vars(),
+    service_account_name=D19_AGGREGATOR_WORKLOAD_SERVICE_ACCOUNT,
     automount_service_account_token=False,
-    volumes=D19_EVALUATOR_VOLUMES,
-    volume_mounts=D19_EVALUATOR_VOLUME_MOUNTS,
-    labels=D19_EVALUATOR_WORKLOAD_LABELS,
+    volumes=D19_AGGREGATOR_VOLUMES,
+    volume_mounts=D19_AGGREGATOR_VOLUME_MOUNTS,
+    labels=D19_AGGREGATOR_WORKLOAD_LABELS,
     container_resources=D19_NATIVE_ADAPTER_RUNNER_RESOURCES,
     security_context=hardened_runtime_pod_security_context(),
     container_security_context=hardened_runtime_container_security_context(),
@@ -683,7 +684,7 @@ write_assembly_plan = PythonOperator(
         "{{ ti.xcom_pull(task_ids='materialize_official_harness_work_items') }}",
         "{{ ti.xcom_pull(task_ids=" + json.dumps(runner_task_ids) + ") }}",
     ],
-    executor_config=D19_EVALUATOR_EXECUTOR_CONFIG,
+    executor_config=D19_AGGREGATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -715,12 +716,12 @@ assemble_paired_execution_manifest = KubernetesPodOperator(
             "['assemblyPlanEvidence']['artifactSha256'] }}"
         ),
     ],
-    env_vars=d19_evaluator_env_vars(),
-    service_account_name=D19_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT,
+    env_vars=d19_aggregator_env_vars(),
+    service_account_name=D19_AGGREGATOR_WORKLOAD_SERVICE_ACCOUNT,
     automount_service_account_token=False,
-    volumes=D19_EVALUATOR_VOLUMES,
-    volume_mounts=D19_EVALUATOR_VOLUME_MOUNTS,
-    labels=D19_EVALUATOR_WORKLOAD_LABELS,
+    volumes=D19_AGGREGATOR_VOLUMES,
+    volume_mounts=D19_AGGREGATOR_VOLUME_MOUNTS,
+    labels=D19_AGGREGATOR_WORKLOAD_LABELS,
     container_resources=D19_NATIVE_ADAPTER_RUNNER_RESOURCES,
     security_context=hardened_runtime_pod_security_context(),
     container_security_context=hardened_runtime_container_security_context(),
@@ -773,12 +774,12 @@ run_paired_evaluation = KubernetesPodOperator(
         "--evidence-output",
         "{{ ti.xcom_pull(task_ids='write_paired_eval_request')['evidenceOutputPath'] }}",
     ],
-    env_vars=d19_evaluator_env_vars(),
-    service_account_name=D19_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT,
+    env_vars=d19_aggregator_env_vars(),
+    service_account_name=D19_AGGREGATOR_WORKLOAD_SERVICE_ACCOUNT,
     automount_service_account_token=False,
-    volumes=D19_EVALUATOR_VOLUMES,
-    volume_mounts=D19_EVALUATOR_VOLUME_MOUNTS,
-    labels=D19_EVALUATOR_WORKLOAD_LABELS,
+    volumes=D19_AGGREGATOR_VOLUMES,
+    volume_mounts=D19_AGGREGATOR_VOLUME_MOUNTS,
+    labels=D19_AGGREGATOR_WORKLOAD_LABELS,
     container_resources=D19_NATIVE_ADAPTER_RUNNER_RESOURCES,
     security_context=hardened_runtime_pod_security_context(),
     container_security_context=hardened_runtime_container_security_context(),
@@ -798,7 +799,7 @@ notify_governance = PythonOperator(
     task_id="notify_governance_eval_surfaces",
     python_callable=governance_notification_pending,
     op_args=["{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') }}"],
-    executor_config=D19_EVALUATOR_EXECUTOR_CONFIG,
+    executor_config=D19_AGGREGATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
 

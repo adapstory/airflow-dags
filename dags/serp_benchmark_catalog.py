@@ -695,9 +695,7 @@ def _validate_native_adapter_manifest(manifest: Mapping[str, object], suite_id: 
     for field_name in ("licenseEvidence", "sourceArchiveEvidence"):
         evidence = official_harness.get(field_name)
         if not isinstance(evidence, Mapping) or evidence.get("objectLockMode") != "COMPLIANCE":
-            raise ValueError(
-                f"native adapter manifest has invalid {field_name}: {suite_id}"
-            )
+            raise ValueError(f"native adapter manifest has invalid {field_name}: {suite_id}")
 
 
 def _validated_native_corpus_materialization(
@@ -794,7 +792,9 @@ def _validate_canonical_corpus_jsonl(payload: bytes, suite_id: str, source_id: s
         documents.append(document)
     document_ids = [document["documentId"] for document in documents]
     if document_ids != sorted(set(document_ids)):
-        raise ValueError(f"native corpus documents must be unique and sorted: {suite_id}/{source_id}")
+        raise ValueError(
+            f"native corpus documents must be unique and sorted: {suite_id}/{source_id}"
+        )
     canonical = b"".join(
         json.dumps(document, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode(
             "utf-8"

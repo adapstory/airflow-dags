@@ -197,9 +197,18 @@ def test_catalog_covers_every_mandatory_suite_with_explicit_licensing_boundary()
         for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
         for _, url in entry.supplemental_dataset_artifacts
     )
-    assert all(entry.harness_repository_url.startswith("https://") for entry in MANDATORY_BENCHMARK_SUITE_CATALOG)
-    assert all(entry.harness_source_archive_url.startswith("https://") for entry in MANDATORY_BENCHMARK_SUITE_CATALOG)
-    assert all(entry.harness_license_url.startswith("https://") for entry in MANDATORY_BENCHMARK_SUITE_CATALOG)
+    assert all(
+        entry.harness_repository_url.startswith("https://")
+        for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+    )
+    assert all(
+        entry.harness_source_archive_url.startswith("https://")
+        for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+    )
+    assert all(
+        entry.harness_license_url.startswith("https://")
+        for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+    )
     assert all(entry.harness_entrypoint for entry in MANDATORY_BENCHMARK_SUITE_CATALOG)
     assert all(entry.harness_license_id for entry in MANDATORY_BENCHMARK_SUITE_CATALOG)
     assert all(entry.distribution_rule for entry in MANDATORY_BENCHMARK_SUITE_CATALOG)
@@ -301,7 +310,9 @@ def test_live_catalog_allows_rights_unverified_internal_runs() -> None:
             "licenseStatus": item["official_harness"]["license_status"],
             "repositoryUrl": item["official_harness"]["repository_url"],
             "revision": item["official_harness"]["revision"],
-            "sourceArchiveEvidence": item["official_harness"]["source_archive_snapshot"]["immutable_artifact"],
+            "sourceArchiveEvidence": item["official_harness"]["source_archive_snapshot"][
+                "immutable_artifact"
+            ],
         }
         for item in suites
     )
@@ -358,6 +369,63 @@ def test_catalog_refuses_to_mark_a_snapshot_ready_without_native_adapter_evidenc
         )
 
 
+def test_catalog_blocks_suites_without_query_independent_corpus_evidence() -> None:
+    payload_by_url = {
+        entry.dataset_source_url: f"dataset-source:{entry.suite_id}".encode()
+        for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+    }
+    payload_by_url.update(
+        {
+            entry.license_evidence_url: f"license:{entry.suite_id}".encode()
+            for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+        }
+    )
+    payload_by_url.update(
+        {
+            entry.dataset_artifact_url: f"dataset-bytes:{entry.suite_id}".encode()
+            for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+        }
+    )
+    payload_by_url.update(_supplemental_dataset_payloads())
+    payload_by_url.update(_official_harness_payloads())
+
+    def corpus_materializer(
+        suite_id: str,
+        payloads: Mapping[str, bytes],
+        snapshots: Mapping[str, Mapping[str, object]],
+    ) -> Mapping[str, object]:
+        if suite_id in {"CodeRAG-Bench", "RepoQA", "SWE-bench Verified"}:
+            raise ValueError(f"{suite_id} requires pinned external corpus snapshots")
+        return _native_corpus_materializer(suite_id, payloads, snapshots)
+
+    evidence = build_live_benchmark_catalog_evidence(
+        observed_at="2026-07-13T00:00:00Z",
+        fetch_bytes=payload_by_url.__getitem__,
+        snapshot_bytes=_snapshot_bytes,
+        native_adapter_materializer=_native_adapter_materializer,
+        native_corpus_materializer=corpus_materializer,
+    )
+    suites = cast(list[dict[str, Any]], evidence["suites"])
+
+    assert evidence["catalog_status"] == "blocked"
+    assert {
+        item["suite_id"]: item["blocking_reason"]
+        for item in suites
+        if item["execution_status"] == "corpus-evidence-blocked"
+    } == {
+        suite_id: (
+            "query-independent-corpus-unavailable: "
+            f"{suite_id} requires pinned external corpus snapshots"
+        )
+        for suite_id in ("CodeRAG-Bench", "RepoQA", "SWE-bench Verified")
+    }
+    assert all(
+        item["corpus_snapshots"] == {} and "corpusManifest" not in item["native_adapter_manifest"]
+        for item in suites
+        if item["execution_status"] == "corpus-evidence-blocked"
+    )
+
+
 def test_live_catalog_retains_immutable_source_and_license_snapshots() -> None:
     payload_by_url = {
         entry.dataset_source_url: f"dataset-source:{entry.suite_id}".encode()
@@ -411,12 +479,16 @@ def test_live_catalog_retains_immutable_source_and_license_snapshots() -> None:
     assert beir["license_snapshot"]["immutable_artifact"]["artifactVersionId"] == (
         "version-BEIR-license"
     )
-    assert beir["official_harness"]["source_archive_snapshot"]["immutable_artifact"][
-        "artifactVersionId"
-    ] == "version-BEIR-harness-source-archive"
-    assert beir["official_harness"]["license_snapshot"]["immutable_artifact"][
-        "artifactVersionId"
-    ] == "version-BEIR-harness-license"
+    assert (
+        beir["official_harness"]["source_archive_snapshot"]["immutable_artifact"][
+            "artifactVersionId"
+        ]
+        == "version-BEIR-harness-source-archive"
+    )
+    assert (
+        beir["official_harness"]["license_snapshot"]["immutable_artifact"]["artifactVersionId"]
+        == "version-BEIR-harness-license"
+    )
 
 
 def _snapshot_bytes(
