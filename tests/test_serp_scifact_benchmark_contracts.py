@@ -26,6 +26,7 @@ def test_scifact_plan_binds_a_dedicated_benchmark_pack_to_versioned_evidence() -
     )
 
     assert plan["dag_id"] == "serp_beir_scifact_live_benchmark"
+    assert plan["actor_id"] == "airflow-serp-benchmark-builder"
     assert plan["archive_source_url"] == SCIFACT_ARCHIVE_URL
     assert plan["pack_slug"] == "benchmark-beir-scifact"
     assert plan["workflow_scope"] == {
