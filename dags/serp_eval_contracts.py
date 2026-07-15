@@ -58,21 +58,26 @@ _EVAL_CONTRACT_VERSION = "2026.07.2"
 _BENCHMARK_SUITE_CONTRACT_VERSION = "2026.07.3"
 _BENCHMARK_EVALUATION_CONTRACT_CODE = "d6-evidence-2026.07.3"
 _METRIC_COMPATIBILITY_CONTRACT_VERSION = "serp-suite-metric-compatibility/v1"
-_MODEL_RELEASE_CONTRACT_VERSION = "serp-model-release/v1"
-_MODEL_PROMOTION_CONTRACT_VERSION = "serp-model-catalog-promotion/v1"
+_CI_EVALUATION_RELEASE_CONTRACT_VERSION = "serp-ci-evaluation-release-evidence/v2"
+_EVALUATION_RELEASE_SCHEMA = "EvaluationRelease/v2"
+_EVALUATION_RELEASE_PROMOTION_SCHEMA = "EvaluationReleasePromotionReceipt/v2"
 _MODEL_PROMOTION_DAG_ID = "serp_model_catalog_promotion"
-_MODEL_PROMOTION_FROZEN_REPLAY_FIELDS = (
-    "guardrailBundleVersion",
-    "judgeModelId",
-    "judgeModelVersion",
-    "judgePromptTemplateVersion",
-    "policyBundleVersion",
-    "providerRouteId",
+_EVALUATION_PROFILE_EVIDENCE_FIELDS = (
+    "evaluatorRunnerEvidence",
+    "officialScorerEvidence",
+    "retrievalProfileEvidence",
+    "rerankerProfileEvidence",
+    "modelRouteEvidence",
+    "metricProfileEvidence",
+    "partitionManifestEvidence",
+    "executionEnvelopeEvidence",
+    "packBuildProfileEvidence",
 )
-_MODEL_PROMOTION_TREATMENT_PROFILE_FIELDS = (
-    "retrievalProfileVersion",
-    "rerankerProfileVersion",
-)
+_EVALUATION_TREATMENT_EVIDENCE_FIELDS = {
+    "retrievalProfile": "retrievalProfileEvidence",
+    "rerankerProfile": "rerankerProfileEvidence",
+    "modelRoute": "modelRouteEvidence",
+}
 _BENCHMARK_METRIC_FAMILIES = ("retrieval", "answer-quality", "citation", "policy")
 _STRICT_PRIMARY_RETRIEVAL_METRICS = frozenset({"MRR@10", "nDCG@10"})
 _STRICT_PAIRED_RUN_COUNT = 5
@@ -89,10 +94,12 @@ _DATASET_RIGHTS_STATUSES = frozenset({"attested", "rights-unverified"})
 _RIGHTS_UNVERIFIED_DISTRIBUTION_RULE = "internal-only-no-redistribution"
 _CATALOG_EXECUTION_STATUSES = frozenset({"ready", "rights-policy-blocked"})
 _CATALOG_BLOCKING_REASON_ORDER = ("rights-policy-blocked",)
-_LEGACY_D19_SELECTION_FIELDS = frozenset(
+_FORBIDDEN_INLINE_D19_FIELDS = frozenset(
     {
         "baseline_run_id",
         "candidate_id",
+        "candidate_evaluation",
+        "candidateEvaluation",
         "candidate_run_id",
         "feature_flags",
         "guardrail_bundle_version",
@@ -106,6 +113,17 @@ _LEGACY_D19_SELECTION_FIELDS = frozenset(
         "replay_context",
         "reranker_profile_version",
         "retrieval_profile_version",
+        "caseResults",
+        "metric",
+        "metricValue",
+        "packId",
+        "packVersionId",
+        "profileId",
+        "score",
+        "scores",
+        "selected_suite_ids",
+        "suiteBindings",
+        "suiteProfiles",
     }
 )
 _BENCHMARK_NAMESPACE = UUID("018f5e13-2d73-7a77-a052-8d1bcbf96599")
@@ -811,12 +829,7 @@ def build_online_eval_rollup_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
 
 
 def build_model_catalog_promotion_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
-    """Create the D17 plan without accepting model/replay strings from a caller.
-
-    A release is registered by CI as a separately immutable manifest. D17 only
-    accepts the exact version-bound pointers to two such manifests and creates
-    another WORM receipt after it has re-read and validated both of them.
-    """
+    """Create D17 from the canonical CI exact-nine release bundle only."""
 
     payload = _payload(conf)
     _reject_raw_secrets(payload)
@@ -828,14 +841,25 @@ def build_model_catalog_promotion_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
     artifact_root_path = _required_artifact_root_path(payload)
     if not artifact_root_path.startswith("s3://"):
         raise ValueError("model catalog promotion requires an s3:// artifact_root_path")
-    baseline_release_evidence = _immutable_evidence_reference(payload, "baseline_release_evidence")
-    candidate_release_evidence = _immutable_evidence_reference(
-        payload, "candidate_release_evidence"
+    for legacy_field in ("baseline_release_evidence", "candidate_release_evidence"):
+        if legacy_field in payload:
+            raise ValueError(f"{legacy_field} is forbidden; use evaluation_release_evidence v2")
+    ci_bundle = _normalized_ci_evaluation_release_bundle(
+        _required_mapping(payload, "evaluation_release_evidence")
     )
-    _require_evidence_within_artifact_root(
+    for field_name, plan_field in (
+        ("tenantId", str(tenant_id)),
+        ("registryResourceId", str(registry_resource_id)),
+        ("registryResourceType", registry_resource_type),
+    ):
+        if _required_str(ci_bundle, field_name) != plan_field:
+            raise ValueError(f"evaluation_release_evidence {field_name} does not match D17 plan")
+    baseline_release_evidence = _worm_evidence_reference(ci_bundle, "baselineReleaseEvidence")
+    candidate_release_evidence = _worm_evidence_reference(ci_bundle, "candidateReleaseEvidence")
+    _require_worm_evidence_within_artifact_root(
         baseline_release_evidence, artifact_root_path, "baseline_release_evidence"
     )
-    _require_evidence_within_artifact_root(
+    _require_worm_evidence_within_artifact_root(
         candidate_release_evidence, artifact_root_path, "candidate_release_evidence"
     )
     if baseline_release_evidence == candidate_release_evidence:
@@ -844,8 +868,8 @@ def build_model_catalog_promotion_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
         "serp-airflow-model-catalog-promotion",
         tenant_id,
         promotion_id,
-        baseline_release_evidence["artifactSha256"],
-        candidate_release_evidence["artifactSha256"],
+        baseline_release_evidence["sha256"],
+        candidate_release_evidence["sha256"],
         generated_at,
     )
     return SerpDagPlan(
@@ -862,6 +886,7 @@ def build_model_catalog_promotion_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
             ),
             "baseline_release_evidence": baseline_release_evidence,
             "candidate_release_evidence": candidate_release_evidence,
+            "ci_evaluation_release_contract_version": _CI_EVALUATION_RELEASE_CONTRACT_VERSION,
             "dag_id": _MODEL_PROMOTION_DAG_ID,
             "generated_at": generated_at,
             "operation_id": operation_id,
@@ -882,39 +907,41 @@ def build_model_catalog_promotion_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
 
 
 def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
-    """Create D19 only from a D17 immutable promotion receipt pointer."""
+    """Create scoreless D19 from immutable v2 governance references only."""
 
     payload = _payload(conf)
     _reject_raw_secrets(payload)
-    _reject_legacy_d19_selection_fields(payload)
-    if "candidate_evaluation" in payload:
-        raise ValueError(
-            "candidate_evaluation is forbidden: D19 derives results from executor receipts"
-        )
-    selected_suite_ids = tuple(_required_str_list(payload, "selected_suite_ids"))
-    if selected_suite_ids != MANDATORY_SERP_BENCHMARK_SUITES:
-        raise ValueError("selected_suite_ids must include every mandatory suite")
+    _reject_inline_d19_fields(payload)
     tenant_id = _required_uuid(payload, "tenant_id")
     generated_at = _required_datetime_string(payload, "generated_at")
     registry_resource_type = _required_resource_type(payload, "registry_resource_type")
     registry_resource_id = _required_uuid(payload, "registry_resource_id")
-    improvement_spec_id = _required_str(payload, "improvement_spec_id")
-    max_benchmark_runs = _required_positive_int(payload, "max_benchmark_runs")
-    rollback_policy_ref = _required_str(payload, "rollback_policy_ref")
-    model_promotion_evidence = _immutable_evidence_reference(payload, "model_promotion_evidence")
+    evaluation_binding_id = str(_required_uuid(payload, "evaluation_binding_id"))
+    promotion_evidence = _worm_evidence_reference(payload, "evaluation_release_promotion_evidence")
+    evaluation_binding_evidence = _worm_evidence_reference(payload, "evaluation_binding_evidence")
+    metric_matrix_evidence = _worm_evidence_reference(
+        payload, "metric_compatibility_matrix_evidence"
+    )
+    objective_evidence = _worm_evidence_reference(payload, "objective_specification_evidence")
     artifact_root_path = _required_artifact_root_path(payload)
     if not artifact_root_path.startswith("s3://"):
         raise ValueError("benchmark improvement wave requires an s3:// artifact_root_path")
-    _require_evidence_within_artifact_root(
-        model_promotion_evidence, artifact_root_path, "model_promotion_evidence"
-    )
+    for field_name, evidence in (
+        ("evaluation_release_promotion_evidence", promotion_evidence),
+        ("evaluation_binding_evidence", evaluation_binding_evidence),
+        ("metric_compatibility_matrix_evidence", metric_matrix_evidence),
+        ("objective_specification_evidence", objective_evidence),
+    ):
+        _require_worm_evidence_within_artifact_root(evidence, artifact_root_path, field_name)
     operation_id = _operation_id(
         "serp-airflow-benchmark-improvement-wave",
         tenant_id,
-        improvement_spec_id,
-        model_promotion_evidence["artifactSha256"],
+        evaluation_binding_id,
+        promotion_evidence["sha256"],
+        evaluation_binding_evidence["sha256"],
+        metric_matrix_evidence["sha256"],
+        objective_evidence["sha256"],
         generated_at,
-        ",".join(selected_suite_ids),
     )
     plan_payload = {
         "actor_id": _required_str(payload, "actor_id"),
@@ -924,7 +951,6 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
             operation_id,
             (
                 ("airflow_plan", "airflow-plan.json"),
-                ("improvement_spec", "improvement-spec.json"),
                 ("benchmark_catalog", "benchmark-catalog.json"),
                 (
                     "benchmark_catalog_receipt",
@@ -936,22 +962,21 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
         ),
         "dag_id": "serp_benchmark_improvement_wave",
         "generated_at": generated_at,
-        "improvement_spec_id": improvement_spec_id,
-        "max_benchmark_runs": max_benchmark_runs,
-        "model_promotion_evidence": model_promotion_evidence,
+        "evaluation_binding_evidence": evaluation_binding_evidence,
+        "evaluation_binding_id": evaluation_binding_id,
+        "evaluation_release_promotion_evidence": promotion_evidence,
+        "metric_compatibility_matrix_evidence": metric_matrix_evidence,
         "normalized_gate_floor": SERP_NORMALIZED_GATE_FLOOR,
+        "objective_specification_evidence": objective_evidence,
         "operation_id": operation_id,
         "registry_resource_id": str(registry_resource_id),
         "registry_resource_type": registry_resource_type,
-        "rollback_policy_ref": rollback_policy_ref,
-        "selected_suite_ids": list(selected_suite_ids),
         "tasks": _tasks(
             (
                 "validate_benchmark_improvement_wave_plan",
                 "materialize_live_benchmark_catalog",
                 "load_materialized_benchmark_catalog",
                 "load_model_catalog_promotion",
-                "write_improvement_spec",
                 "write_paired_eval_request",
                 "run_paired_benchmark_evaluation",
                 "notify_governance_eval_surfaces",
@@ -975,10 +1000,71 @@ def _immutable_evidence_reference(payload: Mapping[str, Any], field_name: str) -
     }
 
 
-def _reject_legacy_d19_selection_fields(payload: Mapping[str, Any]) -> None:
-    supplied = sorted(_LEGACY_D19_SELECTION_FIELDS.intersection(payload))
+def _worm_evidence_reference(payload: Mapping[str, Any], field_name: str) -> dict[str, str]:
+    evidence = _required_mapping(payload, field_name)
+    expected = {"s3Uri", "versionId", "sha256", "objectLockMode", "retainUntil"}
+    if set(evidence) != expected:
+        raise ValueError(f"{field_name} must define exactly {sorted(expected)}")
+    s3_uri = _artifact_path(f"{field_name}.s3Uri", _required_str(evidence, "s3Uri"))
+    if not s3_uri.startswith("s3://"):
+        raise ValueError(f"{field_name}.s3Uri must use s3://")
+    if _required_str(evidence, "objectLockMode") != "COMPLIANCE":
+        raise ValueError(f"{field_name} must declare COMPLIANCE object lock")
+    _required_datetime_string(evidence, "retainUntil")
+    return {
+        "s3Uri": s3_uri,
+        "versionId": _required_str(evidence, "versionId"),
+        "sha256": _required_sha256_prefixed(evidence, "sha256"),
+        "objectLockMode": "COMPLIANCE",
+        "retainUntil": _required_str(evidence, "retainUntil"),
+    }
+
+
+def _normalized_ci_evaluation_release_bundle(payload: Mapping[str, Any]) -> dict[str, Any]:
+    expected = {
+        "apiVersion",
+        "baselineRelease",
+        "baselineReleaseEvidence",
+        "candidateRelease",
+        "candidateReleaseEvidence",
+        "contractVersion",
+        "kind",
+        "operationId",
+        "registryResourceId",
+        "registryResourceType",
+        "status",
+        "tenantId",
+    }
+    if set(payload) != expected:
+        raise ValueError(f"evaluation_release_evidence must define exactly {sorted(expected)}")
+    if _required_str(payload, "apiVersion") != "serp.adapstory.ai/v2alpha1":
+        raise ValueError("evaluation_release_evidence apiVersion is unsupported")
+    if _required_str(payload, "contractVersion") != _CI_EVALUATION_RELEASE_CONTRACT_VERSION:
+        raise ValueError("evaluation_release_evidence contractVersion is unsupported")
+    if _required_str(payload, "kind") != "EvaluationReleaseEvidence":
+        raise ValueError("evaluation_release_evidence kind is unsupported")
+    status = _required_str(payload, "status")
+    if status != "sealed" and not status.startswith("blocked-"):
+        raise ValueError("evaluation_release_evidence status is unsupported")
+    baseline = _required_mapping(payload, "baselineRelease")
+    candidate = _required_mapping(payload, "candidateRelease")
+    for side, release in (("baseline", baseline), ("candidate", candidate)):
+        if _required_str(release, "schema") != _EVALUATION_RELEASE_SCHEMA:
+            raise ValueError(f"{side} release schema is unsupported")
+    return {
+        **dict(payload),
+        "baselineReleaseEvidence": _worm_evidence_reference(payload, "baselineReleaseEvidence"),
+        "candidateReleaseEvidence": _worm_evidence_reference(payload, "candidateReleaseEvidence"),
+        "registryResourceId": str(_required_uuid(payload, "registryResourceId")),
+        "registryResourceType": _required_resource_type(payload, "registryResourceType"),
+        "tenantId": str(_required_uuid(payload, "tenantId")),
+    }
+
+
+def _reject_inline_d19_fields(payload: Mapping[str, Any]) -> None:
+    supplied = sorted(_FORBIDDEN_INLINE_D19_FIELDS.intersection(payload))
     if supplied:
-        raise ValueError("legacy D19 selection field is forbidden: " + ", ".join(supplied))
+        raise ValueError("inline D19 field is forbidden: " + ", ".join(supplied))
 
 
 def _require_evidence_within_artifact_root(
@@ -989,29 +1075,39 @@ def _require_evidence_within_artifact_root(
         raise ValueError(f"{field_name} must be stored under artifact_root_path")
 
 
+def _require_worm_evidence_within_artifact_root(
+    evidence: Mapping[str, str], artifact_root_path: str, field_name: str
+) -> None:
+    root = artifact_root_path.rstrip("/") + "/"
+    if not evidence["s3Uri"].startswith(root):
+        raise ValueError(f"{field_name} must be stored under artifact_root_path")
+
+
 def load_governed_model_releases(
     plan_json: Mapping[str, Any] | str,
     *,
     s3_client: Any | None = None,
 ) -> dict[str, Any]:
-    """Read D17 release manifests by exact S3 VersionId before promotion."""
+    """Read and verify both exact-nine releases and every component handle."""
 
     plan = _json_object(plan_json, "plan_json")
     _reject_raw_secrets(plan)
     if _required_str(plan, "dag_id") != _MODEL_PROMOTION_DAG_ID:
         raise ValueError("plan dag_id does not match model catalog promotion loader")
-    baseline_evidence = _immutable_evidence_reference(plan, "baseline_release_evidence")
-    candidate_evidence = _immutable_evidence_reference(plan, "candidate_release_evidence")
-    client = s3_client or _s3_client(
-        baseline_evidence["artifactPath"], candidate_evidence["artifactPath"]
-    )
-    baseline = _load_governed_model_release(
+    if _required_str(plan, "ci_evaluation_release_contract_version") != (
+        _CI_EVALUATION_RELEASE_CONTRACT_VERSION
+    ):
+        raise ValueError("D17 CI evaluation release contract is unsupported")
+    baseline_evidence = _worm_evidence_reference(plan, "baseline_release_evidence")
+    candidate_evidence = _worm_evidence_reference(plan, "candidate_release_evidence")
+    client = s3_client or _s3_read_client(baseline_evidence["s3Uri"], candidate_evidence["s3Uri"])
+    baseline = _load_governed_evaluation_release(
         baseline_evidence, field_name="baseline_release_evidence", s3_client=client
     )
-    candidate = _load_governed_model_release(
+    candidate = _load_governed_evaluation_release(
         candidate_evidence, field_name="candidate_release_evidence", s3_client=client
     )
-    _validate_model_release_pair(baseline["release"], candidate["release"])
+    _validate_evaluation_release_pair(baseline["release"], candidate["release"])
     return {"baselineRelease": baseline, "candidateRelease": candidate}
 
 
@@ -1028,17 +1124,17 @@ def write_model_catalog_promotion_receipt(
     if _required_str(plan, "dag_id") != _MODEL_PROMOTION_DAG_ID:
         raise ValueError("plan dag_id does not match model catalog promotion receipt writer")
     artifact_paths = _required_artifact_paths(plan, ("promotion_receipt",))
-    baseline = _validated_model_release_binding(
+    baseline = _validated_evaluation_release_binding(
         _required_mapping(releases, "baselineRelease"), "baselineRelease"
     )
-    candidate = _validated_model_release_binding(
+    candidate = _validated_evaluation_release_binding(
         _required_mapping(releases, "candidateRelease"), "candidateRelease"
     )
-    if baseline["evidence"] != _immutable_evidence_reference(plan, "baseline_release_evidence"):
+    if baseline["evidence"] != _worm_evidence_reference(plan, "baseline_release_evidence"):
         raise ValueError("D17 baseline release evidence does not match plan")
-    if candidate["evidence"] != _immutable_evidence_reference(plan, "candidate_release_evidence"):
+    if candidate["evidence"] != _worm_evidence_reference(plan, "candidate_release_evidence"):
         raise ValueError("D17 candidate release evidence does not match plan")
-    _validate_model_release_pair(baseline["release"], candidate["release"])
+    _validate_evaluation_release_pair(baseline["release"], candidate["release"])
     payload = _model_promotion_receipt_payload(plan, baseline, candidate)
     writer = snapshot_writer or write_immutable_evidence_snapshot
     snapshot = writer(
@@ -1047,7 +1143,7 @@ def write_model_catalog_promotion_receipt(
         operation_id=_required_str(plan, "operation_id"),
         payload=payload,
     )
-    evidence = _written_immutable_evidence_reference(
+    evidence = _written_worm_evidence_reference(
         snapshot, artifact_paths["promotion_receipt"], "model catalog promotion receipt"
     )
     return {
@@ -1072,50 +1168,294 @@ def load_model_catalog_promotion_snapshot(
     _reject_raw_secrets(plan)
     if _required_str(plan, "dag_id") != "serp_benchmark_improvement_wave":
         raise ValueError("plan dag_id does not match D19 promotion receipt loader")
-    receipt_evidence = _immutable_evidence_reference(plan, "model_promotion_evidence")
-    receipt_client = s3_client or _s3_read_client(receipt_evidence["artifactPath"])
-    receipt = _load_immutable_json_evidence(
+    receipt_evidence = _worm_evidence_reference(plan, "evaluation_release_promotion_evidence")
+    receipt_client = s3_client or _s3_read_client(receipt_evidence["s3Uri"])
+    receipt = _load_worm_json_evidence(
         receipt_evidence,
-        field_name="model_promotion_evidence",
+        field_name="evaluation_release_promotion_evidence",
         s3_client=receipt_client,
     )
-    normalized = _validated_model_promotion_receipt(receipt, plan)
+    normalized = _validated_evaluation_release_promotion_receipt(receipt, plan)
     release_evidence = tuple(
         (
             role,
-            _immutable_evidence_reference(normalized[role], "evidence"),
+            _worm_evidence_reference(normalized[role], "evidence"),
         )
         for role in ("baselineRelease", "candidateRelease")
     )
     release_client = s3_client or _s3_read_client(
-        *(evidence["artifactPath"] for _, evidence in release_evidence)
+        *(evidence["s3Uri"] for _, evidence in release_evidence)
     )
     for role, evidence in release_evidence:
         recorded = normalized[role]
-        actual = _load_governed_model_release(
+        actual = _load_governed_evaluation_release(
             evidence, field_name=f"{role}.evidence", s3_client=release_client
         )
-        if _canonical_json(actual) != _canonical_json(recorded):
-            raise ValueError(f"D17 {role} no longer matches the immutable release manifest")
+        if _required_str(actual["release"], "releaseDigest") != _required_str(
+            recorded, "releaseDigest"
+        ):
+            raise ValueError(f"D17 {role} digest no longer matches its immutable manifest")
     return {"promotionEvidence": receipt_evidence, "promotion": normalized}
 
 
-def _load_governed_model_release(
+def _load_governed_evaluation_release(
     evidence: Mapping[str, Any],
     *,
     field_name: str,
     s3_client: Any,
 ) -> dict[str, Any]:
-    normalized_evidence = _immutable_evidence_reference({field_name: evidence}, field_name)
-    payload = _load_immutable_json_evidence(
+    normalized_evidence = _worm_evidence_reference({field_name: evidence}, field_name)
+    payload = _load_worm_json_evidence(
         normalized_evidence,
         field_name=field_name,
         s3_client=s3_client,
     )
     return {
         "evidence": normalized_evidence,
-        "release": _normalize_governed_model_release(payload, field_name),
+        "release": _normalize_evaluation_release(
+            payload, field_name=field_name, s3_client=s3_client
+        ),
     }
+
+
+def _load_worm_json_evidence(
+    evidence: Mapping[str, str],
+    *,
+    field_name: str,
+    s3_client: Any,
+) -> Mapping[str, Any]:
+    payload, observed_version_id = _read_compliance_locked_s3_bytes(
+        s3_client,
+        evidence["s3Uri"],
+        field_name=field_name,
+        version_id=evidence["versionId"],
+    )
+    if observed_version_id != evidence["versionId"]:
+        raise ValueError(f"{field_name} VersionId does not match immutable evidence")
+    if "sha256:" + sha256(payload).hexdigest() != evidence["sha256"]:
+        raise ValueError(f"{field_name} SHA-256 does not match immutable evidence")
+    try:
+        return _json_object(payload.decode("utf-8"), field_name)
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{field_name} is not UTF-8 JSON") from exc
+
+
+def _normalize_evaluation_release(
+    payload: Mapping[str, Any], *, field_name: str, s3_client: Any
+) -> dict[str, Any]:
+    expected = {
+        "schema",
+        "activationStatus",
+        "releaseId",
+        "releaseDigest",
+        "runtimeEvidence",
+        "profileSetEvidence",
+        "suiteProfiles",
+    }
+    if set(payload) != expected:
+        raise ValueError(f"{field_name} must define exactly {sorted(expected)}")
+    if _required_str(payload, "schema") != _EVALUATION_RELEASE_SCHEMA:
+        raise ValueError(f"{field_name} schema is unsupported")
+    if _required_str(payload, "activationStatus") != "ready-for-evaluation":
+        raise ValueError(f"{field_name} activationStatus must be ready-for-evaluation")
+    suite_profiles_raw = _required_object_list(payload, "suiteProfiles")
+    suites = [_required_str(item, "suiteId") for item in suite_profiles_raw]
+    if suites != list(MANDATORY_SERP_BENCHMARK_SUITES):
+        raise ValueError(f"{field_name} suiteProfiles must use the exact canonical order")
+    suite_profiles = [
+        _normalize_suite_evaluation_profile(
+            profile,
+            field_name=f"{field_name}.suiteProfiles[{index}]",
+            s3_client=s3_client,
+        )
+        for index, profile in enumerate(suite_profiles_raw)
+    ]
+    profile_ids = [_required_str(item, "profileId") for item in suite_profiles]
+    profile_digests = [_required_str(item, "profileSha256") for item in suite_profiles]
+    if len(set(profile_ids)) != len(profile_ids):
+        raise ValueError(f"{field_name} suite profile IDs must be unique")
+    if len(set(profile_digests)) != len(profile_digests):
+        raise ValueError(f"{field_name} suite profile digests must be unique")
+    runtime_evidence = _worm_evidence_reference(payload, "runtimeEvidence")
+    runtime = _load_worm_json_evidence(
+        runtime_evidence, field_name=f"{field_name}.runtimeEvidence", s3_client=s3_client
+    )
+    if _required_str(runtime, "result") != "SUCCESS":
+        raise ValueError(f"{field_name} runtime evidence is not a successful signed build")
+    if not _required_str(runtime, "jenkinsBuildUrl").startswith(
+        "https://jenkins.adapstory.com/job/infra-build/"
+    ):
+        raise ValueError(f"{field_name} runtime evidence is not owned by Jenkins")
+    _required_sha256_prefixed(runtime, "digest")
+    profile_set_evidence = _worm_evidence_reference(payload, "profileSetEvidence")
+    profile_set = _load_worm_json_evidence(
+        profile_set_evidence,
+        field_name=f"{field_name}.profileSetEvidence",
+        s3_client=s3_client,
+    )
+    if set(profile_set) != {"schema", "profileSetId", "suiteProfiles"}:
+        raise ValueError(f"{field_name} profile set fields are unsupported")
+    if _required_str(profile_set, "schema") != "SuiteEvaluationProfileSet/v2":
+        raise ValueError(f"{field_name} profile set schema is unsupported")
+    if _canonical_json(
+        {"suiteProfiles": _required_object_list(profile_set, "suiteProfiles")}
+    ) != _canonical_json({"suiteProfiles": suite_profiles}):
+        raise ValueError(f"{field_name} suite profiles do not match profileSetEvidence")
+    release_core = {
+        "schema": _EVALUATION_RELEASE_SCHEMA,
+        "activationStatus": "ready-for-evaluation",
+        "releaseId": _required_str(payload, "releaseId"),
+        "runtimeEvidence": runtime_evidence,
+        "profileSetEvidence": profile_set_evidence,
+        "suiteProfiles": suite_profiles,
+    }
+    release_digest = _required_sha256_prefixed(payload, "releaseDigest")
+    expected_digest = "sha256:" + sha256(_canonical_json(release_core).encode("utf-8")).hexdigest()
+    if release_digest != expected_digest:
+        raise ValueError(f"{field_name} releaseDigest does not match canonical release bytes")
+    return {**release_core, "releaseDigest": release_digest}
+
+
+def _normalize_suite_evaluation_profile(
+    payload: Mapping[str, Any], *, field_name: str, s3_client: Any
+) -> dict[str, Any]:
+    base_fields = {
+        "schema",
+        "suiteId",
+        "profileId",
+        "profileVersion",
+        "profileSha256",
+        *_EVALUATION_PROFILE_EVIDENCE_FIELDS,
+    }
+    if set(payload) not in (base_fields, base_fields | {"treatmentDelta"}):
+        raise ValueError(f"{field_name} fields are unsupported")
+    if _required_str(payload, "schema") != "SuiteEvaluationProfile/v2":
+        raise ValueError(f"{field_name} schema is unsupported")
+    normalized: dict[str, Any] = {
+        "schema": "SuiteEvaluationProfile/v2",
+        "suiteId": _required_str(payload, "suiteId"),
+        "profileId": _required_str(payload, "profileId"),
+        "profileVersion": _required_str(payload, "profileVersion"),
+        "profileSha256": _required_sha256_prefixed(payload, "profileSha256"),
+    }
+    component_payloads: dict[str, Mapping[str, Any]] = {}
+    for evidence_field in _EVALUATION_PROFILE_EVIDENCE_FIELDS:
+        evidence = _worm_evidence_reference(payload, evidence_field)
+        normalized[evidence_field] = evidence
+        component = _load_worm_json_evidence(
+            evidence, field_name=f"{field_name}.{evidence_field}", s3_client=s3_client
+        )
+        _reject_placeholder_profile_values(component, f"{field_name}.{evidence_field}")
+        component_payloads[evidence_field] = component
+    scorer = component_payloads["officialScorerEvidence"]
+    if _required_str(scorer, "bindingStatus") != "verified":
+        raise ValueError(f"{field_name} official scorer evidence is not verified")
+    revision = _required_str(scorer, "revision")
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError(f"{field_name} official scorer revision must be a full Git SHA")
+    for scorer_field in ("repositoryUrl", "entrypoint", "profile"):
+        _required_str(scorer, scorer_field)
+    if "treatmentDelta" in payload:
+        treatment = _required_mapping(payload, "treatmentDelta")
+        if set(treatment) != {"dimensions"}:
+            raise ValueError(f"{field_name} treatmentDelta fields are unsupported")
+        dimensions = _required_object_list(treatment, "dimensions")
+        normalized_dimensions: list[dict[str, Any]] = []
+        observed_dimensions: list[str] = []
+        for index, item in enumerate(dimensions):
+            if set(item) != {"dimension", "changedFields"}:
+                raise ValueError(
+                    f"{field_name} treatmentDelta.dimensions[{index}] fields are unsupported"
+                )
+            dimension = _required_str(item, "dimension")
+            if dimension not in _EVALUATION_TREATMENT_EVIDENCE_FIELDS:
+                raise ValueError(f"{field_name} treatmentDelta dimension is unsupported")
+            changed_fields = _required_str_list(item, "changedFields")
+            if len(set(changed_fields)) != len(changed_fields):
+                raise ValueError(f"{field_name} treatmentDelta changedFields must be unique")
+            observed_dimensions.append(dimension)
+            normalized_dimensions.append({"dimension": dimension, "changedFields": changed_fields})
+        expected_order = tuple(_EVALUATION_TREATMENT_EVIDENCE_FIELDS)
+        if len(set(observed_dimensions)) != len(observed_dimensions):
+            raise ValueError(f"{field_name} treatmentDelta dimensions must be unique")
+        if tuple(observed_dimensions) != tuple(
+            dimension for dimension in expected_order if dimension in observed_dimensions
+        ):
+            raise ValueError(f"{field_name} treatmentDelta dimensions are not canonical")
+        normalized["treatmentDelta"] = {"dimensions": normalized_dimensions}
+    return normalized
+
+
+def _reject_placeholder_profile_values(value: object, field_name: str) -> None:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            _reject_placeholder_profile_values(item, f"{field_name}.{key}")
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _reject_placeholder_profile_values(item, f"{field_name}[{index}]")
+        return
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"latest", "not-applicable", "not-configured"} or normalized.startswith(
+            ("latest@", "not-applicable@", "not-configured@")
+        ):
+            raise ValueError(f"{field_name} contains a forbidden placeholder")
+
+
+def _validated_evaluation_release_binding(
+    binding: Mapping[str, Any], field_name: str
+) -> dict[str, Any]:
+    if set(binding) != {"evidence", "release"}:
+        raise ValueError(f"{field_name} fields are unsupported")
+    release = _required_mapping(binding, "release")
+    if _required_str(release, "schema") != _EVALUATION_RELEASE_SCHEMA:
+        raise ValueError(f"{field_name}.release schema is unsupported")
+    return {
+        "evidence": _worm_evidence_reference(binding, "evidence"),
+        "release": dict(release),
+    }
+
+
+def _validate_evaluation_release_pair(
+    baseline: Mapping[str, Any], candidate: Mapping[str, Any]
+) -> None:
+    if _required_str(baseline, "releaseId") == _required_str(candidate, "releaseId"):
+        raise ValueError("baseline and candidate releaseId must differ")
+    if _required_str(baseline, "releaseDigest") == _required_str(candidate, "releaseDigest"):
+        raise ValueError("baseline and candidate releaseDigest must differ")
+    baseline_profiles = _required_object_list(baseline, "suiteProfiles")
+    candidate_profiles = _required_object_list(candidate, "suiteProfiles")
+    if len(baseline_profiles) != len(candidate_profiles):
+        raise ValueError("baseline and candidate must bind the same exact-nine suites")
+    for baseline_profile, candidate_profile in zip(
+        baseline_profiles, candidate_profiles, strict=True
+    ):
+        suite_id = _required_str(baseline_profile, "suiteId")
+        if _required_str(candidate_profile, "suiteId") != suite_id:
+            raise ValueError("baseline and candidate suite order must match")
+        if _required_str(baseline_profile, "profileSha256") == _required_str(
+            candidate_profile, "profileSha256"
+        ):
+            raise ValueError(f"candidate {suite_id} must have a distinct profile digest")
+        treatment = _required_mapping(candidate_profile, "treatmentDelta")
+        dimensions = _required_object_list(treatment, "dimensions")
+        treatment_fields: set[str] = set()
+        for item in dimensions:
+            dimension = _required_str(item, "dimension")
+            _required_str_list(item, "changedFields")
+            treatment_field = _EVALUATION_TREATMENT_EVIDENCE_FIELDS.get(dimension)
+            if treatment_field is None:
+                raise ValueError(f"candidate {suite_id} treatment dimension is unsupported")
+            treatment_fields.add(treatment_field)
+        changed_evidence_fields = {
+            field
+            for field in _EVALUATION_PROFILE_EVIDENCE_FIELDS
+            if _worm_evidence_reference(baseline_profile, field)
+            != _worm_evidence_reference(candidate_profile, field)
+        }
+        if not treatment_fields or changed_evidence_fields != treatment_fields:
+            raise ValueError(f"candidate {suite_id} must have genuine treatment component deltas")
 
 
 def _load_immutable_json_evidence(
@@ -1146,13 +1486,19 @@ def _model_promotion_receipt_payload(
     candidate: Mapping[str, Any],
 ) -> dict[str, Any]:
     return {
-        "apiVersion": "serp.adapstory.ai/v1alpha1",
-        "baselineRelease": dict(baseline),
-        "candidateRelease": dict(candidate),
-        "contractVersion": _MODEL_PROMOTION_CONTRACT_VERSION,
+        "schema": _EVALUATION_RELEASE_PROMOTION_SCHEMA,
+        "baselineRelease": {
+            "evidence": dict(_required_mapping(baseline, "evidence")),
+            "releaseDigest": _required_str(_required_mapping(baseline, "release"), "releaseDigest"),
+        },
+        "candidateRelease": {
+            "evidence": dict(_required_mapping(candidate, "evidence")),
+            "releaseDigest": _required_str(
+                _required_mapping(candidate, "release"), "releaseDigest"
+            ),
+        },
         "dagId": _MODEL_PROMOTION_DAG_ID,
         "generatedAt": _required_str(plan, "generated_at"),
-        "kind": "ModelCatalogPromotionReceipt",
         "operationId": _required_str(plan, "operation_id"),
         "promotionId": _required_str(plan, "promotion_id"),
         "registryResourceId": _required_str(plan, "registry_resource_id"),
@@ -1162,15 +1508,26 @@ def _model_promotion_receipt_payload(
     }
 
 
-def _validated_model_promotion_receipt(
+def _validated_evaluation_release_promotion_receipt(
     receipt: Mapping[str, Any], plan: Mapping[str, Any]
 ) -> dict[str, Any]:
-    if _required_str(receipt, "apiVersion") != "serp.adapstory.ai/v1alpha1":
-        raise ValueError("D17 promotion receipt apiVersion is unsupported")
-    if _required_str(receipt, "contractVersion") != _MODEL_PROMOTION_CONTRACT_VERSION:
-        raise ValueError("D17 promotion receipt contractVersion is unsupported")
-    if _required_str(receipt, "kind") != "ModelCatalogPromotionReceipt":
-        raise ValueError("D17 promotion receipt kind is unsupported")
+    expected = {
+        "schema",
+        "baselineRelease",
+        "candidateRelease",
+        "dagId",
+        "generatedAt",
+        "operationId",
+        "promotionId",
+        "registryResourceId",
+        "registryResourceType",
+        "status",
+        "tenantId",
+    }
+    if set(receipt) != expected:
+        raise ValueError("D17 promotion receipt fields are unsupported")
+    if _required_str(receipt, "schema") != _EVALUATION_RELEASE_PROMOTION_SCHEMA:
+        raise ValueError("D17 promotion receipt schema is unsupported")
     if _required_str(receipt, "dagId") != _MODEL_PROMOTION_DAG_ID:
         raise ValueError("D17 promotion receipt dagId is unsupported")
     if _required_str(receipt, "status") != "approved-for-evaluation":
@@ -1182,194 +1539,40 @@ def _validated_model_promotion_receipt(
     ):
         if _required_str(receipt, field_name) != _required_str(plan, plan_field):
             raise ValueError(f"D17 promotion receipt {field_name} does not match D19 plan")
-    baseline = _validated_model_release_binding(
+    baseline = _validated_promoted_release_reference(
         _required_mapping(receipt, "baselineRelease"), "baselineRelease"
     )
-    candidate = _validated_model_release_binding(
+    candidate = _validated_promoted_release_reference(
         _required_mapping(receipt, "candidateRelease"), "candidateRelease"
     )
-    _validate_model_release_pair(baseline["release"], candidate["release"])
+    if baseline["evidence"] == candidate["evidence"]:
+        raise ValueError("D17 promotion release evidence must be distinct")
+    if baseline["releaseDigest"] == candidate["releaseDigest"]:
+        raise ValueError("D17 promotion release digests must be distinct")
     return {
+        "schema": _EVALUATION_RELEASE_PROMOTION_SCHEMA,
         "baselineRelease": baseline,
         "candidateRelease": candidate,
         "operationId": _required_str(receipt, "operationId"),
         "promotionId": _required_str(receipt, "promotionId"),
+        "registryResourceId": _required_str(receipt, "registryResourceId"),
+        "registryResourceType": _required_str(receipt, "registryResourceType"),
+        "tenantId": _required_str(receipt, "tenantId"),
     }
 
 
-def _validated_model_release_binding(binding: Mapping[str, Any], field_name: str) -> dict[str, Any]:
-    release = _required_mapping(binding, "release")
-    normalized_release = (
-        _normalize_governed_model_release(release, f"{field_name}.release")
-        if "apiVersion" in release
-        else _normalize_governed_model_release_fields(release, f"{field_name}.release")
-    )
-    if "apiVersion" not in release:
-        normalized_release["ciRuntime"] = _normalize_signed_ci_runtime(
-            release,
-            f"{field_name}.release",
-            _required_mapping(normalized_release, "runtime"),
-        )
-    return {
-        "evidence": _immutable_evidence_reference(binding, "evidence"),
-        "release": normalized_release,
-    }
-
-
-def _normalize_governed_model_release(
-    payload: Mapping[str, Any], field_name: str
+def _validated_promoted_release_reference(
+    binding: Mapping[str, Any], field_name: str
 ) -> dict[str, Any]:
-    if _required_str(payload, "apiVersion") != "serp.adapstory.ai/v1alpha1":
-        raise ValueError(f"{field_name} apiVersion is unsupported")
-    if _required_str(payload, "contractVersion") != _MODEL_RELEASE_CONTRACT_VERSION:
-        raise ValueError(f"{field_name} contractVersion is unsupported")
-    if _required_str(payload, "kind") != "ModelRelease":
-        raise ValueError(f"{field_name} kind is unsupported")
-    if _required_str(payload, "status") != "approved-for-evaluation":
-        raise ValueError(f"{field_name} is not approved for evaluation")
-    normalized = _normalize_governed_model_release_fields(payload, field_name)
-    normalized["ciRuntime"] = _normalize_signed_ci_runtime(
-        payload, field_name, _required_mapping(normalized, "runtime")
-    )
-    return normalized
-
-
-def _normalize_governed_model_release_fields(
-    payload: Mapping[str, Any], field_name: str
-) -> dict[str, Any]:
-    model = _required_mapping(payload, "model")
-    runtime = _required_mapping(payload, "runtime")
-    replay = _required_mapping(payload, "replay")
-    source_revision = _required_str(runtime, "sourceRevision")
-    if not re.fullmatch(r"[0-9a-f]{40}", source_revision):
-        raise ValueError(f"{field_name} runtime sourceRevision must be a full Git SHA")
-    replay_feature_flags = _required_str_list(replay, "featureFlags")
-    if len(replay_feature_flags) != len(set(replay_feature_flags)):
-        raise ValueError(f"{field_name} replay featureFlags must not contain duplicates")
+    if set(binding) != {"evidence", "releaseDigest"}:
+        raise ValueError(f"{field_name} fields are unsupported")
     return {
-        "component": _required_str(payload, "component"),
-        "evaluationRunId": _required_str(payload, "evaluationRunId"),
-        "model": {
-            "catalogEntryId": _required_str(model, "catalogEntryId"),
-            "modelId": _required_str(model, "modelId"),
-            "modelVersion": _required_str(model, "modelVersion"),
-        },
-        "registryResourceId": str(_required_uuid(payload, "registryResourceId")),
-        "registryResourceType": _required_resource_type(payload, "registryResourceType"),
-        "releaseId": _required_str(payload, "releaseId"),
-        "replay": {
-            "featureFlags": replay_feature_flags,
-            "guardrailBundleVersion": _required_str(replay, "guardrailBundleVersion"),
-            "judgeModelId": _required_str(replay, "judgeModelId"),
-            "judgeModelVersion": _required_str(replay, "judgeModelVersion"),
-            "judgePromptTemplateVersion": _required_str(replay, "judgePromptTemplateVersion"),
-            "policyBundleVersion": _required_str(replay, "policyBundleVersion"),
-            "providerRouteId": _required_str(replay, "providerRouteId"),
-            "rerankerProfileVersion": _required_str(replay, "rerankerProfileVersion"),
-            "retrievalProfileVersion": _required_str(replay, "retrievalProfileVersion"),
-        },
-        "runtime": {
-            "imageDigest": _required_sha256_prefixed(runtime, "imageDigest"),
-            "sourceRevision": source_revision,
-        },
-        "tenantId": str(_required_uuid(payload, "tenantId")),
+        "evidence": _worm_evidence_reference(binding, "evidence"),
+        "releaseDigest": _required_sha256_prefixed(binding, "releaseDigest"),
     }
 
 
-def _normalize_signed_ci_runtime(
-    payload: Mapping[str, Any], field_name: str, runtime: Mapping[str, Any]
-) -> dict[str, str]:
-    """Bind each D17 release to the signed Jenkins runtime receipt it came from."""
-
-    ci_runtime = _required_mapping(payload, "ciRuntime")
-    manifest_media_type = _required_str(ci_runtime, "manifestMediaType")
-    config_media_type = _required_str(ci_runtime, "configMediaType")
-    supported_media_types = {
-        "application/vnd.oci.image.manifest.v1+json": "application/vnd.oci.image.config.v1+json",
-        "application/vnd.docker.distribution.manifest.v2+json": (
-            "application/vnd.docker.container.image.v1+json"
-        ),
-    }
-    if supported_media_types.get(manifest_media_type) != config_media_type:
-        raise ValueError(f"{field_name} ciRuntime image media types are unsupported")
-    if _required_str(ci_runtime, "result") != "SUCCESS":
-        raise ValueError(f"{field_name} ciRuntime result must be SUCCESS")
-    jenkins_build_url = _required_str(ci_runtime, "jenkinsBuildUrl")
-    if not re.fullmatch(
-        r"https://jenkins\.adapstory\.com/job/infra-build/[1-9][0-9]*/", jenkins_build_url
-    ):
-        raise ValueError(f"{field_name} ciRuntime jenkinsBuildUrl is unsupported")
-    digest = _required_sha256_prefixed(ci_runtime, "digest")
-    if digest != _required_sha256_prefixed(runtime, "imageDigest"):
-        raise ValueError(f"{field_name} ciRuntime digest does not match runtime imageDigest")
-    source_revision = _required_str(runtime, "sourceRevision")
-    refs = {
-        name: _required_str(ci_runtime, name)
-        for name in (
-            "airflowDagsRef",
-            "serpMcpGatewayRef",
-            "serpPipelineRef",
-            "serpContextBenchmarkRef",
-        )
-    }
-    if any(not re.fullmatch(r"[0-9a-f]{40}", value) for value in refs.values()):
-        raise ValueError(f"{field_name} ciRuntime source refs must be full Git SHAs")
-    if refs["serpMcpGatewayRef"] != source_revision:
-        raise ValueError(
-            f"{field_name} ciRuntime gateway ref does not match runtime sourceRevision"
-        )
-    repository = _required_str(ci_runtime, "repository")
-    if not repository.startswith("harbor.adapstory.com/"):
-        raise ValueError(f"{field_name} ciRuntime repository must use internal Harbor")
-    return {
-        "airflowDagsRef": refs["airflowDagsRef"],
-        "configMediaType": config_media_type,
-        "digest": digest,
-        "jenkinsBuildUrl": jenkins_build_url,
-        "manifestMediaType": manifest_media_type,
-        "repository": repository,
-        "result": "SUCCESS",
-        "serpContextBenchmarkRef": refs["serpContextBenchmarkRef"],
-        "serpMcpGatewayRef": refs["serpMcpGatewayRef"],
-        "serpPipelineRef": refs["serpPipelineRef"],
-        "tag": _required_str(ci_runtime, "tag"),
-    }
-
-
-def _validate_model_release_pair(baseline: Mapping[str, Any], candidate: Mapping[str, Any]) -> None:
-    for field_name in ("component", "tenantId", "registryResourceId", "registryResourceType"):
-        if _required_str(baseline, field_name) != _required_str(candidate, field_name):
-            raise ValueError(f"model releases must share {field_name}")
-    if _required_str(baseline, "releaseId") == _required_str(candidate, "releaseId"):
-        raise ValueError("baseline and candidate releaseId must differ")
-    if _required_str(baseline, "evaluationRunId") == _required_str(candidate, "evaluationRunId"):
-        raise ValueError("baseline and candidate evaluationRunId must differ")
-    baseline_replay = _required_mapping(baseline, "replay")
-    candidate_replay = _required_mapping(candidate, "replay")
-    baseline_feature_flags = _required_str_list(baseline_replay, "featureFlags")
-    candidate_feature_flags = _required_str_list(candidate_replay, "featureFlags")
-    if baseline_feature_flags != candidate_feature_flags:
-        raise ValueError("model releases must share replay featureFlags")
-    for field_name in _MODEL_PROMOTION_FROZEN_REPLAY_FIELDS:
-        baseline_value = _required_str(baseline_replay, field_name)
-        candidate_value = _required_str(candidate_replay, field_name)
-        if baseline_value != candidate_value:
-            raise ValueError(f"model releases must share replay {field_name}")
-
-    baseline_model = _required_mapping(baseline, "model")
-    candidate_model = _required_mapping(candidate, "model")
-    profile_treatment_changed = any(
-        _required_str(baseline_replay, field_name) != _required_str(candidate_replay, field_name)
-        for field_name in _MODEL_PROMOTION_TREATMENT_PROFILE_FIELDS
-    )
-    if baseline_model == candidate_model and not profile_treatment_changed:
-        raise ValueError(
-            "baseline and candidate must differ in model, retrieval profile, "
-            "or reranker profile treatment"
-        )
-
-
-def _written_immutable_evidence_reference(
+def _written_worm_evidence_reference(
     snapshot: Mapping[str, Any], artifact_path: str, field_name: str
 ) -> dict[str, str]:
     if _required_str(snapshot, "artifactPath") != artifact_path:
@@ -1377,9 +1580,11 @@ def _written_immutable_evidence_reference(
     if _required_str(snapshot, "objectLockMode") != "COMPLIANCE":
         raise ValueError(f"{field_name} writer did not apply COMPLIANCE retention")
     return {
-        "artifactPath": artifact_path,
-        "artifactSha256": "sha256:" + _required_sha256_hex(snapshot, "artifactSha256"),
-        "artifactVersionId": _required_str(snapshot, "artifactVersionId"),
+        "s3Uri": artifact_path,
+        "sha256": "sha256:" + _required_sha256_hex(snapshot, "artifactSha256"),
+        "versionId": _required_str(snapshot, "artifactVersionId"),
+        "objectLockMode": "COMPLIANCE",
+        "retainUntil": _required_datetime_string(snapshot, "objectLockRetainUntil"),
     }
 
 
@@ -3801,38 +4006,6 @@ def write_nightly_registry_receipts_artifact(
     )
 
 
-def write_improvement_spec_artifact(
-    plan_json: Mapping[str, Any] | str,
-    promotion_snapshot: Mapping[str, Any],
-) -> dict[str, Any]:
-    plan = _json_object(plan_json, "plan_json")
-    _reject_raw_secrets(plan)
-    if _required_str(plan, "dag_id") != "serp_benchmark_improvement_wave":
-        raise ValueError("plan dag_id does not match improvement artifact writer")
-    _required_artifact_paths(
-        plan,
-        (
-            "airflow_plan",
-            "benchmark_catalog",
-            "benchmark_catalog_receipt",
-            "improvement_spec",
-            "paired_eval_request",
-            "paired_eval_receipt",
-        ),
-    )
-    artifact_paths = _required_mapping(plan, "artifact_paths")
-    promotion = _validated_d19_promotion_snapshot(plan, promotion_snapshot)
-    payload = _improvement_spec_payload(plan, artifact_paths, promotion)
-    artifact_path = artifact_paths["improvement_spec"]
-    _write_json_artifact(artifact_path, payload)
-    return _artifact_result(
-        artifact_path,
-        artifact_type="improvement_spec",
-        operation_id=_required_str(plan, "operation_id"),
-        payload=payload,
-    )
-
-
 def write_paired_eval_request_artifact(
     plan_json: Mapping[str, Any] | str,
     catalog_snapshot: Mapping[str, Any],
@@ -3846,7 +4019,12 @@ def write_paired_eval_request_artifact(
         raise ValueError("plan dag_id does not match paired-eval request writer")
     artifact_paths = _required_artifact_paths(
         plan,
-        ("benchmark_catalog", "benchmark_catalog_receipt", "paired_eval_request"),
+        (
+            "benchmark_catalog",
+            "benchmark_catalog_receipt",
+            "paired_eval_request",
+            "paired_eval_receipt",
+        ),
     )
     promotion = _validated_d19_promotion_snapshot(plan, promotion_snapshot)
     payload = _paired_eval_request_payload(plan, catalog_snapshot, promotion)
@@ -3864,6 +4042,7 @@ def write_paired_eval_request_artifact(
             operation_id=_required_str(plan, "operation_id"),
             payload=payload,
         ),
+        "evidenceOutputPath": _required_str(artifact_paths, "paired_eval_receipt"),
         "requestEvidence": request_evidence,
     }
 
@@ -5966,52 +6145,34 @@ def _paired_eval_request_payload(
     catalog_snapshot: Mapping[str, Any],
     promotion: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Build a canonical, scoreless request bound to a WORM catalog snapshot."""
+    """Build PairedEvaluationRequest/v2 without inline execution selections."""
 
-    selected_suite_ids = _required_str_list(plan, "selected_suite_ids")
-    catalog_evidence, suite_summary = _paired_eval_catalog_evidence(plan, catalog_snapshot)
-    catalog_suite_ids = [item["suiteId"] for item in suite_summary]
-    if selected_suite_ids != catalog_suite_ids:
-        raise ValueError("paired evaluator request must use the canonical suite catalog order")
+    catalog_evidence = _paired_eval_catalog_evidence(plan, catalog_snapshot)
     baseline = _required_mapping(promotion, "baselineRelease")
     candidate = _required_mapping(promotion, "candidateRelease")
-    baseline_release = _required_mapping(baseline, "release")
-    candidate_release = _required_mapping(candidate, "release")
     return {
-        "baselineRunId": _required_str(baseline_release, "evaluationRunId"),
-        "catalogEvidence": catalog_evidence,
-        "candidateId": _required_str(candidate_release, "releaseId"),
-        "candidateRunId": _required_str(candidate_release, "evaluationRunId"),
-        "improvementSpecId": _required_str(plan, "improvement_spec_id"),
-        "metricDefinitionAuthority": "executor-pinned-metric-definition-profile",
-        "modelPromotion": {
-            "baselineReleaseId": _required_str(baseline_release, "releaseId"),
-            "candidateReleaseId": _required_str(candidate_release, "releaseId"),
-            "promotionEvidence": dict(_required_mapping(promotion, "promotionEvidence")),
-            "promotionId": _required_str(promotion, "promotionId"),
-        },
+        "schema": "PairedEvaluationRequest/v2",
         "requestId": _required_str(plan, "operation_id"),
-        "replay": {
-            "baseline": dict(_required_mapping(baseline_release, "replay")),
-            "candidate": dict(_required_mapping(candidate_release, "replay")),
-        },
-        "selectedSuiteIds": selected_suite_ids,
-        "suiteBindings": [
-            {
-                "adapterId": (
-                    f"catalog:{item['suiteId']}@{catalog_evidence['catalogArtifactVersionId']}"
-                ),
-                "executionStatus": item["executionStatus"],
-                "suiteId": item["suiteId"],
-            }
-            for item in suite_summary
-        ],
+        "evaluationReleasePromotionEvidence": dict(
+            _required_mapping(promotion, "promotionEvidence")
+        ),
+        "baselineReleaseEvidence": dict(_required_mapping(baseline, "evidence")),
+        "candidateReleaseEvidence": dict(_required_mapping(candidate, "evidence")),
+        "evaluationBindingId": _required_str(plan, "evaluation_binding_id"),
+        "evaluationBindingEvidence": dict(_required_mapping(plan, "evaluation_binding_evidence")),
+        "metricCompatibilityMatrixEvidence": dict(
+            _required_mapping(plan, "metric_compatibility_matrix_evidence")
+        ),
+        "objectiveSpecificationEvidence": dict(
+            _required_mapping(plan, "objective_specification_evidence")
+        ),
+        "benchmarkCatalogEvidence": catalog_evidence,
     }
 
 
 def _paired_eval_catalog_evidence(
     plan: Mapping[str, Any], catalog_snapshot: Mapping[str, Any]
-) -> tuple[dict[str, str], list[dict[str, str]]]:
+) -> dict[str, dict[str, str]]:
     """Bind D19 to exactly the catalog materialized by its acquisition workload."""
 
     artifact_paths = _required_artifact_paths(
@@ -6038,162 +6199,47 @@ def _paired_eval_catalog_evidence(
         raise ValueError("paired evaluator catalog status is unsupported")
     if (catalog_status == "ready") != (not blocking_suite_ids):
         raise ValueError("paired evaluator catalog status does not match blocking suites")
-    return (
-        {
-            "catalogArtifactPath": catalog_path,
-            "catalogArtifactSha256": "sha256:"
-            + _required_sha256_hex(catalog_snapshot, "artifactSha256"),
-            "catalogArtifactVersionId": _required_str(catalog_snapshot, "artifactVersionId"),
-            "catalogReceiptPath": receipt_path,
-            "catalogReceiptSha256": "sha256:"
-            + _required_sha256_hex(catalog_snapshot, "catalogReceiptSha256"),
-            "catalogReceiptVersionId": _required_str(catalog_snapshot, "catalogReceiptVersionId"),
-            "catalogStatus": catalog_status,
+    return {
+        "catalog": {
+            "s3Uri": catalog_path,
+            "sha256": "sha256:" + _required_sha256_hex(catalog_snapshot, "artifactSha256"),
+            "versionId": _required_str(catalog_snapshot, "artifactVersionId"),
         },
-        suite_summary,
-    )
+        "receipt": {
+            "s3Uri": receipt_path,
+            "sha256": "sha256:" + _required_sha256_hex(catalog_snapshot, "catalogReceiptSha256"),
+            "versionId": _required_str(catalog_snapshot, "catalogReceiptVersionId"),
+        },
+    }
 
 
 def _validated_d19_promotion_snapshot(
     plan: Mapping[str, Any], snapshot: Mapping[str, Any]
 ) -> dict[str, Any]:
-    evidence = _immutable_evidence_reference(snapshot, "promotionEvidence")
-    if evidence != _immutable_evidence_reference(plan, "model_promotion_evidence"):
+    evidence = _worm_evidence_reference(snapshot, "promotionEvidence")
+    if evidence != _worm_evidence_reference(plan, "evaluation_release_promotion_evidence"):
         raise ValueError("D19 promotion snapshot evidence does not match plan")
     promotion = _required_mapping(snapshot, "promotion")
-    baseline = _validated_model_release_binding(
+    if _required_str(promotion, "schema") != _EVALUATION_RELEASE_PROMOTION_SCHEMA:
+        raise ValueError("D19 promotion schema is unsupported")
+    baseline = _validated_promoted_release_reference(
         _required_mapping(promotion, "baselineRelease"), "baselineRelease"
     )
-    candidate = _validated_model_release_binding(
+    candidate = _validated_promoted_release_reference(
         _required_mapping(promotion, "candidateRelease"), "candidateRelease"
     )
-    _validate_model_release_pair(baseline["release"], candidate["release"])
     for field_name, plan_field in (
         ("tenantId", "tenant_id"),
         ("registryResourceId", "registry_resource_id"),
         ("registryResourceType", "registry_resource_type"),
     ):
-        expected = _required_str(baseline["release"], field_name)
-        candidate_value = _required_str(candidate["release"], field_name)
-        if expected != candidate_value or expected != _required_str(plan, plan_field):
+        if _required_str(promotion, field_name) != _required_str(plan, plan_field):
             raise ValueError(f"D19 promotion {field_name} does not match plan")
     return {
         "baselineRelease": baseline,
         "candidateRelease": candidate,
         "promotionEvidence": evidence,
         "promotionId": _required_str(promotion, "promotionId"),
-    }
-
-
-def _improvement_spec_payload(
-    plan: Mapping[str, Any],
-    artifact_paths: Mapping[str, str],
-    promotion: Mapping[str, Any],
-) -> dict[str, Any]:
-    generated_at = _required_datetime_string(plan, "generated_at")
-    selected_suite_ids = _required_str_list(plan, "selected_suite_ids")
-    baseline = _required_mapping(promotion, "baselineRelease")
-    candidate = _required_mapping(promotion, "candidateRelease")
-    baseline_release = _required_mapping(baseline, "release")
-    candidate_release = _required_mapping(candidate, "release")
-    baseline_run_id = _required_str(baseline_release, "evaluationRunId")
-    return {
-        "acceptance": {
-            "keepRule": {"type": "multi-metric"},
-            "rejectRule": {"type": "fail-fast"},
-        },
-        "apiVersion": "serp.adapstory.ai/v1alpha1",
-        "artifact_paths": dict(artifact_paths),
-        "baseline": {
-            "beatCondition": {
-                "bootstrapConfidenceLevel": "0.95",
-                "minimumMultiplier": "2.0",
-                "pairedRunCount": 5,
-                "rule": "all_required_primary_accuracy_metrics_meet_multiplier",
-            },
-            "normalizedGateFloor": SERP_NORMALIZED_GATE_FLOOR,
-            "referenceRunId": baseline_run_id,
-            "source": "validated-internal-baseline",
-        },
-        "benchmarks": {"requiredSuites": selected_suite_ids},
-        "budgets": {
-            "maxBenchmarkRuns": _required_positive_int(plan, "max_benchmark_runs"),
-            "maxCostUsdEquivalent": 50,
-            "wallClockBudgetMinutes": 180,
-        },
-        "candidate": {
-            "id": _required_str(candidate_release, "releaseId"),
-            "runId": _required_str(candidate_release, "evaluationRunId"),
-            "scoreAuthority": "executor-receipt-only",
-        },
-        "dryRun": False,
-        "constraints": {
-            "mustHold": [
-                "Policy Compliance Rate == 1.0 on blocking cases",
-                "Citation Accuracy >= 0.95",
-                "Evidence Completeness >= 0.99",
-            ],
-        },
-        "evidence": {
-            "requiredArtifacts": [
-                "candidate_diff_summary",
-                "benchmark_report",
-                "regression_report",
-                "cost_report",
-                "rollout_decision",
-            ],
-        },
-        "generatedAt": generated_at,
-        "kind": "ImprovementSpec",
-        "metadata": {
-            "id": _required_str(plan, "improvement_spec_id"),
-            "owner": {"role": "Eval Engineer", "team": "serp-platform"},
-            "status": "draft",
-        },
-        "modelGovernance": {
-            "baselineReleaseId": _required_str(baseline_release, "releaseId"),
-            "candidateReleaseId": _required_str(candidate_release, "releaseId"),
-            "promotionEvidence": dict(_required_mapping(promotion, "promotionEvidence")),
-            "promotionId": _required_str(promotion, "promotionId"),
-            "status": "approved-for-evaluation",
-        },
-        "objective": {
-            "optimizationDirection": "maximize",
-            "primaryMetricAuthority": "executor-pinned-metric-definition-profile",
-            "type": "benchmark-ratchet",
-        },
-        "operationId": _required_str(plan, "operation_id"),
-        "registryResourceId": _required_str(plan, "registry_resource_id"),
-        "registryResourceType": _required_resource_type(plan, "registry_resource_type"),
-        "replay": {
-            "baseline": dict(_required_mapping(baseline_release, "replay")),
-            "candidate": dict(_required_mapping(candidate_release, "replay")),
-        },
-        "rollback": {
-            "automatic": True,
-            "policyRef": _required_str(plan, "rollback_policy_ref"),
-            "revertTo": {
-                "referenceRunId": baseline_run_id,
-                "type": "last-validated-baseline",
-            },
-            "triggerConditions": [
-                "mandatory_suite_below_floor",
-                "policy_compliance_regression",
-            ],
-        },
-        "scope": {
-            "allowedComponents": ["reranker-profile-public-docs"],
-            "forbiddenChanges": [
-                "api-breaking-change",
-                "policy-bypass",
-                "manual-runtime-hotfix",
-                "new-legacy-compatibility-layer",
-            ],
-            "kind": "bounded",
-        },
-        "selectedSuiteIds": selected_suite_ids,
-        "status": "awaiting-executor-derived-metrics",
-        "tenantId": _required_str(plan, "tenant_id"),
     }
 
 

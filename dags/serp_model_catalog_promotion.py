@@ -1,4 +1,4 @@
-"""D17 immutable model-catalog promotion authority for SERP evaluation."""
+"""D17 immutable exact-nine EvaluationRelease/v2 promotion authority."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ default_args = {
 dag = DAG(
     "serp_model_catalog_promotion",
     default_args=default_args,
-    description="WORM-bound D17 model release promotion for D19 benchmark evaluations",
+    description="WORM-bound D17 exact-nine evaluation release promotion for D19",
     schedule=None,
     catchup=False,
     is_paused_upon_creation=True,

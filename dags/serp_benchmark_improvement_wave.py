@@ -26,10 +26,16 @@ from dags.serp_eval_contracts import (
     load_materialized_benchmark_catalog_snapshot,
     load_model_catalog_promotion_snapshot,
     write_airflow_plan_artifact,
-    write_improvement_spec_artifact,
     write_paired_eval_request_artifact,
 )
 from dags.serp_evidence_workload_identity import (
+    bc21_workload_env_vars,
+    bc21_workload_volume_mounts,
+    bc21_workload_volumes,
+    hardened_runtime_container_security_context,
+    hardened_runtime_pod_security_context,
+    hardened_runtime_volume_mounts,
+    hardened_runtime_volumes,
     kubernetes_pod_launcher_executor_config,
     minio_web_identity_env_vars,
     minio_web_identity_executor_config,
@@ -53,9 +59,18 @@ D19_NATIVE_ADAPTER_RUNNER_RESOURCES = k8s.V1ResourceRequirements(
 _D19_EVALUATOR_ENV_NAMES = (
     "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT",
     "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION",
+    "ADAPSTORY_SERP_BC21_BASE_URL",
 )
-D19_EVALUATOR_WEB_IDENTITY_VOLUMES = minio_web_identity_volumes()
-D19_EVALUATOR_WEB_IDENTITY_VOLUME_MOUNTS = minio_web_identity_volume_mounts()
+D19_EVALUATOR_VOLUMES = [
+    *minio_web_identity_volumes(),
+    *bc21_workload_volumes(),
+    *hardened_runtime_volumes(),
+]
+D19_EVALUATOR_VOLUME_MOUNTS = [
+    *minio_web_identity_volume_mounts(),
+    *bc21_workload_volume_mounts(),
+    *hardened_runtime_volume_mounts(),
+]
 D19_EVALUATOR_EXECUTOR_CONFIG = minio_web_identity_executor_config(
     service_account_name=D19_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT,
     labels=D19_EVALUATOR_WORKLOAD_LABELS,
@@ -65,17 +80,16 @@ D19_EVALUATOR_EXECUTOR_CONFIG = minio_web_identity_executor_config(
 def d19_evaluator_env_vars() -> list[k8s.V1EnvVar]:
     """Return the minimal STS-only runtime contract for paired evaluation."""
 
-    return minio_web_identity_env_vars(_D19_EVALUATOR_ENV_NAMES)
+    return [
+        *minio_web_identity_env_vars(_D19_EVALUATOR_ENV_NAMES),
+        *bc21_workload_env_vars(),
+    ]
 
 
 def validate_benchmark_improvement_wave_plan(**context: Any) -> str:
     dag_run = context.get("dag_run")
     conf = getattr(dag_run, "conf", None) or {}
     return write_airflow_plan_artifact(build_benchmark_improvement_wave_plan(conf))
-
-
-def write_improvement_spec(plan_json: str, promotion_snapshot: dict[str, Any]) -> dict[str, Any]:
-    return write_improvement_spec_artifact(plan_json, promotion_snapshot)
 
 
 def load_materialized_benchmark_catalog(plan_json: str) -> dict[str, Any]:
@@ -114,17 +128,6 @@ dag = DAG(
 validate_plan = PythonOperator(
     task_id="validate_benchmark_improvement_wave_plan",
     python_callable=validate_benchmark_improvement_wave_plan,
-    executor_config=D19_EVALUATOR_EXECUTOR_CONFIG,
-    dag=dag,
-)
-
-write_spec = PythonOperator(
-    task_id="write_improvement_spec",
-    python_callable=write_improvement_spec,
-    op_args=[
-        "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') }}",
-        "{{ ti.xcom_pull(task_ids='load_model_catalog_promotion') }}",
-    ],
     executor_config=D19_EVALUATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
@@ -202,23 +205,23 @@ run_paired_evaluation = KubernetesPodOperator(
             "{{ ti.xcom_pull(task_ids='write_paired_eval_request')"
             "['requestEvidence']['artifactVersionId'] }}"
         ),
-        "--evidence-output",
+        "--paired-eval-request-sha256",
         (
-            "{{ ti.xcom_pull(task_ids='write_improvement_spec')"
-            "['payload']['artifact_paths']['paired_eval_receipt'] }}"
+            "{{ ti.xcom_pull(task_ids='write_paired_eval_request')"
+            "['requestEvidence']['artifactSha256'] }}"
         ),
+        "--evidence-output",
+        "{{ ti.xcom_pull(task_ids='write_paired_eval_request')['evidenceOutputPath'] }}",
     ],
     env_vars=d19_evaluator_env_vars(),
     service_account_name=D19_EVALUATOR_WORKLOAD_SERVICE_ACCOUNT,
     automount_service_account_token=False,
-    volumes=D19_EVALUATOR_WEB_IDENTITY_VOLUMES,
-    volume_mounts=D19_EVALUATOR_WEB_IDENTITY_VOLUME_MOUNTS,
+    volumes=D19_EVALUATOR_VOLUMES,
+    volume_mounts=D19_EVALUATOR_VOLUME_MOUNTS,
     labels=D19_EVALUATOR_WORKLOAD_LABELS,
     container_resources=D19_NATIVE_ADAPTER_RUNNER_RESOURCES,
-    container_security_context=k8s.V1SecurityContext(
-        allow_privilege_escalation=False,
-        capabilities=k8s.V1Capabilities(drop=["ALL"]),
-    ),
+    security_context=hardened_runtime_pod_security_context(),
+    container_security_context=hardened_runtime_container_security_context(),
     get_logs=True,
     log_events_on_failure=True,
     random_name_suffix=True,
@@ -241,9 +244,6 @@ notify_governance = PythonOperator(
 
 validate_plan >> materialize_catalog >> load_catalog
 validate_plan >> load_promotion
-load_catalog >> write_spec
-load_promotion >> write_spec
 load_catalog >> write_request
 load_promotion >> write_request
-write_spec >> run_paired_evaluation
 write_request >> run_paired_evaluation >> notify_governance
