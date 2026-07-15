@@ -236,8 +236,6 @@ def _d19_conf() -> dict[str, object]:
     return {
         "actor_id": "airflow-serp-eval-runner",
         "artifact_root_path": "s3://airflow-serp-evidence/serp-evals",
-        "evaluation_binding_evidence": _reference("evaluation-binding", "b"),
-        "evaluation_binding_id": BINDING_ID,
         "evaluation_release_promotion_evidence": _reference("d17-promotion", "c"),
         "generated_at": "2026-07-15T05:10:00Z",
         "metric_compatibility_matrix_evidence": _reference("metric-matrix", "d"),
@@ -393,8 +391,29 @@ def test_d19_builds_scoreless_reference_only_paired_request_v2(
     monkeypatch.setattr(
         "dags.serp_eval_contracts.write_immutable_evidence_snapshot", _snapshot_writer
     )
+    lifecycle_result = {
+        "schema": "BC21AllNineBenchmarkPackLifecycleResult/v1",
+        "tenantId": TENANT_ID,
+        "evaluationBindingId": BINDING_ID,
+        "evaluationBindingEvidence": _reference("evaluation-binding", "b"),
+        "bindingFingerprint": "sha256:" + "f" * 64,
+        "expiresAt": "2026-07-15T07:10:00Z",
+        "evaluationReleasePromotionEvidence": promotion["promotionEvidence"],
+        "baselineReleaseEvidence": baseline,
+        "candidateReleaseEvidence": candidate,
+        "baselineReleaseDigest": promotion["promotion"]["baselineRelease"]["releaseDigest"],
+        "candidateReleaseDigest": promotion["promotion"]["candidateRelease"]["releaseDigest"],
+        "packMaterialBindings": [
+            {"suiteId": suite_id} for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+        ],
+        "suiteExecutionBindings": [
+            {"suiteId": suite_id} for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+        ],
+        "indexedReceiptCount": 18,
+        "productionActivationRequested": False,
+    }
     artifact = write_paired_eval_request_artifact(
-        plan.to_canonical_json(), _catalog_snapshot(plan), promotion
+        plan.to_canonical_json(), _catalog_snapshot(plan), promotion, lifecycle_result
     )
     request = artifact["payload"]
 
@@ -406,7 +425,7 @@ def test_d19_builds_scoreless_reference_only_paired_request_v2(
     assert request["baselineReleaseEvidence"] == baseline
     assert request["candidateReleaseEvidence"] == candidate
     assert request["evaluationBindingId"] == BINDING_ID
-    assert request["evaluationBindingEvidence"] == _d19_conf()["evaluation_binding_evidence"]
+    assert request["evaluationBindingEvidence"] == lifecycle_result["evaluationBindingEvidence"]
     assert (
         request["metricCompatibilityMatrixEvidence"]
         == _d19_conf()["metric_compatibility_matrix_evidence"]
@@ -431,7 +450,15 @@ def test_d19_builds_scoreless_reference_only_paired_request_v2(
 
 @pytest.mark.parametrize(
     "field",
-    ("candidate_id", "profileId", "packVersionId", "score", "caseResults"),
+    (
+        "candidate_id",
+        "evaluation_binding_evidence",
+        "evaluation_binding_id",
+        "profileId",
+        "packVersionId",
+        "score",
+        "caseResults",
+    ),
 )
 def test_d19_rejects_inline_selection_or_scoring_fields(field: str) -> None:
     conf = _d19_conf()

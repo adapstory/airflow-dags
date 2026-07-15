@@ -101,6 +101,8 @@ _FORBIDDEN_INLINE_D19_FIELDS = frozenset(
         "candidate_evaluation",
         "candidateEvaluation",
         "candidate_run_id",
+        "evaluation_binding_evidence",
+        "evaluation_binding_id",
         "feature_flags",
         "guardrail_bundle_version",
         "judge_model_id",
@@ -916,9 +918,7 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
     generated_at = _required_datetime_string(payload, "generated_at")
     registry_resource_type = _required_resource_type(payload, "registry_resource_type")
     registry_resource_id = _required_uuid(payload, "registry_resource_id")
-    evaluation_binding_id = str(_required_uuid(payload, "evaluation_binding_id"))
     promotion_evidence = _worm_evidence_reference(payload, "evaluation_release_promotion_evidence")
-    evaluation_binding_evidence = _worm_evidence_reference(payload, "evaluation_binding_evidence")
     metric_matrix_evidence = _worm_evidence_reference(
         payload, "metric_compatibility_matrix_evidence"
     )
@@ -928,7 +928,6 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
         raise ValueError("benchmark improvement wave requires an s3:// artifact_root_path")
     for field_name, evidence in (
         ("evaluation_release_promotion_evidence", promotion_evidence),
-        ("evaluation_binding_evidence", evaluation_binding_evidence),
         ("metric_compatibility_matrix_evidence", metric_matrix_evidence),
         ("objective_specification_evidence", objective_evidence),
     ):
@@ -936,9 +935,7 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
     operation_id = _operation_id(
         "serp-airflow-benchmark-improvement-wave",
         tenant_id,
-        evaluation_binding_id,
         promotion_evidence["sha256"],
-        evaluation_binding_evidence["sha256"],
         metric_matrix_evidence["sha256"],
         objective_evidence["sha256"],
         generated_at,
@@ -958,12 +955,20 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
                 ),
                 ("paired_eval_request", "paired-eval-request.json"),
                 ("paired_eval_receipt", "paired-eval-receipt.json"),
+                ("benchmark_pack_build_result", "benchmark-pack-build-result.json"),
+                (
+                    "benchmark_pack_lifecycle_result",
+                    "benchmark-pack-lifecycle-result.json",
+                ),
+                (
+                    "paired_evaluation_assembly_plan",
+                    "paired-evaluation-assembly-plan.json",
+                ),
+                ("paired_execution_manifest", "paired-execution-manifest.json"),
             ),
         ),
         "dag_id": "serp_benchmark_improvement_wave",
         "generated_at": generated_at,
-        "evaluation_binding_evidence": evaluation_binding_evidence,
-        "evaluation_binding_id": evaluation_binding_id,
         "evaluation_release_promotion_evidence": promotion_evidence,
         "metric_compatibility_matrix_evidence": metric_matrix_evidence,
         "normalized_gate_floor": SERP_NORMALIZED_GATE_FLOOR,
@@ -977,7 +982,23 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
                 "materialize_live_benchmark_catalog",
                 "load_materialized_benchmark_catalog",
                 "load_model_catalog_promotion",
+                "build_exact_nine_benchmark_packs",
+                "register_exact_nine_evaluation_binding",
+                "load_exact_nine_evaluation_binding",
                 "write_paired_eval_request",
+                "materialize_official_harness_work_items",
+                *(
+                    (
+                        "run_official_harness_"
+                        f"{suite_id.casefold().replace(' ', '_').replace('-', '_')}_"
+                        f"{side}_{repetition}"
+                    )
+                    for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+                    for repetition in range(1, 6)
+                    for side in ("baseline", "candidate")
+                ),
+                "write_paired_evaluation_assembly_plan",
+                "assemble_paired_execution_manifest",
                 "run_paired_benchmark_evaluation",
                 "notify_governance_eval_surfaces",
             )
@@ -4010,6 +4031,7 @@ def write_paired_eval_request_artifact(
     plan_json: Mapping[str, Any] | str,
     catalog_snapshot: Mapping[str, Any],
     promotion_snapshot: Mapping[str, Any],
+    lifecycle_result: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Persist the scoreless D19 request consumed by the paired evaluator."""
 
@@ -4027,7 +4049,8 @@ def write_paired_eval_request_artifact(
         ),
     )
     promotion = _validated_d19_promotion_snapshot(plan, promotion_snapshot)
-    payload = _paired_eval_request_payload(plan, catalog_snapshot, promotion)
+    lifecycle = _validated_d19_lifecycle_result(plan, promotion, lifecycle_result)
+    payload = _paired_eval_request_payload(plan, catalog_snapshot, promotion, lifecycle)
     artifact_path = artifact_paths["paired_eval_request"]
     request_evidence = write_immutable_evidence_snapshot(
         artifact_path,
@@ -6144,6 +6167,7 @@ def _paired_eval_request_payload(
     plan: Mapping[str, Any],
     catalog_snapshot: Mapping[str, Any],
     promotion: Mapping[str, Any],
+    lifecycle: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Build PairedEvaluationRequest/v2 without inline execution selections."""
 
@@ -6158,8 +6182,10 @@ def _paired_eval_request_payload(
         ),
         "baselineReleaseEvidence": dict(_required_mapping(baseline, "evidence")),
         "candidateReleaseEvidence": dict(_required_mapping(candidate, "evidence")),
-        "evaluationBindingId": _required_str(plan, "evaluation_binding_id"),
-        "evaluationBindingEvidence": dict(_required_mapping(plan, "evaluation_binding_evidence")),
+        "evaluationBindingId": _required_str(lifecycle, "evaluationBindingId"),
+        "evaluationBindingEvidence": dict(
+            _required_mapping(lifecycle, "evaluationBindingEvidence")
+        ),
         "metricCompatibilityMatrixEvidence": dict(
             _required_mapping(plan, "metric_compatibility_matrix_evidence")
         ),
@@ -6167,6 +6193,89 @@ def _paired_eval_request_payload(
             _required_mapping(plan, "objective_specification_evidence")
         ),
         "benchmarkCatalogEvidence": catalog_evidence,
+    }
+
+
+def _validated_d19_lifecycle_result(
+    plan: Mapping[str, Any],
+    promotion: Mapping[str, Any],
+    lifecycle_result: Mapping[str, Any],
+) -> dict[str, Any]:
+    expected_fields = {
+        "baselineReleaseDigest",
+        "baselineReleaseEvidence",
+        "bindingFingerprint",
+        "candidateReleaseDigest",
+        "candidateReleaseEvidence",
+        "evaluationBindingEvidence",
+        "evaluationBindingId",
+        "evaluationReleasePromotionEvidence",
+        "expiresAt",
+        "indexedReceiptCount",
+        "packMaterialBindings",
+        "productionActivationRequested",
+        "schema",
+        "suiteExecutionBindings",
+        "tenantId",
+    }
+    if set(lifecycle_result) != expected_fields:
+        raise ValueError("D19 benchmark pack lifecycle result fields are unsupported")
+    if _required_str(lifecycle_result, "schema") != "BC21AllNineBenchmarkPackLifecycleResult/v1":
+        raise ValueError("D19 benchmark pack lifecycle result schema is unsupported")
+    if _required_str(lifecycle_result, "tenantId") != _required_str(plan, "tenant_id"):
+        raise ValueError("D19 benchmark pack lifecycle tenantId does not match plan")
+    binding_id = str(_required_uuid(lifecycle_result, "evaluationBindingId"))
+    binding_evidence = _worm_evidence_reference(lifecycle_result, "evaluationBindingEvidence")
+    _require_worm_evidence_within_artifact_root(
+        binding_evidence,
+        _required_str(plan, "artifact_root_path"),
+        "evaluationBindingEvidence",
+    )
+    promotion_evidence = _worm_evidence_reference(
+        lifecycle_result, "evaluationReleasePromotionEvidence"
+    )
+    if promotion_evidence != _required_mapping(promotion, "promotionEvidence"):
+        raise ValueError("D19 lifecycle promotion evidence does not match D17")
+    baseline_evidence = _worm_evidence_reference(lifecycle_result, "baselineReleaseEvidence")
+    candidate_evidence = _worm_evidence_reference(lifecycle_result, "candidateReleaseEvidence")
+    baseline = _required_mapping(promotion, "baselineRelease")
+    candidate = _required_mapping(promotion, "candidateRelease")
+    if baseline_evidence != _required_mapping(baseline, "evidence"):
+        raise ValueError("D19 lifecycle baseline release does not match D17")
+    if candidate_evidence != _required_mapping(candidate, "evidence"):
+        raise ValueError("D19 lifecycle candidate release does not match D17")
+    baseline_digest = _required_sha256_prefixed(lifecycle_result, "baselineReleaseDigest")
+    candidate_digest = _required_sha256_prefixed(lifecycle_result, "candidateReleaseDigest")
+    if baseline_digest != _required_str(baseline, "releaseDigest"):
+        raise ValueError("D19 lifecycle baseline digest does not match D17")
+    if candidate_digest != _required_str(candidate, "releaseDigest"):
+        raise ValueError("D19 lifecycle candidate digest does not match D17")
+    binding_fingerprint = _required_sha256_prefixed(lifecycle_result, "bindingFingerprint")
+    _required_datetime_string(lifecycle_result, "expiresAt")
+    indexed_receipt_count = lifecycle_result.get("indexedReceiptCount")
+    if indexed_receipt_count != 18:
+        raise ValueError("D19 lifecycle must prove exactly 18 indexed receipts")
+    if lifecycle_result.get("productionActivationRequested") is not False:
+        raise ValueError("D19 lifecycle must not request production activation")
+    pack_material_bindings = _required_object_list(lifecycle_result, "packMaterialBindings")
+    suite_execution_bindings = _required_object_list(lifecycle_result, "suiteExecutionBindings")
+    for field_name, bindings in (
+        ("packMaterialBindings", pack_material_bindings),
+        ("suiteExecutionBindings", suite_execution_bindings),
+    ):
+        observed_suites = [_required_str(item, "suiteId") for item in bindings]
+        if observed_suites != list(MANDATORY_SERP_BENCHMARK_SUITES):
+            raise ValueError(f"D19 lifecycle {field_name} must cover the canonical nine")
+    return {
+        **dict(lifecycle_result),
+        "baselineReleaseDigest": baseline_digest,
+        "baselineReleaseEvidence": baseline_evidence,
+        "bindingFingerprint": binding_fingerprint,
+        "candidateReleaseDigest": candidate_digest,
+        "candidateReleaseEvidence": candidate_evidence,
+        "evaluationBindingEvidence": binding_evidence,
+        "evaluationBindingId": binding_id,
+        "evaluationReleasePromotionEvidence": promotion_evidence,
     }
 
 

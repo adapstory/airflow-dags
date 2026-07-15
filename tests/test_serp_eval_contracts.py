@@ -1925,7 +1925,8 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
     assert plan.payload["evaluation_release_promotion_evidence"] == _d19_worm_evidence(
         "model-releases/d17-promotion", "c"
     )
-    assert plan.payload["evaluation_binding_id"] == ("018f5e13-2d73-7a77-a052-8d1bcbf96701")
+    assert "evaluation_binding_id" not in plan.payload
+    assert "evaluation_binding_evidence" not in plan.payload
     assert plan.payload["artifact_paths"] == {
         "airflow_plan": (
             "s3://airflow-serp-evidence/serp-evals/"
@@ -1939,9 +1940,25 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
             "s3://airflow-serp-evidence/serp-evals/"
             f"{plan.payload['operation_id']}/benchmark-catalog-materialization-receipt.json"
         ),
+        "benchmark_pack_build_result": (
+            "s3://airflow-serp-evidence/serp-evals/"
+            f"{plan.payload['operation_id']}/benchmark-pack-build-result.json"
+        ),
+        "benchmark_pack_lifecycle_result": (
+            "s3://airflow-serp-evidence/serp-evals/"
+            f"{plan.payload['operation_id']}/benchmark-pack-lifecycle-result.json"
+        ),
         "paired_eval_receipt": (
             "s3://airflow-serp-evidence/serp-evals/"
             f"{plan.payload['operation_id']}/paired-eval-receipt.json"
+        ),
+        "paired_evaluation_assembly_plan": (
+            "s3://airflow-serp-evidence/serp-evals/"
+            f"{plan.payload['operation_id']}/paired-evaluation-assembly-plan.json"
+        ),
+        "paired_execution_manifest": (
+            "s3://airflow-serp-evidence/serp-evals/"
+            f"{plan.payload['operation_id']}/paired-execution-manifest.json"
         ),
         "paired_eval_request": (
             "s3://airflow-serp-evidence/serp-evals/"
@@ -1953,7 +1970,23 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
         "materialize_live_benchmark_catalog",
         "load_materialized_benchmark_catalog",
         "load_model_catalog_promotion",
+        "build_exact_nine_benchmark_packs",
+        "register_exact_nine_evaluation_binding",
+        "load_exact_nine_evaluation_binding",
         "write_paired_eval_request",
+        "materialize_official_harness_work_items",
+        *[
+            (
+                "run_official_harness_"
+                f"{suite_id.casefold().replace(' ', '_').replace('-', '_')}_"
+                f"{side}_{repetition}"
+            )
+            for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+            for repetition in range(1, 6)
+            for side in ("baseline", "candidate")
+        ],
+        "write_paired_evaluation_assembly_plan",
+        "assemble_paired_execution_manifest",
         "run_paired_benchmark_evaluation",
         "notify_governance_eval_surfaces",
     ]
@@ -2004,16 +2037,19 @@ def test_paired_eval_request_derives_canonical_catalog_bindings_as_worm_evidence
         "write_immutable_evidence_snapshot",
         snapshot_writer,
     )
+    promotion_snapshot = _d19_promotion_snapshot(plan)
+    lifecycle_result = _d19_lifecycle_result(promotion_snapshot)
     request_artifact = write_paired_eval_request_artifact(
         plan.to_canonical_json(),
         _d19_catalog_snapshot(plan),
-        _d19_promotion_snapshot(plan),
+        promotion_snapshot,
+        lifecycle_result,
     )
     request = request_artifact["payload"]
 
     assert request["schema"] == "PairedEvaluationRequest/v2"
-    assert request["evaluationBindingId"] == plan.payload["evaluation_binding_id"]
-    assert request["evaluationBindingEvidence"] == plan.payload["evaluation_binding_evidence"]
+    assert request["evaluationBindingId"] == lifecycle_result["evaluationBindingId"]
+    assert request["evaluationBindingEvidence"] == lifecycle_result["evaluationBindingEvidence"]
     assert (
         request["metricCompatibilityMatrixEvidence"]
         == plan.payload["metric_compatibility_matrix_evidence"]
@@ -2046,13 +2082,17 @@ def test_paired_eval_request_derives_canonical_catalog_bindings_as_worm_evidence
     assert request_artifact["requestEvidence"]["artifactVersionId"] == "paired-request-version-001"
 
 
-def test_build_paired_benchmark_plan_exposes_only_version_bound_request_and_receipt_paths() -> None:
+def test_build_paired_benchmark_plan_exposes_only_server_owned_evaluation_paths() -> None:
     plan = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
 
     assert set(plan.payload["artifact_paths"]) == {
         "airflow_plan",
         "benchmark_catalog",
         "benchmark_catalog_receipt",
+        "benchmark_pack_build_result",
+        "benchmark_pack_lifecycle_result",
+        "paired_evaluation_assembly_plan",
+        "paired_execution_manifest",
         "paired_eval_request",
         "paired_eval_receipt",
     }
@@ -5027,10 +5067,13 @@ def test_serp_dag_files_declare_expected_airflow_contracts(
             "load_materialized_benchmark_catalog",
             "load_model_catalog_promotion",
             "write_paired_eval_request",
+            "write_paired_evaluation_assembly_plan",
             "notify_governance_eval_surfaces",
         ]
         assert _keyword_values(tree, "KubernetesPodOperator", "task_id") == [
             "materialize_live_benchmark_catalog",
+            "materialize_official_harness_work_items",
+            "assemble_paired_execution_manifest",
             "run_paired_benchmark_evaluation",
         ]
     elif dag_id == "serp_nightly_regression_suite":
@@ -5555,7 +5598,7 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
 
     class FakePythonOperator:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
+            self.kwargs = _kwargs
 
         def __rshift__(self, other: object) -> object:
             return other
@@ -5752,8 +5795,20 @@ def test_serp_improvement_dag_passes_exact_s3_values_to_the_evaluator_pod(
     )
     monkeypatch.setenv("ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION", "us-west-1")
     monkeypatch.setenv(
+        "ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST",
+        "sha256:" + "d" * 64,
+    )
+    monkeypatch.setenv(
         "ADAPSTORY_SERP_BC21_BASE_URL",
         "http://serp-context-platform.serp.svc.cluster.local:8080/api/bc-21/serp/v1",
+    )
+    monkeypatch.setenv(
+        "ADAPSTORY_SERP_MCP_GATEWAY_BASE_URL",
+        "http://prod-serp-mcp-gateway-svc.env-prod.svc.cluster.local:8000",
+    )
+    monkeypatch.setenv(
+        "ADAPSTORY_OLLAMA_BASE_URL",
+        "http://ollama.ollama.svc.cluster.local:11434",
     )
     module = importlib.import_module("dags.serp_benchmark_improvement_wave")
     module = importlib.reload(module)
@@ -5767,17 +5822,213 @@ def test_serp_improvement_dag_passes_exact_s3_values_to_the_evaluator_pod(
     assert values == {
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT": ("http://minio.env-prod.svc.cluster.local:9000"),
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION": "us-west-1",
+        "ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST": "sha256:" + "d" * 64,
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_STS_DURATION_SECONDS": '"900"',
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_WEB_IDENTITY_TOKEN_FILE": (
             "/var/run/secrets/adapstory/minio-web-identity/token"
         ),
-        "ADAPSTORY_SERP_BC21_BASE_URL": (
-            "http://serp-context-platform.serp.svc.cluster.local:8080/api/bc-21/serp/v1"
-        ),
-        "ADAPSTORY_SERP_SERVICE_ACCOUNT_TOKEN_PATH": (
-            "/var/run/secrets/adapstory/bc21-workload/token"
-        ),
+        "ADAPSTORY_SERP_SERVICE_ACCOUNT_TOKEN_PATH": "/var/run/secrets/adapstory/bc21-workload/token",
     }
+
+
+def test_d19_runs_exact_ninety_server_owned_official_harness_work_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    for name, value in {
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT": "http://minio:9000",
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION": "us-east-1",
+        "ADAPSTORY_SERP_BC21_BASE_URL": "http://context-platform:8080/api/bc-21/serp/v1",
+        "ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST": "sha256:" + "d" * 64,
+        "ADAPSTORY_SERP_MCP_GATEWAY_BASE_URL": (
+            "http://prod-serp-mcp-gateway-svc.env-prod.svc.cluster.local:8000"
+        ),
+        "ADAPSTORY_OLLAMA_BASE_URL": ("http://ollama.ollama.svc.cluster.local:11434"),
+    }.items():
+        monkeypatch.setenv(name, value)
+    module = importlib.import_module("dags.serp_benchmark_improvement_wave")
+    module = importlib.reload(module)
+
+    tasks = module.D19_OFFICIAL_HARNESS_RUN_TASKS
+    expected = [
+        (suite_id, side, repetition)
+        for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+        for repetition in range(1, 6)
+        for side in ("baseline", "candidate")
+    ]
+    assert list(tasks) == expected
+    assert len(tasks) == 90
+    assert module.D19_MODEL_RUNNER_WORKLOAD_SERVICE_ACCOUNT == (
+        "airflow-serp-benchmark-model-runner"
+    )
+    assert (
+        module.D19_MODEL_RUNNER_WORKLOAD_LABELS["adapstory.com/serp-network-profile"]
+        == "benchmark-model-runner"
+    )
+    expected_limits = {
+        "APIBench": {"cpu": "2000m", "memory": "4Gi"},
+        "ARES": {"cpu": "4000m", "memory": "8Gi"},
+        "BEIR": {"cpu": "4000m", "memory": "8Gi"},
+        "CodeRAG-Bench": {"cpu": "8000m", "memory": "16Gi"},
+        "RAGBench": {"cpu": "4000m", "memory": "8Gi"},
+        "RepoQA": {"cpu": "8000m", "memory": "16Gi"},
+        "SWE-bench Verified": {"cpu": "8000m", "memory": "16Gi"},
+        "cwd-benchmark-data": {"cpu": "4000m", "memory": "8Gi"},
+        "rusBEIR": {"cpu": "4000m", "memory": "8Gi"},
+    }
+    for (suite_id, _side, _repetition), task in tasks.items():
+        assert task.kwargs["service_account_name"] == ("airflow-serp-benchmark-model-runner")
+        assert task.kwargs["automount_service_account_token"] is False
+        assert task.kwargs["do_xcom_push"] is True
+        assert task.kwargs["cmds"] == [
+            "python",
+            "-m",
+            "adapstory_serp_pipeline.orchestration.official_harness_execution",
+        ]
+        assert task.kwargs["arguments"][0] == "run-suite"
+        assert task.kwargs["security_context"].kwargs["run_as_non_root"] is True
+        assert task.kwargs["container_security_context"].kwargs["read_only_root_filesystem"] is True
+        assert task.kwargs["container_resources"].kwargs["limits"] == expected_limits[suite_id]
+
+
+def test_d19_model_runner_has_only_minio_mcp_and_ollama_runtime_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    for name, value in {
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT": "http://minio:9000",
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION": "us-east-1",
+        "ADAPSTORY_SERP_BC21_BASE_URL": "http://context-platform:8080/api/bc-21/serp/v1",
+        "ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST": "sha256:" + "d" * 64,
+        "ADAPSTORY_SERP_MCP_GATEWAY_BASE_URL": (
+            "http://prod-serp-mcp-gateway-svc.env-prod.svc.cluster.local:8000"
+        ),
+        "ADAPSTORY_OLLAMA_BASE_URL": ("http://ollama.ollama.svc.cluster.local:11434"),
+    }.items():
+        monkeypatch.setenv(name, value)
+    module = importlib.import_module("dags.serp_benchmark_improvement_wave")
+    module = importlib.reload(module)
+
+    values = {
+        item.kwargs["name"]: item.kwargs.get("value") for item in module.d19_model_runner_env_vars()
+    }
+    assert values["ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST"] == "sha256:" + "d" * 64
+    assert values["ADAPSTORY_SERP_MCP_GATEWAY_BASE_URL"] == (
+        "http://prod-serp-mcp-gateway-svc.env-prod.svc.cluster.local:8000"
+    )
+    assert values["ADAPSTORY_OLLAMA_BASE_URL"] == ("http://ollama.ollama.svc.cluster.local:11434")
+    assert "ADAPSTORY_SERP_SERVICE_ACCOUNT_TOKEN_PATH" not in values
+    assert "ADAPSTORY_SERP_BC21_BASE_URL" not in values
+    assert not any("QDRANT" in name or "OPENSEARCH" in name or "NEO4J" in name for name in values)
+
+
+def test_d19_assembly_plan_seals_exact_canonical_ninety_without_scores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    for name, value in {
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT": "http://minio:9000",
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION": "us-east-1",
+        "ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST": "sha256:" + "d" * 64,
+        "ADAPSTORY_SERP_BC21_BASE_URL": "http://context-platform:8080/api/bc-21/serp/v1",
+        "ADAPSTORY_SERP_MCP_GATEWAY_BASE_URL": (
+            "http://prod-serp-mcp-gateway-svc.env-prod.svc.cluster.local:8000"
+        ),
+        "ADAPSTORY_OLLAMA_BASE_URL": ("http://ollama.ollama.svc.cluster.local:11434"),
+    }.items():
+        monkeypatch.setenv(name, value)
+    module = importlib.import_module("dags.serp_benchmark_improvement_wave")
+    module = importlib.reload(module)
+
+    def evidence(path: str, digest_character: str) -> dict[str, str]:
+        return {
+            "artifactPath": f"s3://airflow-serp-evidence/{path}.json",
+            "artifactSha256": "sha256:" + digest_character * 64,
+            "artifactVersionId": f"{path}-version",
+            "objectLockMode": "COMPLIANCE",
+        }
+
+    captured: list[dict[str, Any]] = []
+
+    def snapshot_writer(
+        artifact_path: str,
+        *,
+        artifact_type: str,
+        operation_id: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, str]:
+        captured.append(
+            {
+                "artifactPath": artifact_path,
+                "artifactType": artifact_type,
+                "operationId": operation_id,
+                "payload": dict(payload),
+            }
+        )
+        return {
+            **evidence("operation/paired-evaluation-assembly-plan", "d"),
+            "artifactPath": artifact_path,
+        }
+
+    monkeypatch.setattr(module, "write_immutable_evidence_snapshot", snapshot_writer)
+    work_items: list[dict[str, Any]] = []
+    run_results: list[dict[str, Any]] = []
+    for index, (suite_id, side, repetition) in enumerate(module.D19_OFFICIAL_HARNESS_WORK_ITEMS):
+        identity = {"suiteId": suite_id, "side": side, "repetition": repetition}
+        work_items.append(
+            {
+                **identity,
+                "workItemEvidence": evidence(f"operation/work-items/{index}", "a"),
+            }
+        )
+        run_results.append(
+            {
+                **identity,
+                "receiptEvidence": evidence(f"operation/receipts/{index}", "b"),
+            }
+        )
+    plan = {
+        "dag_id": "serp_benchmark_improvement_wave",
+        "operation_id": "operation",
+        "artifact_paths": {
+            "paired_evaluation_assembly_plan": (
+                "s3://airflow-serp-evidence/operation/paired-evaluation-assembly-plan.json"
+            ),
+            "paired_execution_manifest": (
+                "s3://airflow-serp-evidence/operation/paired-execution-manifest.json"
+            ),
+        },
+    }
+
+    result = module.write_paired_evaluation_assembly_plan(
+        json.dumps(plan),
+        {"requestEvidence": evidence("operation/paired-eval-request", "c")},
+        {"workItems": work_items},
+        run_results,
+    )
+
+    assert result["runCount"] == 90
+    assert result["manifestOutput"] == plan["artifact_paths"]["paired_execution_manifest"]
+    assert captured[0]["artifactType"] == "paired_evaluation_assembly_plan"
+    payload = captured[0]["payload"]
+    assert payload["schema"] == "PairedEvaluationAssemblyPlan/v1"
+    assert len(payload["runs"]) == 90
+    assert list(payload["runs"][0]) == ["workItemEvidence", "receiptEvidence"]
+    assert "score" not in json.dumps(payload).casefold()
+
+
+def test_d19_assembly_manifest_is_server_owned_and_feeds_only_the_v2_aggregator() -> None:
+    source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(encoding="utf-8")
+
+    assert "materialize_official_harness_work_items = KubernetesPodOperator(" in source
+    assert "assemble_paired_execution_manifest = KubernetesPodOperator(" in source
+    assert '"materialize-work-items"' in source
+    assert '"assemble-manifest"' in source
+    assert '"--execution-manifest"' in source
+    assert '"--execution-manifest-version-id"' in source
+    assert '"--execution-manifest-sha256"' in source
+    assert "write_paired_evaluation_assembly_plan" in source
+    assert "candidate_evaluation" not in source
 
 
 def test_web_identity_env_values_are_plain_strings_serializable_by_airflow() -> None:
@@ -6082,8 +6333,6 @@ def _improvement_wave_conf() -> dict[str, object]:
     return {
         "actor_id": "airflow-serp-eval-runner",
         "artifact_root_path": "s3://airflow-serp-evidence/serp-evals",
-        "evaluation_binding_evidence": _d19_worm_evidence("evaluation-binding", "b"),
-        "evaluation_binding_id": "018f5e13-2d73-7a77-a052-8d1bcbf96701",
         "evaluation_release_promotion_evidence": _d19_worm_evidence(
             "model-releases/d17-promotion", "c"
         ),
@@ -6163,6 +6412,31 @@ def _d19_promotion_snapshot(plan: Any) -> dict[str, Any]:
             "registryResourceType": "workflow",
             "tenantId": TENANT_ID,
         },
+    }
+
+
+def _d19_lifecycle_result(promotion_snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    promotion = promotion_snapshot["promotion"]
+    return {
+        "schema": "BC21AllNineBenchmarkPackLifecycleResult/v1",
+        "tenantId": TENANT_ID,
+        "evaluationBindingId": "018f5e13-2d73-7a77-a052-8d1bcbf96701",
+        "evaluationBindingEvidence": _d19_worm_evidence("evaluation-binding", "b"),
+        "bindingFingerprint": "sha256:" + "f" * 64,
+        "expiresAt": "2026-07-15T23:00:00Z",
+        "evaluationReleasePromotionEvidence": promotion_snapshot["promotionEvidence"],
+        "baselineReleaseEvidence": promotion["baselineRelease"]["evidence"],
+        "candidateReleaseEvidence": promotion["candidateRelease"]["evidence"],
+        "baselineReleaseDigest": promotion["baselineRelease"]["releaseDigest"],
+        "candidateReleaseDigest": promotion["candidateRelease"]["releaseDigest"],
+        "packMaterialBindings": [
+            {"suiteId": suite_id} for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+        ],
+        "suiteExecutionBindings": [
+            {"suiteId": suite_id} for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+        ],
+        "indexedReceiptCount": 18,
+        "productionActivationRequested": False,
     }
 
     baseline_replay = {
