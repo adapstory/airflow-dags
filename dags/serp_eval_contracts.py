@@ -59,9 +59,9 @@ _EVAL_CONTRACT_VERSION = "2026.07.2"
 _BENCHMARK_SUITE_CONTRACT_VERSION = "2026.07.3"
 _BENCHMARK_EVALUATION_CONTRACT_CODE = "d6-evidence-2026.07.3"
 _METRIC_COMPATIBILITY_CONTRACT_VERSION = "serp-suite-metric-compatibility/v1"
-_CI_EVALUATION_RELEASE_CONTRACT_VERSION = "serp-ci-evaluation-release-evidence/v2"
+_CI_EVALUATION_RELEASE_CONTRACT_VERSION = "serp-ci-evaluation-release-evidence/v3"
 _EVALUATION_RELEASE_SCHEMA = "EvaluationRelease/v2"
-_EVALUATION_RELEASE_PROMOTION_SCHEMA = "EvaluationReleasePromotionReceipt/v2"
+_EVALUATION_RELEASE_PROMOTION_SCHEMA = "EvaluationReleasePromotionReceipt/v3"
 _MODEL_PROMOTION_DAG_ID = "serp_model_catalog_promotion"
 _EVALUATION_PROFILE_EVIDENCE_FIELDS = (
     "evaluatorRunnerEvidence",
@@ -125,7 +125,9 @@ _FORBIDDEN_INLINE_D19_FIELDS = frozenset(
         "retrieval_profile_version",
         "caseResults",
         "metric",
+        "metric_compatibility_matrix_evidence",
         "metricValue",
+        "objective_specification_evidence",
         "packId",
         "packVersionId",
         "profileId",
@@ -866,12 +868,17 @@ def build_model_catalog_promotion_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
             raise ValueError(f"evaluation_release_evidence {field_name} does not match D17 plan")
     baseline_release_evidence = _worm_evidence_reference(ci_bundle, "baselineReleaseEvidence")
     candidate_release_evidence = _worm_evidence_reference(ci_bundle, "candidateReleaseEvidence")
-    _require_worm_evidence_within_artifact_root(
-        baseline_release_evidence, artifact_root_path, "baseline_release_evidence"
+    metric_matrix_evidence = _worm_evidence_reference(
+        ci_bundle, "metricCompatibilityMatrixEvidence"
     )
-    _require_worm_evidence_within_artifact_root(
-        candidate_release_evidence, artifact_root_path, "candidate_release_evidence"
-    )
+    objective_evidence = _worm_evidence_reference(ci_bundle, "objectiveSpecificationEvidence")
+    for field_name, evidence in (
+        ("baseline_release_evidence", baseline_release_evidence),
+        ("candidate_release_evidence", candidate_release_evidence),
+        ("metric_compatibility_matrix_evidence", metric_matrix_evidence),
+        ("objective_specification_evidence", objective_evidence),
+    ):
+        _require_worm_evidence_within_artifact_root(evidence, artifact_root_path, field_name)
     if baseline_release_evidence == candidate_release_evidence:
         raise ValueError("baseline and candidate release evidence must be distinct")
     operation_id = _operation_id(
@@ -880,6 +887,8 @@ def build_model_catalog_promotion_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
         promotion_id,
         baseline_release_evidence["sha256"],
         candidate_release_evidence["sha256"],
+        metric_matrix_evidence["sha256"],
+        objective_evidence["sha256"],
         generated_at,
     )
     return SerpDagPlan(
@@ -900,6 +909,8 @@ def build_model_catalog_promotion_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
             "dag_id": _MODEL_PROMOTION_DAG_ID,
             "generated_at": generated_at,
             "operation_id": operation_id,
+            "metric_compatibility_matrix_evidence": metric_matrix_evidence,
+            "objective_specification_evidence": objective_evidence,
             "promotion_id": promotion_id,
             "registry_resource_id": str(registry_resource_id),
             "registry_resource_type": registry_resource_type,
@@ -927,25 +938,18 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
     registry_resource_type = _required_resource_type(payload, "registry_resource_type")
     registry_resource_id = _required_uuid(payload, "registry_resource_id")
     promotion_evidence = _worm_evidence_reference(payload, "evaluation_release_promotion_evidence")
-    metric_matrix_evidence = _worm_evidence_reference(
-        payload, "metric_compatibility_matrix_evidence"
-    )
-    objective_evidence = _worm_evidence_reference(payload, "objective_specification_evidence")
     artifact_root_path = _required_artifact_root_path(payload)
     if not artifact_root_path.startswith("s3://"):
         raise ValueError("benchmark improvement wave requires an s3:// artifact_root_path")
-    for field_name, evidence in (
-        ("evaluation_release_promotion_evidence", promotion_evidence),
-        ("metric_compatibility_matrix_evidence", metric_matrix_evidence),
-        ("objective_specification_evidence", objective_evidence),
-    ):
-        _require_worm_evidence_within_artifact_root(evidence, artifact_root_path, field_name)
+    _require_worm_evidence_within_artifact_root(
+        promotion_evidence,
+        artifact_root_path,
+        "evaluation_release_promotion_evidence",
+    )
     operation_id = _operation_id(
         "serp-airflow-benchmark-improvement-wave",
         tenant_id,
         promotion_evidence["sha256"],
-        metric_matrix_evidence["sha256"],
-        objective_evidence["sha256"],
         generated_at,
     )
     plan_payload = {
@@ -978,9 +982,7 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
         "dag_id": "serp_benchmark_improvement_wave",
         "generated_at": generated_at,
         "evaluation_release_promotion_evidence": promotion_evidence,
-        "metric_compatibility_matrix_evidence": metric_matrix_evidence,
         "normalized_gate_floor": SERP_NORMALIZED_GATE_FLOOR,
-        "objective_specification_evidence": objective_evidence,
         "operation_id": operation_id,
         "registry_resource_id": str(registry_resource_id),
         "registry_resource_type": registry_resource_type,
@@ -1071,6 +1073,8 @@ def _normalized_ci_evaluation_release_bundle(payload: Mapping[str, Any]) -> dict
         "candidateReleaseEvidence",
         "contractVersion",
         "kind",
+        "metricCompatibilityMatrixEvidence",
+        "objectiveSpecificationEvidence",
         "operationId",
         "registryResourceId",
         "registryResourceType",
@@ -1097,6 +1101,12 @@ def _normalized_ci_evaluation_release_bundle(payload: Mapping[str, Any]) -> dict
         **dict(payload),
         "baselineReleaseEvidence": _worm_evidence_reference(payload, "baselineReleaseEvidence"),
         "candidateReleaseEvidence": _worm_evidence_reference(payload, "candidateReleaseEvidence"),
+        "metricCompatibilityMatrixEvidence": _worm_evidence_reference(
+            payload, "metricCompatibilityMatrixEvidence"
+        ),
+        "objectiveSpecificationEvidence": _worm_evidence_reference(
+            payload, "objectiveSpecificationEvidence"
+        ),
         "registryResourceId": str(_required_uuid(payload, "registryResourceId")),
         "registryResourceType": _required_resource_type(payload, "registryResourceType"),
         "tenantId": str(_required_uuid(payload, "tenantId")),
@@ -1572,6 +1582,12 @@ def _model_promotion_receipt_payload(
                 _required_mapping(candidate, "release"), "releaseDigest"
             ),
         },
+        "metricCompatibilityMatrixEvidence": dict(
+            _required_mapping(plan, "metric_compatibility_matrix_evidence")
+        ),
+        "objectiveSpecificationEvidence": dict(
+            _required_mapping(plan, "objective_specification_evidence")
+        ),
         "dagId": _MODEL_PROMOTION_DAG_ID,
         "generatedAt": _required_str(plan, "generated_at"),
         "operationId": _required_str(plan, "operation_id"),
@@ -1590,6 +1606,8 @@ def _validated_evaluation_release_promotion_receipt(
         "schema",
         "baselineRelease",
         "candidateRelease",
+        "metricCompatibilityMatrixEvidence",
+        "objectiveSpecificationEvidence",
         "dagId",
         "generatedAt",
         "operationId",
@@ -1628,6 +1646,12 @@ def _validated_evaluation_release_promotion_receipt(
         "schema": _EVALUATION_RELEASE_PROMOTION_SCHEMA,
         "baselineRelease": baseline,
         "candidateRelease": candidate,
+        "metricCompatibilityMatrixEvidence": _worm_evidence_reference(
+            receipt, "metricCompatibilityMatrixEvidence"
+        ),
+        "objectiveSpecificationEvidence": _worm_evidence_reference(
+            receipt, "objectiveSpecificationEvidence"
+        ),
         "operationId": _required_str(receipt, "operationId"),
         "promotionId": _required_str(receipt, "promotionId"),
         "registryResourceId": _required_str(receipt, "registryResourceId"),
@@ -6706,10 +6730,10 @@ def _paired_eval_request_payload(
             _required_mapping(lifecycle, "evaluationBindingEvidence")
         ),
         "metricCompatibilityMatrixEvidence": dict(
-            _required_mapping(plan, "metric_compatibility_matrix_evidence")
+            _required_mapping(promotion, "metricCompatibilityMatrixEvidence")
         ),
         "objectiveSpecificationEvidence": dict(
-            _required_mapping(plan, "objective_specification_evidence")
+            _required_mapping(promotion, "objectiveSpecificationEvidence")
         ),
         "benchmarkCatalogEvidence": catalog_evidence,
     }
@@ -6866,6 +6890,12 @@ def _validated_d19_promotion_snapshot(
     return {
         "baselineRelease": baseline,
         "candidateRelease": candidate,
+        "metricCompatibilityMatrixEvidence": _worm_evidence_reference(
+            promotion, "metricCompatibilityMatrixEvidence"
+        ),
+        "objectiveSpecificationEvidence": _worm_evidence_reference(
+            promotion, "objectiveSpecificationEvidence"
+        ),
         "promotionEvidence": evidence,
         "promotionId": _required_str(promotion, "promotionId"),
     }

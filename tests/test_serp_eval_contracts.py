@@ -2258,11 +2258,11 @@ def test_paired_eval_request_derives_canonical_catalog_bindings_as_worm_evidence
     assert request["evaluationBindingEvidence"] == lifecycle_result["evaluationBindingEvidence"]
     assert (
         request["metricCompatibilityMatrixEvidence"]
-        == plan.payload["metric_compatibility_matrix_evidence"]
+        == promotion_snapshot["promotion"]["metricCompatibilityMatrixEvidence"]
     )
     assert (
         request["objectiveSpecificationEvidence"]
-        == plan.payload["objective_specification_evidence"]
+        == promotion_snapshot["promotion"]["objectiveSpecificationEvidence"]
     )
     assert request["benchmarkCatalogEvidence"] == {
         "catalog": {
@@ -7156,8 +7156,6 @@ def _improvement_wave_conf() -> dict[str, object]:
             "model-releases/d17-promotion", "c"
         ),
         "generated_at": "2026-07-05T21:00:00Z",
-        "metric_compatibility_matrix_evidence": _d19_worm_evidence("metric-matrix", "d"),
-        "objective_specification_evidence": _d19_worm_evidence("objective-spec", "e"),
         "registry_resource_id": REGISTRY_RESOURCE_ID,
         "registry_resource_type": "workflow",
         "tenant_id": TENANT_ID,
@@ -7342,7 +7340,7 @@ def _d19_promotion_snapshot(plan: Any) -> dict[str, Any]:
     return {
         "promotionEvidence": plan.payload["evaluation_release_promotion_evidence"],
         "promotion": {
-            "schema": "EvaluationReleasePromotionReceipt/v2",
+            "schema": "EvaluationReleasePromotionReceipt/v3",
             "baselineRelease": {
                 "evidence": _d19_worm_evidence("model-releases/baseline", "d"),
                 "releaseDigest": "sha256:" + "1" * 64,
@@ -7351,6 +7349,8 @@ def _d19_promotion_snapshot(plan: Any) -> dict[str, Any]:
                 "evidence": _d19_worm_evidence("model-releases/candidate", "e"),
                 "releaseDigest": "sha256:" + "2" * 64,
             },
+            "metricCompatibilityMatrixEvidence": _d19_worm_evidence("metric-matrix", "3"),
+            "objectiveSpecificationEvidence": _d19_worm_evidence("objective-spec", "4"),
             "promotionId": "public-docs-reranker-eval-001",
             "registryResourceId": REGISTRY_RESOURCE_ID,
             "registryResourceType": "workflow",

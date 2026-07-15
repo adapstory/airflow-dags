@@ -192,10 +192,25 @@ def _release_pair(
         releases[side] = release
         release_handles[side] = _handle(f"release-{side}", release, objects)
 
+    metric_matrix_evidence = _handle(
+        "metric-compatibility-matrix",
+        {"schema": "MetricCompatibilityMatrix/v1", "suiteMetricFamilies": []},
+        objects,
+    )
+    objective_evidence = _handle(
+        "paired-evaluation-objective",
+        {
+            "metricCells": [],
+            "schema": "PairedEvaluationObjectiveSpecification/v1",
+        },
+        objects,
+    )
     bundle = {
         "apiVersion": "serp.adapstory.ai/v2alpha1",
-        "contractVersion": "serp-ci-evaluation-release-evidence/v2",
+        "contractVersion": "serp-ci-evaluation-release-evidence/v3",
         "kind": "EvaluationReleaseEvidence",
+        "metricCompatibilityMatrixEvidence": metric_matrix_evidence,
+        "objectiveSpecificationEvidence": objective_evidence,
         "operationId": "ci-evaluation-release-161",
         "registryResourceId": RESOURCE_ID,
         "registryResourceType": "workflow",
@@ -238,20 +253,25 @@ def _d19_conf() -> dict[str, object]:
         "artifact_root_path": "s3://airflow-serp-evidence/serp-evals",
         "evaluation_release_promotion_evidence": _reference("d17-promotion", "c"),
         "generated_at": "2026-07-15T05:10:00Z",
-        "metric_compatibility_matrix_evidence": _reference("metric-matrix", "d"),
-        "objective_specification_evidence": _reference("objective-spec", "e"),
         "registry_resource_id": RESOURCE_ID,
         "registry_resource_type": "workflow",
         "tenant_id": TENANT_ID,
     }
 
 
-def test_d17_consumes_ci_v2_bundle_and_seals_reference_only_v2_promotion() -> None:
+def test_d17_consumes_ci_v3_bundle_and_seals_governed_v2_promotion() -> None:
     bundle, objects = _release_pair()
     plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
 
     assert plan.payload["baseline_release_evidence"] == bundle["baselineReleaseEvidence"]
     assert plan.payload["candidate_release_evidence"] == bundle["candidateReleaseEvidence"]
+    assert (
+        plan.payload["metric_compatibility_matrix_evidence"]
+        == bundle["metricCompatibilityMatrixEvidence"]
+    )
+    assert (
+        plan.payload["objective_specification_evidence"] == bundle["objectiveSpecificationEvidence"]
+    )
     assert "evaluation_release_evidence" not in plan.payload
 
     releases = load_governed_model_releases(plan.to_canonical_json(), s3_client=_FakeS3(objects))
@@ -263,7 +283,7 @@ def test_d17_consumes_ci_v2_bundle_and_seals_reference_only_v2_promotion() -> No
         plan.to_canonical_json(), releases, snapshot_writer=_snapshot_writer
     )
     payload = receipt["payload"]
-    assert payload["schema"] == "EvaluationReleasePromotionReceipt/v2"
+    assert payload["schema"] == "EvaluationReleasePromotionReceipt/v3"
     assert payload["status"] == "approved-for-evaluation"
     assert payload["baselineRelease"] == {
         "evidence": bundle["baselineReleaseEvidence"],
@@ -273,6 +293,10 @@ def test_d17_consumes_ci_v2_bundle_and_seals_reference_only_v2_promotion() -> No
         "evidence": bundle["candidateReleaseEvidence"],
         "releaseDigest": bundle["candidateRelease"]["releaseDigest"],
     }
+    assert (
+        payload["metricCompatibilityMatrixEvidence"] == bundle["metricCompatibilityMatrixEvidence"]
+    )
+    assert payload["objectiveSpecificationEvidence"] == bundle["objectiveSpecificationEvidence"]
     serialized = json.dumps(payload, sort_keys=True)
     for forbidden in ("suiteProfiles", "replay", "ModelRelease/v1"):
         assert forbidden not in serialized
@@ -359,7 +383,7 @@ def test_d19_rereads_the_v2_promotion_and_both_release_manifests() -> None:
         d19_plan.to_canonical_json(), s3_client=_FakeS3(objects)
     )
 
-    assert snapshot["promotion"]["schema"] == "EvaluationReleasePromotionReceipt/v2"
+    assert snapshot["promotion"]["schema"] == "EvaluationReleasePromotionReceipt/v3"
     assert (
         snapshot["promotion"]["baselineRelease"]["releaseDigest"]
         == bundle["baselineRelease"]["releaseDigest"]
@@ -367,6 +391,14 @@ def test_d19_rereads_the_v2_promotion_and_both_release_manifests() -> None:
     assert (
         snapshot["promotion"]["candidateRelease"]["releaseDigest"]
         == bundle["candidateRelease"]["releaseDigest"]
+    )
+    assert (
+        snapshot["promotion"]["metricCompatibilityMatrixEvidence"]
+        == bundle["metricCompatibilityMatrixEvidence"]
+    )
+    assert (
+        snapshot["promotion"]["objectiveSpecificationEvidence"]
+        == bundle["objectiveSpecificationEvidence"]
     )
 
 
@@ -379,13 +411,15 @@ def test_d19_builds_scoreless_reference_only_paired_request_v2(
     promotion = {
         "promotionEvidence": plan.payload["evaluation_release_promotion_evidence"],
         "promotion": {
-            "schema": "EvaluationReleasePromotionReceipt/v2",
+            "schema": "EvaluationReleasePromotionReceipt/v3",
             "promotionId": "all-nine-eval-2026-07-15",
             "tenantId": TENANT_ID,
             "registryResourceId": RESOURCE_ID,
             "registryResourceType": "workflow",
             "baselineRelease": {"evidence": baseline, "releaseDigest": "sha256:" + "2" * 64},
             "candidateRelease": {"evidence": candidate, "releaseDigest": "sha256:" + "3" * 64},
+            "metricCompatibilityMatrixEvidence": _reference("metric-matrix", "d"),
+            "objectiveSpecificationEvidence": _reference("objective-spec", "e"),
         },
     }
     monkeypatch.setattr(
@@ -428,10 +462,11 @@ def test_d19_builds_scoreless_reference_only_paired_request_v2(
     assert request["evaluationBindingEvidence"] == lifecycle_result["evaluationBindingEvidence"]
     assert (
         request["metricCompatibilityMatrixEvidence"]
-        == _d19_conf()["metric_compatibility_matrix_evidence"]
+        == promotion["promotion"]["metricCompatibilityMatrixEvidence"]
     )
     assert (
-        request["objectiveSpecificationEvidence"] == _d19_conf()["objective_specification_evidence"]
+        request["objectiveSpecificationEvidence"]
+        == promotion["promotion"]["objectiveSpecificationEvidence"]
     )
     forbidden = {
         "suiteProfiles",
@@ -463,6 +498,18 @@ def test_d19_builds_scoreless_reference_only_paired_request_v2(
 def test_d19_rejects_inline_selection_or_scoring_fields(field: str) -> None:
     conf = _d19_conf()
     conf[field] = "caller-controlled"
+    with pytest.raises(ValueError, match="inline D19 field is forbidden"):
+        build_benchmark_improvement_wave_plan(conf)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("metric_compatibility_matrix_evidence", "objective_specification_evidence"),
+)
+def test_d19_rejects_caller_supplied_metric_authority(field: str) -> None:
+    conf = _d19_conf()
+    conf[field] = _reference(field, "9")
+
     with pytest.raises(ValueError, match="inline D19 field is forbidden"):
         build_benchmark_improvement_wave_plan(conf)
 
