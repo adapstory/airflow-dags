@@ -98,7 +98,7 @@ def test_d19_requires_d17_promotion_evidence_and_rejects_legacy_selection_fields
         build_benchmark_improvement_wave_plan(invalid)
 
 
-def test_d19_reassumes_only_exact_d17_and_ci_evidence_prefixes(
+def test_d19_uses_separate_read_only_clients_for_exact_d17_and_ci_evidence_prefixes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     baseline = _release_manifest("baseline-reranker", "baseline-run", "reranker@2026.07.1")
@@ -181,21 +181,20 @@ def test_d19_reassumes_only_exact_d17_and_ci_evidence_prefixes(
     release_client = _FakeS3(client._objects)
     scopes: list[tuple[str, ...]] = []
 
-    def scoped_client(*artifact_paths: str) -> _FakeS3:
+    def scoped_read_client(*artifact_paths: str) -> _FakeS3:
         scopes.append(artifact_paths)
         if artifact_paths == (
             "s3://airflow-serp-evidence/serp-evals/model-releases/d17-promotion.json",
         ):
             return receipt_client
         if artifact_paths == (
-            "s3://airflow-serp-evidence/serp-evals/model-releases/d17-promotion.json",
             "s3://airflow-serp-evidence/serp-evals/model-releases/baseline.json",
             "s3://airflow-serp-evidence/serp-evals/model-releases/candidate.json",
         ):
             return release_client
         raise AssertionError(f"unexpected evidence scope: {artifact_paths!r}")
 
-    monkeypatch.setattr(serp_eval_contracts, "_s3_client", scoped_client)
+    monkeypatch.setattr(serp_eval_contracts, "_s3_read_client", scoped_read_client)
 
     promotion = load_model_catalog_promotion_snapshot(d19_plan.to_canonical_json())
 
@@ -205,7 +204,6 @@ def test_d19_reassumes_only_exact_d17_and_ci_evidence_prefixes(
     assert scopes == [
         ("s3://airflow-serp-evidence/serp-evals/model-releases/d17-promotion.json",),
         (
-            "s3://airflow-serp-evidence/serp-evals/model-releases/d17-promotion.json",
             "s3://airflow-serp-evidence/serp-evals/model-releases/baseline.json",
             "s3://airflow-serp-evidence/serp-evals/model-releases/candidate.json",
         ),

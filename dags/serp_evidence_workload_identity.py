@@ -270,6 +270,38 @@ def operation_prefix_s3_client(*, artifact_uris: Iterable[str]) -> Any:
     return _web_identity_s3_client(policy=policy)
 
 
+def operation_prefix_read_s3_client(*, artifact_uris: Iterable[str]) -> Any:
+    """Exchange the projected token for read-only access to exact evidence operations.
+
+    A governance receipt can intentionally attest immutable inputs created by
+    separate CI operations.  The reader therefore receives a short-lived
+    session limited to their exact operation prefixes, while writers retain the
+    stricter single-operation contract in :func:`operation_prefix_s3_client`.
+    """
+
+    resources = tuple(sorted({operation_prefix_resource(uri) for uri in artifact_uris}))
+    if not resources:
+        raise ValueError("at least one evidence artifact is required for a read session")
+    policy = json.dumps(
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Action": [
+                        "s3:GetObject",
+                        "s3:GetObjectRetention",
+                        "s3:GetObjectVersion",
+                    ],
+                    "Effect": "Allow",
+                    "Resource": list(resources),
+                }
+            ],
+        },
+        sort_keys=True,
+    )
+    return _web_identity_s3_client(policy=policy)
+
+
 def task_log_s3_client() -> Any:
     """Return an STS client constrained to the immutable Airflow task-log prefix."""
 

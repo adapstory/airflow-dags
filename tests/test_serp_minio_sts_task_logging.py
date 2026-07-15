@@ -126,6 +126,41 @@ def test_task_log_sts_policy_is_limited_to_the_log_prefix() -> None:
         ]
 
 
+def test_multi_operation_evidence_reader_is_read_only_and_prefix_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _isolated_task_log_modules() as (_task_logging, workload_identity):
+        captured: dict[str, str] = {}
+        sentinel = object()
+
+        def capture_client(*, policy: str) -> object:
+            captured["policy"] = policy
+            return sentinel
+
+        monkeypatch.setattr(workload_identity, "_web_identity_s3_client", capture_client)
+
+        client = workload_identity.operation_prefix_read_s3_client(
+            artifact_uris=(
+                "s3://airflow-serp-evidence/serp-evals/d17-receipt/receipt.json",
+                "s3://airflow-serp-evidence/serp-evals/ci-model-release-165/baseline.json",
+                "s3://airflow-serp-evidence/serp-evals/ci-model-release-165/candidate.json",
+            )
+        )
+
+    assert client is sentinel
+    policy = json.loads(captured["policy"])
+    assert policy["Statement"] == [
+        {
+            "Action": ["s3:GetObject", "s3:GetObjectRetention", "s3:GetObjectVersion"],
+            "Effect": "Allow",
+            "Resource": [
+                "arn:aws:s3:::airflow-serp-evidence/serp-evals/ci-model-release-165/*",
+                "arn:aws:s3:::airflow-serp-evidence/serp-evals/d17-receipt/*",
+            ],
+        }
+    ]
+
+
 def test_task_log_sts_client_rejects_ambient_static_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

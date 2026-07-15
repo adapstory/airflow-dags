@@ -1061,7 +1061,7 @@ def load_model_catalog_promotion_snapshot(
     if _required_str(plan, "dag_id") != "serp_benchmark_improvement_wave":
         raise ValueError("plan dag_id does not match D19 promotion receipt loader")
     receipt_evidence = _immutable_evidence_reference(plan, "model_promotion_evidence")
-    receipt_client = s3_client or _s3_client(receipt_evidence["artifactPath"])
+    receipt_client = s3_client or _s3_read_client(receipt_evidence["artifactPath"])
     receipt = _load_immutable_json_evidence(
         receipt_evidence,
         field_name="model_promotion_evidence",
@@ -1075,9 +1075,8 @@ def load_model_catalog_promotion_snapshot(
         )
         for role in ("baselineRelease", "candidateRelease")
     )
-    release_client = s3_client or _s3_client(
-        receipt_evidence["artifactPath"],
-        *(evidence["artifactPath"] for _, evidence in release_evidence),
+    release_client = s3_client or _s3_read_client(
+        *(evidence["artifactPath"] for _, evidence in release_evidence)
     )
     for role, evidence in release_evidence:
         recorded = normalized[role]
@@ -7899,6 +7898,12 @@ def _s3_client(*artifact_paths: str) -> Any:
     from dags.serp_evidence_workload_identity import operation_prefix_s3_client
 
     return operation_prefix_s3_client(artifact_uris=artifact_paths)
+
+
+def _s3_read_client(*artifact_paths: str) -> Any:
+    from dags.serp_evidence_workload_identity import operation_prefix_read_s3_client
+
+    return operation_prefix_read_s3_client(artifact_uris=artifact_paths)
 
 
 def _required_env(name: str) -> str:
