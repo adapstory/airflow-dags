@@ -4,6 +4,7 @@ import io
 import json
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from typing import Any
 
 import pytest
 
@@ -246,7 +247,158 @@ def test_d17_rejects_a_release_manifest_without_signed_ci_runtime_provenance() -
         load_governed_model_releases(plan.to_canonical_json(), s3_client=client)
 
 
-def _release_manifest(release_id: str, run_id: str, reranker_profile: str) -> bytes:
+def test_d17_allows_retrieval_profile_as_the_candidate_treatment() -> None:
+    baseline = _release_manifest(
+        "baseline-retrieval",
+        "baseline-retrieval-run",
+        "reranker@2026.07.1",
+        retrieval_profile="hybrid@2026.07.1",
+    )
+    candidate = _release_manifest(
+        "candidate-retrieval",
+        "candidate-retrieval-run",
+        "reranker@2026.07.1",
+        retrieval_profile="hybrid@2026.07.2",
+    )
+
+    releases = _load_release_pair(baseline, candidate)
+
+    assert (
+        releases["baselineRelease"]["release"]["replay"]["retrievalProfileVersion"]
+        == "hybrid@2026.07.1"
+    )
+    assert (
+        releases["candidateRelease"]["release"]["replay"]["retrievalProfileVersion"]
+        == "hybrid@2026.07.2"
+    )
+
+
+def test_d17_allows_governed_model_identity_as_the_candidate_treatment() -> None:
+    baseline = _release_manifest(
+        "baseline-model",
+        "baseline-model-run",
+        "reranker@2026.07.1",
+    )
+    candidate_payload = json.loads(
+        _release_manifest(
+            "candidate-model",
+            "candidate-model-run",
+            "reranker@2026.07.1",
+        )
+    )
+    candidate_payload["model"] = {
+        "catalogEntryId": "model-catalog://serp/system-model@2026.07.2",
+        "modelId": "serp-system-model",
+        "modelVersion": "system-model@2026.07.2",
+    }
+    candidate = json.dumps(candidate_payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+    releases = _load_release_pair(baseline, candidate)
+
+    assert releases["candidateRelease"]["release"]["model"] == candidate_payload["model"]
+
+
+def test_d17_rejects_runtime_only_candidate_without_a_semantic_treatment_delta() -> None:
+    baseline = _release_manifest(
+        "baseline-runtime",
+        "baseline-runtime-run",
+        "reranker@2026.07.1",
+    )
+    candidate_payload = json.loads(
+        _release_manifest(
+            "candidate-runtime",
+            "candidate-runtime-run",
+            "reranker@2026.07.1",
+        )
+    )
+    candidate_payload["runtime"] = {
+        "imageDigest": "sha256:" + "f" * 64,
+        "sourceRevision": "9" * 40,
+    }
+    candidate_payload["ciRuntime"] = {
+        **candidate_payload["ciRuntime"],
+        "digest": "sha256:" + "f" * 64,
+        "serpMcpGatewayRef": "9" * 40,
+        "tag": "3.3.0-runtime-candidate",
+    }
+    candidate = json.dumps(candidate_payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match="model, retrieval profile, or reranker profile treatment",
+    ):
+        _load_release_pair(baseline, candidate)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "candidate_value"),
+    [
+        ("featureFlags", ["serp.d19.dry_run", "serp.d19.candidate_only"]),
+        ("guardrailBundleVersion", "guardrails@2026.07.2"),
+        ("judgeModelId", "judge-serp-rubric-v2"),
+        ("judgeModelVersion", "judge@2026.07.2"),
+        ("judgePromptTemplateVersion", "judge-template@2026.07.2"),
+        ("policyBundleVersion", "policy@2026.07.2"),
+        ("providerRouteId", "llm-gateway://eval/judge-serp-rubric-v2"),
+    ],
+)
+def test_d17_rejects_candidate_drift_in_frozen_replay_dimensions(
+    field_name: str, candidate_value: object
+) -> None:
+    baseline = _release_manifest(
+        "baseline-frozen-replay",
+        "baseline-frozen-replay-run",
+        "reranker@2026.07.1",
+    )
+    candidate_payload = json.loads(
+        _release_manifest(
+            "candidate-frozen-replay",
+            "candidate-frozen-replay-run",
+            "reranker@2026.07.2",
+        )
+    )
+    candidate_payload["replay"][field_name] = candidate_value
+    candidate = json.dumps(candidate_payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+    with pytest.raises(ValueError, match=rf"share replay {field_name}"):
+        _load_release_pair(baseline, candidate)
+
+
+def _load_release_pair(baseline: bytes, candidate: bytes) -> dict[str, Any]:
+    conf = _promotion_conf()
+    conf["baseline_release_evidence"] = {
+        **_immutable_evidence("baseline"),
+        "artifactSha256": "sha256:" + sha256(baseline).hexdigest(),
+    }
+    conf["candidate_release_evidence"] = {
+        **_immutable_evidence("candidate"),
+        "artifactSha256": "sha256:" + sha256(candidate).hexdigest(),
+    }
+    plan = build_model_catalog_promotion_plan(conf)
+    client = _FakeS3(
+        {
+            (
+                "airflow-serp-evidence",
+                "serp-evals/model-releases/baseline.json",
+                "version-baseline",
+            ): baseline,
+            (
+                "airflow-serp-evidence",
+                "serp-evals/model-releases/candidate.json",
+                "version-candidate",
+            ): candidate,
+        }
+    )
+    return load_governed_model_releases(plan.to_canonical_json(), s3_client=client)
+
+
+def _release_manifest(
+    release_id: str,
+    run_id: str,
+    reranker_profile: str,
+    *,
+    retrieval_profile: str = "hybrid@2026.07.1",
+) -> bytes:
     payload = {
         "apiVersion": "serp.adapstory.ai/v1alpha1",
         "component": "reranker-profile-public-docs",
@@ -283,7 +435,7 @@ def _release_manifest(release_id: str, run_id: str, reranker_profile: str) -> by
             "policyBundleVersion": "policy@2026.07.1",
             "providerRouteId": "llm-gateway://eval/judge-serp-rubric",
             "rerankerProfileVersion": reranker_profile,
-            "retrievalProfileVersion": "hybrid@2026.07.1",
+            "retrievalProfileVersion": retrieval_profile,
         },
         "runtime": {
             "imageDigest": "sha256:" + "b" * 64,

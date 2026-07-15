@@ -97,7 +97,9 @@ SERP eval DAG contracts:
   accept model ids, profile strings, scores, or approval booleans from the
   caller. The DAG re-reads both manifests with exact `VersionId` plus
   `COMPLIANCE` retention, validates that their tenant/resource/component and
-  non-reranker replay boundary match, then seals a WORM promotion receipt.
+  fixed evaluator replay boundary match, requires a real treatment delta in the
+  governed model, retrieval profile, or reranker profile, then seals a WORM
+  promotion receipt. Runtime-image-only candidate releases fail closed.
   Release manifest production belongs to the signed CI/release path: the
   `airflow-runtime` Jenkins build seals the active baseline and newly signed
   candidate under a build-scoped MinIO COMPLIANCE prefix using its projected

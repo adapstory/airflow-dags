@@ -61,6 +61,18 @@ _METRIC_COMPATIBILITY_CONTRACT_VERSION = "serp-suite-metric-compatibility/v1"
 _MODEL_RELEASE_CONTRACT_VERSION = "serp-model-release/v1"
 _MODEL_PROMOTION_CONTRACT_VERSION = "serp-model-catalog-promotion/v1"
 _MODEL_PROMOTION_DAG_ID = "serp_model_catalog_promotion"
+_MODEL_PROMOTION_FROZEN_REPLAY_FIELDS = (
+    "guardrailBundleVersion",
+    "judgeModelId",
+    "judgeModelVersion",
+    "judgePromptTemplateVersion",
+    "policyBundleVersion",
+    "providerRouteId",
+)
+_MODEL_PROMOTION_TREATMENT_PROFILE_FIELDS = (
+    "retrievalProfileVersion",
+    "rerankerProfileVersion",
+)
 _BENCHMARK_METRIC_FAMILIES = ("retrieval", "answer-quality", "citation", "policy")
 _STRICT_PRIMARY_RETRIEVAL_METRICS = frozenset({"MRR@10", "nDCG@10"})
 _STRICT_PAIRED_RUN_COUNT = 5
@@ -1334,19 +1346,27 @@ def _validate_model_release_pair(baseline: Mapping[str, Any], candidate: Mapping
         raise ValueError("baseline and candidate evaluationRunId must differ")
     baseline_replay = _required_mapping(baseline, "replay")
     candidate_replay = _required_mapping(candidate, "replay")
-    for field_name in (
-        "guardrailBundleVersion",
-        "judgeModelId",
-        "judgeModelVersion",
-        "judgePromptTemplateVersion",
-        "policyBundleVersion",
-        "providerRouteId",
-        "retrievalProfileVersion",
-    ):
+    baseline_feature_flags = _required_str_list(baseline_replay, "featureFlags")
+    candidate_feature_flags = _required_str_list(candidate_replay, "featureFlags")
+    if baseline_feature_flags != candidate_feature_flags:
+        raise ValueError("model releases must share replay featureFlags")
+    for field_name in _MODEL_PROMOTION_FROZEN_REPLAY_FIELDS:
         baseline_value = _required_str(baseline_replay, field_name)
         candidate_value = _required_str(candidate_replay, field_name)
         if baseline_value != candidate_value:
             raise ValueError(f"model releases must share replay {field_name}")
+
+    baseline_model = _required_mapping(baseline, "model")
+    candidate_model = _required_mapping(candidate, "model")
+    profile_treatment_changed = any(
+        _required_str(baseline_replay, field_name) != _required_str(candidate_replay, field_name)
+        for field_name in _MODEL_PROMOTION_TREATMENT_PROFILE_FIELDS
+    )
+    if baseline_model == candidate_model and not profile_treatment_changed:
+        raise ValueError(
+            "baseline and candidate must differ in model, retrieval profile, "
+            "or reranker profile treatment"
+        )
 
 
 def _written_immutable_evidence_reference(
