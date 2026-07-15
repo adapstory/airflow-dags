@@ -7058,7 +7058,7 @@ def _public_docs_crawl_state_path(
     root = _artifact_path("artifact_root_path", artifact_root_path).rstrip("/")
     expected_path = _artifact_path(
         "public_docs_crawl_state_path",
-        f"{root}/public-docs-crawl-state.json",
+        f"{root}/public-docs-crawl-state/state.json",
     )
     configured_path = payload.get("public_docs_crawl_state_path")
     if configured_path is None:

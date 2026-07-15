@@ -2267,7 +2267,8 @@ def test_public_docs_seed_registry_allows_url_keys_but_rejects_secret_fields(
 def test_public_docs_crawl_state_conf_overlays_persisted_state(tmp_path: Path) -> None:
     conf = _public_docs_seed_refresh_conf()
     conf["artifact_root_path"] = str(tmp_path)
-    state_path = tmp_path / "public-docs-crawl-state.json"
+    state_path = tmp_path / "public-docs-crawl-state" / "state.json"
+    state_path.parent.mkdir()
     state_path.write_text(
         json.dumps(
             {
@@ -2310,6 +2311,17 @@ def test_public_docs_crawl_state_conf_overlays_persisted_state(tmp_path: Path) -
     assert (
         k3s_seed["crawl_policy"]["previous_state"]["https://docs.k3s.io/"]["content_hash"]
         == "a" * 64
+    )
+
+
+def test_public_docs_crawl_state_uses_a_dedicated_s3_security_prefix() -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = "s3://airflow-serp-evidence/serp-evals"
+
+    plan = build_public_docs_seed_refresh_plan(conf)
+
+    assert plan.payload["public_docs_crawl_state_path"] == (
+        "s3://airflow-serp-evidence/serp-evals/" "public-docs-crawl-state/state.json"
     )
 
 
@@ -2434,7 +2446,7 @@ def test_public_docs_crawl_state_commits_only_after_complete_d5_coverage(
     refresh_plan_path = tmp_path / "refresh-plan.json"
     coverage_path = tmp_path / "coverage.json"
     activation_receipt_path = tmp_path / "activation-receipt.json"
-    state_path = tmp_path / "public-docs-crawl-state.json"
+    state_path = tmp_path / "public-docs-crawl-state" / "state.json"
     receipt_path = tmp_path / "crawl-state-commit-receipt.json"
     refresh_plan = {
         "generated_at": "2026-07-09T21:00:00Z",
@@ -2720,7 +2732,7 @@ def test_d20_writes_public_docs_publish_activation_trigger_conf_artifact(
     assert target_conf["pack_id"] == PACK_ID
     assert target_conf["pack_version_id"] == PACK_VERSION_ID
     assert target_conf["public_docs_crawl_state_path"] == str(
-        tmp_path / "public-docs-crawl-state.json"
+        tmp_path / "public-docs-crawl-state" / "state.json"
     )
     assert (
         target_conf["public_docs_seed_refresh_plan_path"]
@@ -3455,7 +3467,8 @@ def test_public_docs_noop_retains_active_pack_without_bc21_or_d5_publish(
 ) -> None:
     conf = _public_docs_seed_refresh_conf()
     conf["artifact_root_path"] = str(tmp_path)
-    state_path = tmp_path / "public-docs-crawl-state.json"
+    state_path = tmp_path / "public-docs-crawl-state" / "state.json"
+    state_path.parent.mkdir()
     state_path.write_text(
         json.dumps(
             {
@@ -5182,6 +5195,13 @@ def test_serp_public_docs_dag_retries_transient_executor_api_outages() -> None:
     assert retry_delay.keywords[0].value.value == 2
 
 
+def test_serp_public_docs_dag_uses_airflow_3_sdk_exceptions() -> None:
+    source = (REPO_ROOT / "dags" / "serp_web_seed_crawl_refresh.py").read_text(encoding="utf-8")
+
+    assert "from airflow.sdk.exceptions import AirflowSkipException" in source
+    assert "from airflow.exceptions import AirflowSkipException" not in source
+
+
 def test_serp_public_docs_pipeline_task_survives_scheduler_rollout() -> None:
     source = (REPO_ROOT / "dags" / "serp_web_seed_crawl_refresh.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -5582,6 +5602,7 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
             "airflow.providers.standard.operators.trigger_dagrun"
         ),
         "airflow.sdk": types.ModuleType("airflow.sdk"),
+        "airflow.sdk.exceptions": types.ModuleType("airflow.sdk.exceptions"),
         "airflow.utils": types.ModuleType("airflow.utils"),
         "airflow.utils.trigger_rule": types.ModuleType("airflow.utils.trigger_rule"),
         "kubernetes": types.ModuleType("kubernetes"),
@@ -5592,7 +5613,7 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     cast(
         Any, modules["airflow.providers.standard.operators.python"]
     ).PythonOperator = FakePythonOperator
-    cast(Any, modules["airflow.exceptions"]).AirflowSkipException = FakeAirflowSkipException
+    cast(Any, modules["airflow.sdk.exceptions"]).AirflowSkipException = FakeAirflowSkipException
     cast(Any, modules["airflow.exceptions"]).AirflowException = FakeAirflowException
     cast(
         Any, modules["airflow.providers.standard.operators.trigger_dagrun"]

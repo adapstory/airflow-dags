@@ -5,11 +5,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from airflow.configuration import conf
-from airflow.exceptions import AirflowSkipException
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sdk import DAG
+from airflow.sdk.exceptions import AirflowSkipException
 from kubernetes.client import models as k8s
 
 from dags.serp_eval_contracts import (
