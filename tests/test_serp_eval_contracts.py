@@ -5501,12 +5501,24 @@ def test_public_docs_pipeline_runner_env_contract_survives_native_template_rende
     }
 
     for name, value in numeric_values.items():
-        assert values[name] == (f'"{value}"' if value.isdecimal() else value)
+        assert values[name] == f'"{value}"'
     expected_cli_spec_template = (
         "{{ ti.xcom_pull(task_ids='dispatch_pipeline_seed_refresh_handoff') | tojson | urlencode }}"
     )
     assert values["ADAPSTORY_SERP_PIPELINE_CLI_SPEC_URLENCODED"] == expected_cli_spec_template
     assert "ADAPSTORY_SERP_PIPELINE_CLI_SPEC_JSON" not in values
+
+
+@pytest.mark.parametrize("value", ("900", "0.5", "-7", "1e-3"))
+def test_native_template_safe_env_value_preserves_every_numeric_literal_as_a_string(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    module = importlib.import_module("dags.serp_evidence_workload_identity")
+    module = importlib.reload(module)
+
+    assert module.native_template_safe_env_value(value) == f'"{value}"'
 
 
 def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:

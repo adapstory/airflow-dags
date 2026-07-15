@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -41,17 +42,18 @@ _STATIC_CREDENTIAL_ENV_NAMES = (
     "AWS_SECRET_ACCESS_KEY",
     "AWS_SESSION_TOKEN",
 )
+_NATIVE_TEMPLATE_NUMBER = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\Z")
 
 
 def native_template_safe_env_value(value: str) -> str:
-    """Keep decimal environment values strings under native Jinja rendering.
+    """Keep numeric environment values strings under native Jinja rendering.
 
-    Airflow's native template mode parses a bare decimal as an integer before
-    Kubernetes serializes the pod. JSON string syntax retains the original
-    value as a Kubernetes ``EnvVar.value`` string.
+    Airflow's native template mode parses bare integer, fractional, signed,
+    and exponent literals before Kubernetes serializes the pod. JSON string
+    syntax retains the original value as a Kubernetes ``EnvVar.value`` string.
     """
 
-    return json.dumps(value) if value.isdecimal() else value
+    return json.dumps(value) if _NATIVE_TEMPLATE_NUMBER.fullmatch(value) else value
 
 
 def minio_web_identity_env_vars(required_names: Sequence[str]) -> list[k8s.V1EnvVar]:
