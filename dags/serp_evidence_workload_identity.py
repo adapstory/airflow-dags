@@ -28,6 +28,10 @@ EVIDENCE_PREFIX = "serp-evals/"
 TASK_LOG_BUCKET = "airflow-serp-artifacts"
 TASK_LOG_PREFIX = "airflow-task-logs/"
 KUBERNETES_POD_LAUNCHER_SERVICE_ACCOUNT = "airflow-serp-kubernetes-pod-launcher"
+SERP_RUNTIME_USER_ID = 50000
+SERP_RUNTIME_GROUP_ID = 50000
+SERP_RUNTIME_TMP_VOLUME_NAME = "serp-runtime-tmp"
+SERP_RUNTIME_LOGS_VOLUME_NAME = "serp-runtime-logs"
 KUBERNETES_POD_LAUNCHER_LABELS = {
     "adapstory.com/serp-evidence-workload": "true",
     "adapstory.com/serp-network-profile": "kubernetes-pod-launcher",
@@ -155,6 +159,61 @@ def bc21_workload_volume_mounts() -> list[k8s.V1VolumeMount]:
     ]
 
 
+def hardened_runtime_pod_security_context() -> k8s.V1PodSecurityContext:
+    """Pin the restricted pod identity and syscall profile for evidence tasks."""
+
+    return k8s.V1PodSecurityContext(
+        fs_group=SERP_RUNTIME_GROUP_ID,
+        run_as_group=SERP_RUNTIME_GROUP_ID,
+        run_as_non_root=True,
+        run_as_user=SERP_RUNTIME_USER_ID,
+        seccomp_profile=k8s.V1SeccompProfile(type="RuntimeDefault"),
+    )
+
+
+def hardened_runtime_container_security_context() -> k8s.V1SecurityContext:
+    """Make the task image immutable except for explicit ephemeral mounts."""
+
+    return k8s.V1SecurityContext(
+        allow_privilege_escalation=False,
+        capabilities=k8s.V1Capabilities(drop=["ALL"]),
+        read_only_root_filesystem=True,
+        run_as_group=SERP_RUNTIME_GROUP_ID,
+        run_as_non_root=True,
+        run_as_user=SERP_RUNTIME_USER_ID,
+    )
+
+
+def hardened_runtime_volumes() -> list[k8s.V1Volume]:
+    """Return the only writable filesystems available to evidence workloads."""
+
+    return [
+        k8s.V1Volume(
+            name=SERP_RUNTIME_TMP_VOLUME_NAME,
+            empty_dir=k8s.V1EmptyDirVolumeSource(size_limit="2Gi"),
+        ),
+        k8s.V1Volume(
+            name=SERP_RUNTIME_LOGS_VOLUME_NAME,
+            empty_dir=k8s.V1EmptyDirVolumeSource(size_limit="1Gi"),
+        ),
+    ]
+
+
+def hardened_runtime_volume_mounts() -> list[k8s.V1VolumeMount]:
+    return [
+        k8s.V1VolumeMount(
+            name=SERP_RUNTIME_TMP_VOLUME_NAME,
+            mount_path="/tmp",
+            read_only=False,
+        ),
+        k8s.V1VolumeMount(
+            name=SERP_RUNTIME_LOGS_VOLUME_NAME,
+            mount_path="/opt/airflow/logs",
+            read_only=False,
+        ),
+    ]
+
+
 def minio_web_identity_executor_config(
     *,
     service_account_name: str,
@@ -206,11 +265,13 @@ def _evidence_executor_config(
                     k8s.V1Container(
                         name="base",
                         env=env_vars,
-                        volume_mounts=volume_mounts,
+                        security_context=hardened_runtime_container_security_context(),
+                        volume_mounts=[*volume_mounts, *hardened_runtime_volume_mounts()],
                     )
                 ],
+                security_context=hardened_runtime_pod_security_context(),
                 service_account_name=service_account_name,
-                volumes=volumes,
+                volumes=[*volumes, *hardened_runtime_volumes()],
             ),
         )
     }
@@ -233,11 +294,16 @@ def kubernetes_pod_launcher_executor_config() -> dict[str, Any]:
                     k8s.V1Container(
                         name="base",
                         env=minio_web_identity_env_vars(()),
-                        volume_mounts=minio_web_identity_volume_mounts(),
+                        security_context=hardened_runtime_container_security_context(),
+                        volume_mounts=[
+                            *minio_web_identity_volume_mounts(),
+                            *hardened_runtime_volume_mounts(),
+                        ],
                     )
                 ],
+                security_context=hardened_runtime_pod_security_context(),
                 service_account_name=KUBERNETES_POD_LAUNCHER_SERVICE_ACCOUNT,
-                volumes=minio_web_identity_volumes(),
+                volumes=[*minio_web_identity_volumes(), *hardened_runtime_volumes()],
             ),
         )
     }

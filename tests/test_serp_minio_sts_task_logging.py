@@ -201,4 +201,68 @@ def test_kubernetes_pod_launcher_executor_config_keeps_minio_sts_and_api_access_
         "tier": "airflow",
     }
     assert pod.spec.volumes is not None
-    assert [volume.name for volume in pod.spec.volumes] == ["minio-web-identity-token"]
+    assert [volume.name for volume in pod.spec.volumes] == [
+        "minio-web-identity-token",
+        "serp-runtime-tmp",
+        "serp-runtime-logs",
+    ]
+    _assert_hardened_runtime_pod(pod)
+
+
+def test_evidence_executor_config_is_explicitly_hardened_and_writable_only_at_runtime_paths() -> (
+    None
+):
+    with _isolated_task_log_modules() as (_task_logging, workload_identity):
+        config = workload_identity.minio_web_identity_executor_config(
+            service_account_name="airflow-serp-benchmark-evaluator",
+            labels={"adapstory.com/serp-network-profile": "benchmark-evaluator"},
+        )
+
+    pod = config["pod_override"]
+    assert pod.spec is not None
+    assert pod.spec.automount_service_account_token is False
+    assert pod.spec.service_account_name == "airflow-serp-benchmark-evaluator"
+    assert pod.spec.volumes is not None
+    assert [volume.name for volume in pod.spec.volumes] == [
+        "minio-web-identity-token",
+        "serp-runtime-tmp",
+        "serp-runtime-logs",
+    ]
+    _assert_hardened_runtime_pod(pod)
+
+
+def _assert_hardened_runtime_pod(pod: Any) -> None:
+    assert pod.spec.security_context is not None
+    assert pod.spec.security_context.run_as_non_root is True
+    assert pod.spec.security_context.run_as_user == 50000
+    assert pod.spec.security_context.run_as_group == 50000
+    assert pod.spec.security_context.fs_group == 50000
+    assert pod.spec.security_context.seccomp_profile is not None
+    assert pod.spec.security_context.seccomp_profile.type == "RuntimeDefault"
+    assert pod.spec.volumes is not None
+    writable_volumes = {volume.name: volume.empty_dir for volume in pod.spec.volumes}
+    assert writable_volumes["serp-runtime-tmp"].size_limit == "2Gi"
+    assert writable_volumes["serp-runtime-logs"].size_limit == "1Gi"
+
+    assert pod.spec.containers is not None
+    container = pod.spec.containers[0]
+    assert container.security_context is not None
+    assert container.security_context.allow_privilege_escalation is False
+    assert container.security_context.read_only_root_filesystem is True
+    assert container.security_context.run_as_non_root is True
+    assert container.security_context.run_as_user == 50000
+    assert container.security_context.run_as_group == 50000
+    assert container.security_context.capabilities is not None
+    assert container.security_context.capabilities.drop == ["ALL"]
+    assert container.volume_mounts is not None
+    assert [
+        (mount.name, mount.mount_path, mount.read_only) for mount in container.volume_mounts
+    ] == [
+        (
+            "minio-web-identity-token",
+            "/var/run/secrets/adapstory/minio-web-identity",
+            True,
+        ),
+        ("serp-runtime-tmp", "/tmp", False),
+        ("serp-runtime-logs", "/opt/airflow/logs", False),
+    ]
