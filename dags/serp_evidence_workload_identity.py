@@ -39,6 +39,17 @@ _STATIC_CREDENTIAL_ENV_NAMES = (
 )
 
 
+def native_template_safe_env_value(value: str) -> str:
+    """Keep decimal environment values strings under native Jinja rendering.
+
+    Airflow's native template mode parses a bare decimal as an integer before
+    Kubernetes serializes the pod. JSON string syntax retains the original
+    value as a Kubernetes ``EnvVar.value`` string.
+    """
+
+    return json.dumps(value) if value.isdecimal() else value
+
+
 def minio_web_identity_env_vars(required_names: Sequence[str]) -> list[k8s.V1EnvVar]:
     """Return serializable runtime values plus a bounded projected-token contract."""
 
@@ -47,7 +58,7 @@ def minio_web_identity_env_vars(required_names: Sequence[str]) -> list[k8s.V1Env
         value = os.environ.get(name)
         if value is None or not value.strip():
             raise ValueError(f"evidence workload environment is required: {name}")
-        values.append(k8s.V1EnvVar(name=name, value=value.strip()))
+        values.append(k8s.V1EnvVar(name=name, value=native_template_safe_env_value(value.strip())))
     values.extend(
         (
             k8s.V1EnvVar(
@@ -56,7 +67,7 @@ def minio_web_identity_env_vars(required_names: Sequence[str]) -> list[k8s.V1Env
             ),
             k8s.V1EnvVar(
                 name="ADAPSTORY_AIRFLOW_ARTIFACT_S3_STS_DURATION_SECONDS",
-                value=str(MINIO_WEB_IDENTITY_EXPIRATION_SECONDS),
+                value=native_template_safe_env_value(str(MINIO_WEB_IDENTITY_EXPIRATION_SECONDS)),
             ),
         )
     )

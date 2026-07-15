@@ -5149,6 +5149,39 @@ def test_serp_public_docs_dag_runs_default_seed_registry_pipeline_path() -> None
     assert "airflow-serp-public-docs-acquisition" in source
 
 
+def test_serp_public_docs_dag_retries_transient_executor_api_outages() -> None:
+    source = (REPO_ROOT / "dags" / "serp_web_seed_crawl_refresh.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    default_args = next(
+        node.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "default_args" for target in node.targets
+        )
+    )
+    assert isinstance(default_args, ast.Dict)
+    values = {
+        key.value: value
+        for key, value in zip(default_args.keys, default_args.values, strict=True)
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
+
+    retries = values["retries"]
+    assert isinstance(retries, ast.Constant)
+    assert retries.value == 2
+
+    retry_delay = values["retry_delay"]
+    assert isinstance(retry_delay, ast.Call)
+    assert isinstance(retry_delay.func, ast.Name)
+    assert retry_delay.func.id == "timedelta"
+    assert len(retry_delay.keywords) == 1
+    assert retry_delay.keywords[0].arg == "minutes"
+    assert isinstance(retry_delay.keywords[0].value, ast.Constant)
+    assert retry_delay.keywords[0].value.value == 2
+
+
 def test_serp_public_docs_pipeline_task_survives_scheduler_rollout() -> None:
     source = (REPO_ROOT / "dags" / "serp_web_seed_crawl_refresh.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -5444,7 +5477,7 @@ def test_public_docs_pipeline_runner_env_contract_survives_native_template_rende
     }
 
     for name, value in numeric_values.items():
-        assert values[name] == value
+        assert values[name] == (f'"{value}"' if value.isdecimal() else value)
     expected_cli_spec_template = (
         "{{ ti.xcom_pull(task_ids='dispatch_pipeline_seed_refresh_handoff') | tojson | urlencode }}"
     )
@@ -5664,7 +5697,7 @@ def test_serp_improvement_dag_passes_exact_s3_values_to_the_evaluator_pod(
     assert values == {
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT": ("http://minio.env-prod.svc.cluster.local:9000"),
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION": "us-west-1",
-        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_STS_DURATION_SECONDS": "900",
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_STS_DURATION_SECONDS": '"900"',
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_WEB_IDENTITY_TOKEN_FILE": (
             "/var/run/secrets/adapstory/minio-web-identity/token"
         ),
@@ -5675,8 +5708,10 @@ def test_web_identity_env_values_are_plain_strings_serializable_by_airflow() -> 
     source = (REPO_ROOT / "dags" / "serp_evidence_workload_identity.py").read_text(encoding="utf-8")
 
     assert "from airflow.sdk import literal" not in source
-    assert "value=value.strip()" in source
-    assert "value=str(MINIO_WEB_IDENTITY_EXPIRATION_SECONDS)" in source
+    assert "value=native_template_safe_env_value(value.strip())" in source
+    assert (
+        "value=native_template_safe_env_value(str(MINIO_WEB_IDENTITY_EXPIRATION_SECONDS))" in source
+    )
 
 
 def test_airflowignore_excludes_non_dag_test_modules() -> None:

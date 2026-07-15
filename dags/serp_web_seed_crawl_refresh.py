@@ -179,7 +179,8 @@ def prepare_public_docs_d5_dispatch(**context: Any) -> dict[str, Any]:
 default_args = {
     "owner": "serp-public-docs-refresh",
     "start_date": datetime(2026, 7, 8, tzinfo=UTC),
-    "retries": 0,
+    "retries": 2,
+    "retry_delay": timedelta(minutes=2),
 }
 
 dag = DAG(
