@@ -14,6 +14,8 @@ from airflow.sdk import DAG
 from kubernetes.client import models as k8s
 
 from dags.serp_evidence_workload_identity import (
+    bc10_workload_volume_mounts,
+    bc10_workload_volumes,
     bc21_authorized_minio_executor_config,
     kubernetes_pod_launcher_executor_config,
     minio_web_identity_env_vars,
@@ -105,8 +107,14 @@ _SCIFACT_EVALUATOR_ENV_NAMES = (
     "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION",
     "ADAPSTORY_SERP_SEARCH_SERVE_BASE_URL",
 )
-SCIFACT_INDEXER_WEB_IDENTITY_VOLUMES = minio_web_identity_volumes()
-SCIFACT_INDEXER_WEB_IDENTITY_VOLUME_MOUNTS = minio_web_identity_volume_mounts()
+SCIFACT_INDEXER_RUNTIME_VOLUMES = [
+    *minio_web_identity_volumes(),
+    *bc10_workload_volumes(),
+]
+SCIFACT_INDEXER_RUNTIME_VOLUME_MOUNTS = [
+    *minio_web_identity_volume_mounts(),
+    *bc10_workload_volume_mounts(),
+]
 SCIFACT_EVALUATOR_WEB_IDENTITY_VOLUMES = minio_web_identity_volumes()
 SCIFACT_EVALUATOR_WEB_IDENTITY_VOLUME_MOUNTS = minio_web_identity_volume_mounts()
 
@@ -240,8 +248,8 @@ index_scifact = KubernetesPodOperator(
     env_vars=scifact_indexer_env_vars(),
     service_account_name=SCIFACT_INDEXER_WORKLOAD_SERVICE_ACCOUNT,
     automount_service_account_token=False,
-    volumes=SCIFACT_INDEXER_WEB_IDENTITY_VOLUMES,
-    volume_mounts=SCIFACT_INDEXER_WEB_IDENTITY_VOLUME_MOUNTS,
+    volumes=SCIFACT_INDEXER_RUNTIME_VOLUMES,
+    volume_mounts=SCIFACT_INDEXER_RUNTIME_VOLUME_MOUNTS,
     labels=SCIFACT_INDEXER_WORKLOAD_LABELS,
     container_resources=SERP_PIPELINE_RUNNER_RESOURCES,
     container_security_context=k8s.V1SecurityContext(

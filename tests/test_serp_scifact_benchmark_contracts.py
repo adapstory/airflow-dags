@@ -207,7 +207,7 @@ def test_bc21_authorized_executor_projects_a_bounded_authorization_token() -> No
     assert "automount_service_account_token=False" in source
 
 
-def test_scifact_indexer_uses_web_identity_without_static_minio_credentials() -> None:
+def test_scifact_indexer_uses_minio_and_bc10_projected_identities() -> None:
     source = (
         Path(__file__).resolve().parents[1] / "dags" / "serp_beir_scifact_live_benchmark.py"
     ).read_text(encoding="utf-8")
@@ -229,12 +229,15 @@ def test_scifact_indexer_uses_web_identity_without_static_minio_credentials() ->
     assert isinstance(indexer_env, ast.Call)
     assert isinstance(indexer_env.func, ast.Name)
     assert indexer_env.func.id == "scifact_indexer_env_vars"
-    assert "volumes=SCIFACT_INDEXER_WEB_IDENTITY_VOLUMES" in source
-    assert "volume_mounts=SCIFACT_INDEXER_WEB_IDENTITY_VOLUME_MOUNTS" in source
+    assert "volumes=SCIFACT_INDEXER_RUNTIME_VOLUMES" in source
+    assert "volume_mounts=SCIFACT_INDEXER_RUNTIME_VOLUME_MOUNTS" in source
+    assert "*bc10_workload_volumes()" in source
+    assert "*bc10_workload_volume_mounts()" in source
     indexer_contract = source.split("def scifact_indexer_env_vars()", 1)[1].split(
         "def scifact_evaluator_env_vars()", 1
     )[0]
     assert "return pipeline_runner_runtime_env_vars()" in indexer_contract
+    assert "ADAPSTORY_OLLAMA_BASE_URL" not in source
     assert "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ACCESS_KEY" not in source
     assert "ADAPSTORY_AIRFLOW_ARTIFACT_S3_SECRET_KEY" not in source
 
