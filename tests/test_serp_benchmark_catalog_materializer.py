@@ -194,19 +194,29 @@ def test_catalog_acquisition_workload_has_minimal_proxy_and_evidence_contract(
     )
     assert literal_env["ADAPSTORY_AIRFLOW_ARTIFACT_S3_STS_DURATION_SECONDS"] == '"900"'
     assert literal_env["ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS"] == '"365"'
-    assert literal_env["ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE"] == (
-        '{"objectLockMode":"COMPLIANCE","s3Uri":"s3://airflow-serp-evidence/'
-        'serp-evals/substrates/source-set.json","sha256":"sha256:'
-        + "a" * 64
-        + '","versionId":"source-set-v1"}'
-    )
     assert literal_env["ADAPSTORY_SERP_SOURCE_PROXY_URL"] == (
         "http://forward-proxy.forward-proxy.svc:3128"
     )
     assert literal_env["HTTP_PROXY"] == "http://forward-proxy.forward-proxy.svc:3128"
     assert literal_env["HTTPS_PROXY"] == "http://forward-proxy.forward-proxy.svc:3128"
     assert ".svc.cluster.local" in literal_env["NO_PROXY"]
-    assert all(env_var.value_from is None for env_var in env_vars)
+    source_set_env = next(
+        env_var
+        for env_var in env_vars
+        if env_var.name == "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE"
+    )
+    assert source_set_env.value is None
+    assert source_set_env.value_from is not None
+    selector = source_set_env.value_from.config_map_key_ref
+    assert selector is not None
+    assert selector.name == "airflow-evaluation-runtime-contract"
+    assert selector.key == "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE"
+    assert selector.optional is False
+    assert all(
+        env_var.value_from is None
+        for env_var in env_vars
+        if env_var.name != "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE"
+    )
     assert benchmark_catalog_acquisition_web_identity_volumes()[0].to_dict() == {
         "aws_elastic_block_store": None,
         "azure_disk": None,
@@ -271,6 +281,38 @@ def test_catalog_acquisition_workload_has_minimal_proxy_and_evidence_contract(
         "requests": {"cpu": "500m", "memory": "1Gi"},
     }
     assert BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS == 90
+
+
+def test_catalog_acquisition_source_set_is_resolved_from_required_gitops_config_map(
+    monkeypatch: Any,
+) -> None:
+    for name, value in {
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT": "http://minio.env-prod.svc:9000",
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_PATH_STYLE": "true",
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION": "us-east-1",
+        "ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS": "365",
+        "ADAPSTORY_SERP_SOURCE_PROXY_URL": "http://forward-proxy.forward-proxy.svc:3128",
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv(
+        "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE",
+        raising=False,
+    )
+
+    env_vars = benchmark_catalog_acquisition_env_vars()
+
+    source_set_env = next(
+        env_var
+        for env_var in env_vars
+        if env_var.name == "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE"
+    )
+    assert source_set_env.value is None
+    assert source_set_env.value_from is not None
+    selector = source_set_env.value_from.config_map_key_ref
+    assert selector is not None
+    assert selector.name == "airflow-evaluation-runtime-contract"
+    assert selector.key == "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE"
+    assert selector.optional is False
     assert benchmark_catalog_acquisition_pod_security_context().to_dict() == {
         "app_armor_profile": None,
         "fs_group": None,

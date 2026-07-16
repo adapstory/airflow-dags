@@ -29,11 +29,11 @@ BENCHMARK_CATALOG_ACQUISITION_RESOURCES = k8s.V1ResourceRequirements(
     limits={"cpu": "1000m", "memory": "3Gi"},
 )
 BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS = 90
-_BENCHMARK_CATALOG_ACQUISITION_ENV_NAMES = (
+BENCHMARK_SUBSTRATE_SOURCE_SET_CONFIG_MAP = "airflow-evaluation-runtime-contract"
+BENCHMARK_SUBSTRATE_SOURCE_SET_ENV_NAME = "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE"
+_BENCHMARK_CATALOG_ACQUISITION_LITERAL_ENV_NAMES = (
     "ADAPSTORY_AIRFLOW_ARTIFACT_S3_PATH_STYLE",
     "ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS",
-    "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE",
-    "ADAPSTORY_SERP_SOURCE_PROXY_URL",
 )
 _BENCHMARK_CATALOG_ACQUISITION_WEB_IDENTITY_ENV_NAMES = (
     "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT",
@@ -51,12 +51,35 @@ def benchmark_catalog_acquisition_env_vars() -> list[k8s.V1EnvVar]:
     """Return proxy settings plus projected MinIO STS identity for acquisition."""
 
     values = minio_web_identity_env_vars(_BENCHMARK_CATALOG_ACQUISITION_WEB_IDENTITY_ENV_NAMES)
-    for name in _BENCHMARK_CATALOG_ACQUISITION_ENV_NAMES:
+    for name in _BENCHMARK_CATALOG_ACQUISITION_LITERAL_ENV_NAMES:
         value = os.environ.get(name)
         if value is None or not value.strip():
             raise ValueError(f"benchmark catalog acquisition environment is required: {name}")
         values.append(k8s.V1EnvVar(name=name, value=native_template_safe_env_value(value.strip())))
-    proxy_url = os.environ["ADAPSTORY_SERP_SOURCE_PROXY_URL"].strip()
+    values.append(
+        k8s.V1EnvVar(
+            name=BENCHMARK_SUBSTRATE_SOURCE_SET_ENV_NAME,
+            value_from=k8s.V1EnvVarSource(
+                config_map_key_ref=k8s.V1ConfigMapKeySelector(
+                    key=BENCHMARK_SUBSTRATE_SOURCE_SET_ENV_NAME,
+                    name=BENCHMARK_SUBSTRATE_SOURCE_SET_CONFIG_MAP,
+                    optional=False,
+                )
+            ),
+        )
+    )
+    proxy_url = os.environ.get("ADAPSTORY_SERP_SOURCE_PROXY_URL", "").strip()
+    if not proxy_url:
+        raise ValueError(
+            "benchmark catalog acquisition environment is required: "
+            "ADAPSTORY_SERP_SOURCE_PROXY_URL"
+        )
+    values.append(
+        k8s.V1EnvVar(
+            name="ADAPSTORY_SERP_SOURCE_PROXY_URL",
+            value=native_template_safe_env_value(proxy_url),
+        )
+    )
     values.extend(
         (
             k8s.V1EnvVar(name="HTTP_PROXY", value=proxy_url),

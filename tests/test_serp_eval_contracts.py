@@ -5880,7 +5880,6 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         "ADAPSTORY_SERP_QDRANT_URL",
         "ADAPSTORY_SERP_SEARCH_SERVE_ACTOR_ID",
         "ADAPSTORY_SERP_SEARCH_SERVE_BASE_URL",
-        "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE",
         "ADAPSTORY_SERP_PUBLIC_DOCS_RETRY_DELAY_SECONDS",
         "ADAPSTORY_SERP_SOURCE_CURL_FALLBACK_ENABLED",
         "ADAPSTORY_SERP_SOURCE_FETCH_TIMEOUT_SECONDS",
@@ -5936,6 +5935,7 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     cast(Any, modules["airflow.utils.trigger_rule"]).TriggerRule = FakeTriggerRule
     models = cast(Any, modules["kubernetes.client.models"])
     models.V1Capabilities = FakeKubernetesModel
+    models.V1ConfigMapKeySelector = FakeKubernetesModel
     models.V1ConfigMapProjection = FakeKubernetesModel
     models.V1EnvVar = FakeKubernetesModel
     models.V1EnvVarSource = FakeKubernetesModel
