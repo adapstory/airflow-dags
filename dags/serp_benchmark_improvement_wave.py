@@ -24,6 +24,7 @@ from dags.serp_benchmark_catalog_workload import (
     benchmark_catalog_acquisition_web_identity_volume_mounts,
     benchmark_catalog_acquisition_web_identity_volumes,
 )
+from dags.serp_d19_history_observer import admit_d19_run
 from dags.serp_eval_contracts import (
     MANDATORY_SERP_BENCHMARK_SUITES,
     build_benchmark_improvement_wave_plan,
@@ -34,6 +35,7 @@ from dags.serp_eval_contracts import (
     write_airflow_plan_artifact,
     write_immutable_evidence_snapshot,
     write_paired_eval_request_artifact,
+    write_paired_evaluation_verification_evidence,
 )
 from dags.serp_evidence_workload_identity import (
     MINIO_WEB_IDENTITY_EXPIRATION_SECONDS,
@@ -61,6 +63,7 @@ from dags.serp_evidence_workload_identity import (
 )
 from dags.serp_web_seed_crawl_refresh import current_airflow_runtime_image
 
+D19_DAG_ID = "serp_benchmark_improvement_wave"
 D19_OFFICIAL_HARNESS_WORK_ITEMS = tuple(
     (suite_id, side, repetition)
     for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
@@ -92,6 +95,7 @@ _REPOSITORY = re.compile(
 )
 
 D19_AGGREGATOR_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-benchmark-aggregator"
+D19_ADMISSION_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-d19-history-observer"
 D19_BUILDER_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-benchmark-builder"
 D19_MODEL_RUNNER_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-benchmark-model-runner"
 D19_CODE_SANDBOX_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-benchmark-code-sandbox"
@@ -119,6 +123,13 @@ D19_CODE_SANDBOX_WORKLOAD_LABELS = {
 D19_BUILDER_WORKLOAD_LABELS = {
     "adapstory.com/serp-evidence-workload": "true",
     "adapstory.com/serp-network-profile": "benchmark-builder",
+    "component": "worker",
+    "release": "airflow",
+    "tier": "airflow",
+}
+D19_ADMISSION_WORKLOAD_LABELS = {
+    "adapstory.com/serp-evidence-workload": "true",
+    "adapstory.com/serp-network-profile": "d19-fence-admission",
     "component": "worker",
     "release": "airflow",
     "tier": "airflow",
@@ -301,6 +312,63 @@ D19_CODE_SANDBOX_PUBLISHER_RESOURCES = k8s.V1ResourceRequirements(
     requests={"cpu": "500m", "ephemeral-storage": "1Gi", "memory": "1Gi"},
     limits={"cpu": "1000m", "ephemeral-storage": "3Gi", "memory": "3Gi"},
 )
+D19_ADMISSION_KUBERNETES_API_VOLUME = k8s.V1Volume(
+    name="d19-admission-kubernetes-api",
+    projected=k8s.V1ProjectedVolumeSource(
+        sources=[
+            k8s.V1VolumeProjection(
+                service_account_token=k8s.V1ServiceAccountTokenProjection(
+                    expiration_seconds=600,
+                    path="token",
+                )
+            ),
+            k8s.V1VolumeProjection(
+                config_map=k8s.V1ConfigMapProjection(
+                    items=[k8s.V1KeyToPath(key="ca.crt", path="ca.crt")],
+                    name="kube-root-ca.crt",
+                )
+            ),
+        ]
+    ),
+)
+D19_ADMISSION_EXECUTOR_CONFIG = {
+    "pod_override": k8s.V1Pod(
+        metadata=k8s.V1ObjectMeta(labels=D19_ADMISSION_WORKLOAD_LABELS),
+        spec=k8s.V1PodSpec(
+            automount_service_account_token=False,
+            containers=[
+                k8s.V1Container(
+                    name="base",
+                    env=[
+                        k8s.V1EnvVar(
+                            name="ADAPSTORY_KUBERNETES_API_CA_FILE",
+                            value="/var/run/secrets/adapstory/kubernetes-api/ca.crt",
+                        ),
+                        k8s.V1EnvVar(
+                            name="ADAPSTORY_KUBERNETES_API_TOKEN_FILE",
+                            value="/var/run/secrets/adapstory/kubernetes-api/token",
+                        ),
+                    ],
+                    security_context=hardened_runtime_container_security_context(),
+                    volume_mounts=[
+                        k8s.V1VolumeMount(
+                            name="d19-admission-kubernetes-api",
+                            mount_path="/var/run/secrets/adapstory/kubernetes-api",
+                            read_only=True,
+                        ),
+                        *hardened_runtime_volume_mounts(),
+                    ],
+                )
+            ],
+            security_context=hardened_runtime_pod_security_context(),
+            service_account_name=D19_ADMISSION_WORKLOAD_SERVICE_ACCOUNT,
+            volumes=[
+                D19_ADMISSION_KUBERNETES_API_VOLUME,
+                *hardened_runtime_volumes(),
+            ],
+        ),
+    )
+}
 
 
 def d19_aggregator_env_vars() -> list[k8s.V1EnvVar]:
@@ -699,6 +767,26 @@ def validate_benchmark_improvement_wave_plan(**context: Any) -> dict[str, Any]:
     return plan
 
 
+def validate_d19_fence_admission(**context: Any) -> dict[str, Any]:
+    dag_run = context.get("dag_run")
+    if dag_run is None:
+        raise ValueError("D19 fence admission requires authoritative DagRun metadata")
+    run_type = getattr(dag_run, "run_type", None)
+    run_type_value = getattr(run_type, "value", run_type)
+    logical_date = context.get("logical_date") or getattr(dag_run, "logical_date", None)
+    if not isinstance(logical_date, datetime) or logical_date.tzinfo is None:
+        raise ValueError("D19 fence admission logical_date must be timezone-aware")
+    return admit_d19_run(
+        dag_run_conf=getattr(dag_run, "conf", None) or {},
+        airflow_run={
+            "dagId": D19_DAG_ID,
+            "logicalDate": logical_date.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+            "runId": str(getattr(dag_run, "run_id", "")),
+            "runType": str(run_type_value),
+        },
+    )
+
+
 def load_materialized_benchmark_catalog(plan_json: str) -> dict[str, Any]:
     return load_materialized_benchmark_catalog_snapshot(plan_json)
 
@@ -946,6 +1034,13 @@ dag = DAG(
     is_paused_upon_creation=False,
     render_template_as_native_obj=True,
     tags=["serp", "evals", "benchmark", "improvement"],
+)
+
+validate_admission = PythonOperator(
+    task_id="validate_d19_fence_admission",
+    python_callable=validate_d19_fence_admission,
+    executor_config=D19_ADMISSION_EXECUTOR_CONFIG,
+    dag=dag,
 )
 
 validate_plan = PythonOperator(
@@ -1584,6 +1679,23 @@ run_paired_evaluation = KubernetesPodOperator(
     dag=dag,
 )
 
+persist_paired_evaluation_verification = PythonOperator(
+    task_id="persist_paired_evaluation_verification_evidence",
+    python_callable=write_paired_evaluation_verification_evidence,
+    op_kwargs={
+        "airflow_run": {
+            "dagId": "{{ dag.dag_id }}",
+            "logicalDate": "{{ logical_date.isoformat() }}",
+            "runId": "{{ run_id }}",
+            "runType": "{{ dag_run.run_type.value }}",
+        },
+        "evaluator_result": ("{{ ti.xcom_pull(task_ids='run_paired_benchmark_evaluation') }}"),
+        "plan_json": ("{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') }}"),
+    },
+    executor_config=D19_AGGREGATOR_EXECUTOR_CONFIG,
+    dag=dag,
+)
+
 notify_governance = PythonOperator(
     task_id="notify_governance_eval_surfaces",
     python_callable=governance_notification_pending,
@@ -1592,7 +1704,7 @@ notify_governance = PythonOperator(
     dag=dag,
 )
 
-validate_plan >> materialize_catalog >> load_catalog
+validate_admission >> validate_plan >> materialize_catalog >> load_catalog
 validate_plan >> load_promotion
 load_catalog >> build_exact_nine_benchmark_packs
 load_promotion >> build_exact_nine_benchmark_packs
@@ -1613,4 +1725,9 @@ for identity, prepare_task in D19_CODE_SANDBOX_PREPARE_TASKS.items():
     prepare_task >> fanout_task >> sandbox_task >> result_set_plan_task
     result_set_plan_task >> seal_task >> write_assembly_plan
 write_assembly_plan >> assemble_paired_execution_manifest
-assemble_paired_execution_manifest >> run_paired_evaluation >> notify_governance
+(
+    assemble_paired_execution_manifest
+    >> run_paired_evaluation
+    >> persist_paired_evaluation_verification
+    >> notify_governance
+)

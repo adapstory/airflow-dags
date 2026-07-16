@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import importlib
 import json
 import logging
@@ -8,7 +7,6 @@ import math
 import os
 import re
 import subprocess
-import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -61,15 +59,37 @@ _GATEWAY_CLI_CONTRACT_VERSION = "serp-airflow-gateway-cli-bridge/v1"
 _PIPELINE_CLI_CONTRACT_VERSION = "serp-airflow-pipeline-cli-bridge/v1"
 _AIRFLOW_ARTIFACT_CONTRACT_VERSION = "serp-airflow-artifact-writer/v1"
 _EVAL_CONTRACT_VERSION = "2026.07.2"
-_BENCHMARK_SUITE_CONTRACT_VERSION = "2026.07.3"
-_BENCHMARK_EVALUATION_CONTRACT_CODE = "d6-evidence-2026.07.3"
 _METRIC_COMPATIBILITY_CONTRACT_VERSION = "serp-suite-metric-compatibility/v1"
 _CI_EVALUATION_RELEASE_CONTRACT_VERSION = "serp-ci-evaluation-release-evidence/v5"
 _EVALUATION_RELEASE_SCHEMA = "EvaluationRelease/v3"
 _EVALUATION_RELEASE_PROMOTION_SCHEMA = "EvaluationReleasePromotionReceipt/v5"
 _PAIRED_EVALUATION_REQUEST_SCHEMA = "PairedEvaluationRequest/v5"
+_PAIRED_EVALUATION_RECEIPT_CONTRACT_VERSION = "serp-paired-eval-receipt/v9"
+_PAIRED_EVALUATION_VERIFICATION_EVIDENCE_SCHEMA = "PairedEvaluationVerificationEvidence/v1"
+_PAIRED_EVALUATION_FINAL_RECEIPT_PURPOSE = "serp-paired-evaluation-final-receipt"
+_D19_RUN_HISTORY_OBSERVATION_PURPOSE = "serp-d19-run-history-observation"
+_PAIRED_EVALUATION_ATTESTATION_PURPOSES = {
+    "evaluationObjective": "serp-evaluation-objective",
+    "evaluationReferenceSet": "serp-evaluation-reference-set",
+    "executionManifest": "serp-evaluation-execution-manifest",
+}
+_PAIRED_EVALUATION_PURPOSE_TRANSIT_KEYS = {
+    "serp-evaluation-objective": "serp-evaluation-authority",
+    "serp-evaluation-reference-set": "serp-evaluation-authority",
+    "serp-evaluation-execution-manifest": "serp-evaluation-runtime",
+    _PAIRED_EVALUATION_FINAL_RECEIPT_PURPOSE: "serp-evaluation-runtime",
+    _D19_RUN_HISTORY_OBSERVATION_PURPOSE: "serp-d19-history-observation",
+}
 _BENCHMARK_CATALOG_PACK_ACTIVATION_SCHEMA = "BenchmarkCatalogPackActivation/v1"
 _MODEL_PROMOTION_DAG_ID = "serp_model_catalog_promotion"
+_D19_DAG_ID = "serp_benchmark_improvement_wave"
+_D19_VERIFICATION_EVIDENCE_MAX_BYTES = 16_000_000
+_SCHEDULED_D6_DAG_ID = "serp_nightly_regression_suite"
+_SCHEDULED_D6_RECEIPT_SCHEMA = "ScheduledD6RegressionReceipt/v1"
+_D19_RUN_HISTORY_OBSERVATION_SCHEMA = "D19RunHistoryObservation/v1"
+_D19_RUN_HISTORY_OBSERVER_SERVICE_ACCOUNT = "airflow-serp-d19-history-observer"
+_D19_RUN_HISTORY_OBSERVER_NAMESPACE = "airflow"
+_SCHEDULED_D6_PRIOR_STREAK_LENGTH = 3
 _EVALUATION_PROFILE_EVIDENCE_FIELDS = (
     "evaluatorRunnerEvidence",
     "officialScorerEvidence",
@@ -122,7 +142,6 @@ _CATALOG_EXECUTION_STATUSES = frozenset(
         "rights-policy-blocked",
     }
 )
-_CATALOG_BLOCKING_REASON_ORDER = ("rights-policy-blocked",)
 _FORBIDDEN_INLINE_D19_FIELDS = frozenset(
     {
         "baseline_run_id",
@@ -228,19 +247,16 @@ _BC21_BASE_URL_ENV = "ADAPSTORY_SERP_BC21_BASE_URL"
 _BC21_SERVICE_ACCOUNT_TOKEN_PATH_ENV = "ADAPSTORY_SERP_SERVICE_ACCOUNT_TOKEN_PATH"
 _NIGHTLY_REGRESSION_RUNTIME_ENV = {
     "actor_id": "ADAPSTORY_SERP_D6_ACTOR_ID",
-    "candidate_release_evidence": "ADAPSTORY_SERP_D6_CANDIDATE_RELEASE_EVIDENCE",
-    "evaluation_objective_evidence": "ADAPSTORY_SERP_D6_EVALUATION_OBJECTIVE_EVIDENCE",
-    "pack_version_ids": "ADAPSTORY_SERP_D6_PACK_VERSION_IDS",
-    "paired_evaluation_receipt_evidence": ("ADAPSTORY_SERP_D6_PAIRED_EVALUATION_RECEIPT_EVIDENCE"),
-    "paired_evaluation_verification_evidence": (
-        "ADAPSTORY_SERP_D6_PAIRED_EVALUATION_VERIFICATION_EVIDENCE"
+    "evaluation_release_promotion_evidence": (
+        "ADAPSTORY_SERP_D6_EVALUATION_RELEASE_PROMOTION_EVIDENCE"
     ),
     "registry_resource_id": "ADAPSTORY_SERP_D6_REGISTRY_RESOURCE_ID",
     "registry_resource_type": "ADAPSTORY_SERP_D6_REGISTRY_RESOURCE_TYPE",
-    "reranker_profile_version": "ADAPSTORY_SERP_D6_RERANKER_PROFILE_VERSION",
-    "retrieval_profile_version": "ADAPSTORY_SERP_D6_RETRIEVAL_PROFILE_VERSION",
     "tenant_id": "ADAPSTORY_SERP_D6_TENANT_ID",
 }
+_LEGACY_NIGHTLY_PRIOR_VERIFICATION_ENV = (
+    "ADAPSTORY_SERP_D6_PRIOR_PAIRED_EVALUATION_VERIFICATION_EVIDENCE"
+)
 _NIGHTLY_REGRESSION_SCHEDULE_PROBE_AT = "2026-01-01T00:00:00Z"
 _DEFAULT_SERVICE_ACCOUNT_TOKEN_PATH = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
 _PUBLIC_DOCS_DEFAULT_QDRANT_COLLECTION = "serp_vectors_dev"
@@ -322,179 +338,6 @@ class _ArtifactRef:
     key: str | None = None
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog=f"{GATEWAY_CLI_PYTHON} -m {GATEWAY_CLI_MODULE}",
-        description="Self-contained SERP Airflow D6 eval runner and BC-21 bridge.",
-    )
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    nightly_report = subparsers.add_parser("nightly-report")
-    nightly_report.add_argument("--airflow-plan", required=True)
-    nightly_report.add_argument("--suite-plan", required=True)
-    nightly_report.set_defaults(handler=_cli_nightly_report)
-
-    benchmark_export = subparsers.add_parser("nightly-benchmark-export")
-    benchmark_export.add_argument("--airflow-plan", required=True)
-    benchmark_export.add_argument("--nightly-report", required=True)
-    benchmark_export.set_defaults(handler=_cli_nightly_benchmark_export)
-
-    registry_submissions = subparsers.add_parser("nightly-registry-submissions")
-    registry_submissions.add_argument("--airflow-plan", required=True)
-    registry_submissions.add_argument("--nightly-report", required=True)
-    registry_submissions.set_defaults(handler=_cli_nightly_registry_submissions)
-
-    submit_registry_submissions = subparsers.add_parser("submit-nightly-registry-submissions")
-    submit_registry_submissions.add_argument("--airflow-plan", required=True)
-    submit_registry_submissions.add_argument("--nightly-registry-submissions", required=True)
-    submit_registry_submissions.add_argument("--bc21-base-url", required=True)
-    submit_registry_submissions.set_defaults(handler=_cli_submit_registry_submissions)
-
-    args = parser.parse_args(argv)
-    try:
-        output = args.handler(args)
-    except (OSError, ValueError) as exc:
-        print(str(exc), file=sys.stderr)
-        return 2
-    print(_canonical_json(output))
-    return 0
-
-
-def _cli_nightly_report(args: argparse.Namespace) -> Mapping[str, Any]:
-    airflow_plan = _read_json_file(args.airflow_plan, "airflow_plan")
-    suite_plan = _read_json_file(args.suite_plan, "suite_plan")
-    _assert_plan_matches_suite_plan(airflow_plan, suite_plan)
-    return _nightly_report_from_suite_plan_payload(suite_plan)
-
-
-def _cli_nightly_benchmark_export(args: argparse.Namespace) -> Mapping[str, Any]:
-    airflow_plan = _read_json_file(args.airflow_plan, "airflow_plan")
-    report = _read_json_file(args.nightly_report, "nightly_report")
-    _assert_plan_matches_report(airflow_plan, report)
-    payload = _benchmark_export_payload(report)
-    _validate_benchmark_export_payload(payload)
-    return payload
-
-
-def _cli_nightly_registry_submissions(args: argparse.Namespace) -> Mapping[str, Any]:
-    airflow_plan = _read_json_file(args.airflow_plan, "airflow_plan")
-    report = _read_json_file(args.nightly_report, "nightly_report")
-    _assert_plan_matches_report(airflow_plan, report)
-    return _live_registry_submissions_payload(
-        report,
-        actor_id=_required_str(airflow_plan, "actor_id"),
-    )
-
-
-def _cli_submit_registry_submissions(args: argparse.Namespace) -> Mapping[str, Any]:
-    airflow_plan = _read_json_file(args.airflow_plan, "airflow_plan")
-    submissions = _read_json_file(
-        args.nightly_registry_submissions,
-        "nightly_registry_submissions",
-    )
-    _assert_equal("tenant_id", _required_str(airflow_plan, "tenant_id"), submissions)
-    return _submit_live_registry_submissions(
-        submissions,
-        bc21_base_url=args.bc21_base_url,
-    )
-
-
-def _required_nightly_benchmark_suite_inputs(
-    payload: Mapping[str, Any], *, selected_suite_ids: Sequence[str]
-) -> list[dict[str, Any]]:
-    """Accept only adapter-produced suites with immutable execution provenance.
-
-    D6 is a production benchmark gate. It must consume actual adapter output,
-    never manufacture ranked chunks, aggregate observations, or reference
-    scores. The immutable dataset and run-evidence locations make every score
-    independently replayable from MinIO/BC-21 evidence.
-    """
-
-    suites = _required_object_list(payload, "benchmark_suite_inputs")
-    observed_suite_ids = tuple(_required_str(suite, "suite_id") for suite in suites)
-    if observed_suite_ids != tuple(selected_suite_ids):
-        raise ValueError("benchmark_suite_inputs must match selected_suite_ids in canonical order")
-    materialized: list[dict[str, Any]] = []
-    metric_compatibility: dict[str, Any] | None = None
-    for suite in suites:
-        _reject_raw_secrets(suite)
-        if _required_str(suite, "suite_contract_version") != _BENCHMARK_SUITE_CONTRACT_VERSION:
-            raise ValueError("benchmark_suite_inputs has unsupported suite_contract_version")
-        if not _required_object_list(suite, "cases"):
-            raise ValueError("benchmark_suite_inputs suite cases must not be empty")
-        if not _required_object_list(suite, "references"):
-            raise ValueError("benchmark_suite_inputs suite references must not be empty")
-        suite_metric_compatibility = _required_metric_compatibility(
-            _required_mapping(suite, "metric_compatibility"),
-            selected_suite_ids=selected_suite_ids,
-            contract_version_field="contract_version",
-            matrix_uri_field="matrix_uri",
-            matrix_sha256_field="matrix_sha256",
-            matrix_version_id_field="matrix_version_id",
-            suite_id_field="suite_id",
-            metric_families_field="metric_families",
-        )
-        if metric_compatibility is None:
-            metric_compatibility = suite_metric_compatibility
-        elif _canonical_json(metric_compatibility) != _canonical_json(suite_metric_compatibility):
-            raise ValueError("benchmark_suite_inputs must use the same metric_compatibility matrix")
-        _validate_nightly_suite_metric_records(
-            suite,
-            required_metric_families=_metric_families_for_suite(
-                suite_metric_compatibility,
-                _required_str(suite, "suite_id"),
-            ),
-        )
-        _validate_nightly_benchmark_suite_provenance(
-            _required_mapping(suite, "metadata"),
-        )
-        materialized.append(dict(suite))
-    return materialized
-
-
-def _validate_nightly_benchmark_suite_provenance(metadata: Mapping[str, Any]) -> None:
-    for field_name in (
-        "adapter_id",
-        "adapter_version",
-        "adapter_source_uri",
-        "adapter_source_revision",
-        "adapter_image_digest",
-        "dataset_license_id",
-        "dataset_distribution_rule",
-        "dataset_rights_status",
-        "dataset_manifest_uri",
-        "dataset_manifest_sha256",
-        "dataset_manifest_version_id",
-        "execution_evidence_uri",
-        "execution_evidence_sha256",
-        "execution_evidence_version_id",
-        "reference_source_uri",
-    ):
-        _required_str(metadata, field_name)
-    for field_name in ("adapter_source_uri", "reference_source_uri"):
-        parsed = urlparse(_required_str(metadata, field_name))
-        if parsed.scheme != "https" or not parsed.hostname:
-            raise ValueError(f"benchmark suite {field_name} must be an https URL")
-    if not re.fullmatch(r"[0-9a-f]{40}", _required_str(metadata, "adapter_source_revision")):
-        raise ValueError("benchmark suite adapter_source_revision must be a 40-character SHA")
-    for field_name in (
-        "adapter_image_digest",
-        "dataset_manifest_sha256",
-        "execution_evidence_sha256",
-    ):
-        if not re.fullmatch(r"sha256:[0-9a-f]{64}", _required_str(metadata, field_name)):
-            raise ValueError(f"benchmark suite {field_name} must be a sha256 digest")
-    for field_name in ("dataset_manifest_uri", "execution_evidence_uri"):
-        if _artifact_ref(field_name, _required_str(metadata, field_name)).kind != "s3":
-            raise ValueError(f"benchmark suite {field_name} must be an s3:// immutable artifact")
-    _validate_dataset_rights(
-        license_id=_required_str(metadata, "dataset_license_id"),
-        distribution_rule=_required_str(metadata, "dataset_distribution_rule"),
-        rights_status=_required_str(metadata, "dataset_rights_status"),
-        error_prefix="benchmark suite",
-    )
-
-
 def _validate_dataset_rights(
     *,
     license_id: str,
@@ -520,107 +363,33 @@ def _validate_dataset_rights(
         )
 
 
-def _validate_nightly_suite_metric_records(
-    suite: Mapping[str, Any],
-    *,
-    required_metric_families: Sequence[str],
-) -> None:
-    references = _required_object_list(suite, "references")
-    reference_keys: set[tuple[str, str]] = set()
-    reference_families: set[str] = set()
-    for reference in references:
-        metric_family = _required_str(reference, "metric_family")
-        metric = _required_str(reference, "metric")
-        key = (metric_family, metric)
-        if key in reference_keys:
-            raise ValueError(f"duplicate suite reference {metric_family}/{metric}")
-        reference_keys.add(key)
-        reference_families.add(metric_family)
-    if reference_families != set(required_metric_families):
-        raise ValueError(
-            "references must exactly match metric_compatibility required metric families"
-        )
-    observations = _required_object_list_allow_empty(suite, "metric_observations")
-    observation_keys: set[tuple[str, str]] = set()
-    for observation in observations:
-        metric_family = _required_str(observation, "metric_family")
-        metric = _required_str(observation, "metric")
-        key = (metric_family, metric)
-        if key in observation_keys:
-            raise ValueError(f"duplicate suite metric_observation {metric_family}/{metric}")
-        observation_keys.add(key)
-        _required_number(observation, "score")
-    required_observation_keys = {key for key in reference_keys if key[0] != "retrieval"}
-    if observation_keys != required_observation_keys:
-        raise ValueError("metric_observations must exactly match non-retrieval metric references")
-
-
 def default_nightly_regression_conf(
     *,
     generated_at: str,
     environment: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Return the D6 schedule context from GitOps-owned runtime configuration.
-
-    Suite selection is deliberately never configurable: a scheduled D6 run is
-    the canonical mandatory-suite matrix or it does not run.  The remaining
-    identity and retrieval envelope is supplied by the Airflow deployment,
-    rather than a mutable ``DagRun.conf`` payload.
-    """
+    """Return the reference-only D6 parent envelope from GitOps configuration."""
 
     values = os.environ if environment is None else environment
-    raw_pack_version_ids = _required_environment_value(
-        values, _NIGHTLY_REGRESSION_RUNTIME_ENV["pack_version_ids"]
-    )
-    try:
-        pack_version_ids = json.loads(raw_pack_version_ids)
-    except json.JSONDecodeError as exc:
-        raise ValueError("ADAPSTORY_SERP_D6_PACK_VERSION_IDS must be a JSON array") from exc
-    if not isinstance(pack_version_ids, list) or not all(
-        isinstance(value, str) and value.strip() for value in pack_version_ids
-    ):
-        raise ValueError("ADAPSTORY_SERP_D6_PACK_VERSION_IDS must be a non-empty JSON string array")
+    if values.get(_LEGACY_NIGHTLY_PRIOR_VERIFICATION_ENV):
+        raise ValueError("legacy D6 prior verification env pointers are unsupported")
     return {
         "actor_id": _required_environment_value(
             values, _NIGHTLY_REGRESSION_RUNTIME_ENV["actor_id"]
         ),
         "artifact_root_path": _required_environment_value(values, _ARTIFACT_ROOT_ENV),
-        "bc21_base_url": _required_environment_value(values, _BC21_BASE_URL_ENV),
-        "candidateReleaseEvidence": _required_worm_environment_evidence(
+        "evaluation_release_promotion_evidence": _required_worm_environment_evidence(
             values,
-            _NIGHTLY_REGRESSION_RUNTIME_ENV["candidate_release_evidence"],
-            "candidateReleaseEvidence",
-        ),
-        "evaluationObjectiveEvidence": _required_worm_environment_evidence(
-            values,
-            _NIGHTLY_REGRESSION_RUNTIME_ENV["evaluation_objective_evidence"],
-            "evaluationObjectiveEvidence",
+            _NIGHTLY_REGRESSION_RUNTIME_ENV["evaluation_release_promotion_evidence"],
+            "evaluation_release_promotion_evidence",
         ),
         "generated_at": _required_datetime_string({"generated_at": generated_at}, "generated_at"),
-        "pack_version_ids": pack_version_ids,
-        "pairedEvaluationReceiptEvidence": _required_worm_environment_evidence(
-            values,
-            _NIGHTLY_REGRESSION_RUNTIME_ENV["paired_evaluation_receipt_evidence"],
-            "pairedEvaluationReceiptEvidence",
-        ),
-        "pairedEvaluationVerificationEvidence": _required_worm_environment_evidence(
-            values,
-            _NIGHTLY_REGRESSION_RUNTIME_ENV["paired_evaluation_verification_evidence"],
-            "pairedEvaluationVerificationEvidence",
-        ),
         "registry_resource_id": _required_environment_value(
             values, _NIGHTLY_REGRESSION_RUNTIME_ENV["registry_resource_id"]
         ),
         "registry_resource_type": _required_environment_value(
             values, _NIGHTLY_REGRESSION_RUNTIME_ENV["registry_resource_type"]
         ),
-        "reranker_profile_version": _required_environment_value(
-            values, _NIGHTLY_REGRESSION_RUNTIME_ENV["reranker_profile_version"]
-        ),
-        "retrieval_profile_version": _required_environment_value(
-            values, _NIGHTLY_REGRESSION_RUNTIME_ENV["retrieval_profile_version"]
-        ),
-        "selected_suite_ids": list(MANDATORY_SERP_BENCHMARK_SUITES),
         "tenant_id": _required_environment_value(
             values, _NIGHTLY_REGRESSION_RUNTIME_ENV["tenant_id"]
         ),
@@ -670,109 +439,1116 @@ def _required_worm_environment_evidence(
 
 
 def build_nightly_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
+    """Build scheduled D6 as a fenced parent of one new native D19 run."""
+
     payload = _payload(conf)
     _reject_raw_secrets(payload)
-    if "benchmark_suite_inputs" in payload:
-        raise ValueError(
-            "benchmark_suite_inputs must be produced by canonical live adapters, not dag_run.conf"
-        )
-    selected_suite_ids = tuple(_required_str_list(payload, "selected_suite_ids"))
-    if selected_suite_ids != MANDATORY_SERP_BENCHMARK_SUITES:
-        raise ValueError("selected_suite_ids must include every mandatory suite")
+    if "d19_run_history_observation_evidence" in payload:
+        raise ValueError("D19 history observation is runtime-produced, never caller-supplied")
+    legacy_fields = {
+        "bc21_base_url",
+        "benchmark_suite_inputs",
+        "candidateReleaseEvidence",
+        "evaluationObjectiveEvidence",
+        "pack_version_ids",
+        "pairedEvaluationReceiptEvidence",
+        "pairedEvaluationVerificationEvidence",
+        "prior_paired_evaluation_verification_evidence",
+        "reranker_profile_version",
+        "retrieval_profile_version",
+        "selected_suite_ids",
+    }
+    supplied_legacy = sorted(set(payload).intersection(legacy_fields))
+    if supplied_legacy:
+        raise ValueError(f"legacy D6 scorer fields are unsupported: {supplied_legacy}")
     tenant_id = _required_uuid(payload, "tenant_id")
-    pack_version_ids = tuple(_required_uuid_list(payload, "pack_version_ids"))
     generated_at = _required_datetime_string(payload, "generated_at")
     registry_resource_type = _required_resource_type(payload, "registry_resource_type")
     registry_resource_id = _required_uuid(payload, "registry_resource_id")
+    raw_artifact_root_path = _required_str(payload, "artifact_root_path")
+    if not raw_artifact_root_path.startswith("s3://"):
+        raise ValueError("scheduled D6 requires an s3:// artifact_root_path")
     artifact_root_path = _required_artifact_root_path(payload)
-    candidate_release_evidence = _worm_evidence_reference(payload, "candidateReleaseEvidence")
-    evaluation_objective_evidence = _worm_evidence_reference(payload, "evaluationObjectiveEvidence")
-    paired_evaluation_receipt_evidence = _worm_evidence_reference(
-        payload, "pairedEvaluationReceiptEvidence"
+    promotion_evidence = _worm_evidence_reference(
+        payload,
+        "evaluation_release_promotion_evidence",
     )
-    paired_evaluation_verification_evidence = _worm_evidence_reference(
-        payload, "pairedEvaluationVerificationEvidence"
+    _require_worm_evidence_within_artifact_root(
+        promotion_evidence,
+        artifact_root_path,
+        "evaluation_release_promotion_evidence",
     )
-    admission_evidence = (
-        candidate_release_evidence,
-        evaluation_objective_evidence,
-        paired_evaluation_receipt_evidence,
-        paired_evaluation_verification_evidence,
-    )
-    evidence_identities = {(item["s3Uri"], item["versionId"]) for item in admission_evidence}
-    if len(evidence_identities) != len(admission_evidence):
-        raise ValueError("D6 admission evidence must use four distinct immutable versions")
     operation_id = _operation_id(
-        "serp-airflow-nightly-plan",
+        "serp-airflow-scheduled-d6-parent",
         tenant_id,
         generated_at,
-        ",".join(str(value) for value in pack_version_ids),
-        ",".join(selected_suite_ids),
-        *(f"{item['sha256']}@{item['versionId']}" for item in admission_evidence),
-        "serp-benchmark-catalog/v1",
+        promotion_evidence["sha256"],
     )
     artifact_paths = _artifact_paths(
         artifact_root_path,
         operation_id,
         (
             ("airflow_plan", "airflow-plan.json"),
-            ("suite_plan", "suite-plan.json"),
-            ("nightly_report", "nightly-report.json"),
-            ("benchmark_gate_export", "benchmark-gate-export.json"),
-            ("benchmark_catalog", "benchmark-catalog.json"),
             (
-                "benchmark_catalog_receipt",
-                "benchmark-catalog-materialization-receipt.json",
+                "d19_run_history_observation",
+                "d19-run-history-observation.json",
             ),
             (
-                "nightly_registry_submissions",
-                "nightly-registry-submissions.json",
+                "d19_run_history_observation_attestation",
+                "d19-run-history-observation.attestation.json",
             ),
-            ("nightly_registry_receipts", "nightly-registry-receipts.json"),
+            (
+                "scheduled_regression_receipt",
+                "scheduled-d6-regression-receipt.json",
+            ),
         ),
     )
-    artifact_paths.update(
-        {
-            "evaluation_objective": evaluation_objective_evidence["s3Uri"],
-            "paired_evaluation_receipt": paired_evaluation_receipt_evidence["s3Uri"],
-            "paired_evaluation_verification": paired_evaluation_verification_evidence["s3Uri"],
-        }
-    )
-    plan_payload = {
-        "actor_id": _required_str(payload, "actor_id"),
+    actor_id = _required_str(payload, "actor_id")
+    d19_trigger_conf = {
+        "actor_id": actor_id,
         "artifact_root_path": artifact_root_path,
-        "artifact_paths": artifact_paths,
-        "bc21_base_url": _required_bc21_base_url(payload),
-        "candidateReleaseEvidence": candidate_release_evidence,
-        "dag_id": "serp_nightly_regression_suite",
-        "evaluationObjectiveEvidence": evaluation_objective_evidence,
+        "evaluation_release_promotion_evidence": promotion_evidence,
         "generated_at": generated_at,
-        "normalized_gate_floor": SERP_NORMALIZED_GATE_FLOOR,
-        "operation_id": operation_id,
-        "pack_version_ids": [str(value) for value in pack_version_ids],
-        "pairedEvaluationReceiptEvidence": paired_evaluation_receipt_evidence,
-        "pairedEvaluationVerificationEvidence": paired_evaluation_verification_evidence,
         "registry_resource_id": str(registry_resource_id),
         "registry_resource_type": registry_resource_type,
-        "reranker_profile_version": _required_str(payload, "reranker_profile_version"),
-        "retrieval_profile_version": _required_str(payload, "retrieval_profile_version"),
-        "selected_suite_ids": list(selected_suite_ids),
+        "tenant_id": str(tenant_id),
+    }
+    plan_payload = {
+        "actor_id": actor_id,
+        "artifact_root_path": artifact_root_path,
+        "artifact_paths": artifact_paths,
+        "d19_trigger_conf": d19_trigger_conf,
+        "dag_id": _SCHEDULED_D6_DAG_ID,
+        "evaluation_release_promotion_evidence": promotion_evidence,
+        "generated_at": generated_at,
+        "operation_id": operation_id,
+        "registry_resource_id": str(registry_resource_id),
+        "registry_resource_type": registry_resource_type,
         "tasks": _tasks(
             (
                 "validate_nightly_regression_plan",
-                "materialize_live_benchmark_catalog",
-                "load_materialized_benchmark_catalog",
-                "write_nightly_suite_plan",
-                "run_mandatory_benchmark_suites",
-                "build_c1_benchmark_gate_export",
-                "build_bc21_benchmark_run_submissions",
-                "submit_bc21_benchmark_run_submissions",
+                "produce_d19_run_history_observation",
+                "trigger_benchmark_improvement_wave",
+                "load_triggered_d19_verification",
+                "observe_triggered_d19_run",
+                "write_scheduled_d6_regression_receipt",
+                "release_d19_history_fence",
                 "notify_governance_eval_surfaces",
             )
         ),
         "tenant_id": str(tenant_id),
     }
     return SerpDagPlan(plan_payload)
+
+
+def produce_d19_run_history_observation(
+    plan_json: Mapping[str, Any] | str,
+    parent_airflow_run: Mapping[str, Any] | str,
+    *,
+    history_client: Any | None = None,
+    fence_client: Any | None = None,
+    clock: Callable[[], datetime] | None = None,
+    snapshot_writer: Callable[..., dict[str, Any]] | None = None,
+    attestation_sealer: Callable[..., tuple[dict[str, str], dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    """Fence D19, snapshot complete pre-window history, and Transit-attest it."""
+
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != _SCHEDULED_D6_DAG_ID:
+        raise ValueError("plan dag_id does not match the scheduled D6 history producer")
+    artifact_paths = _required_artifact_paths(
+        plan,
+        (
+            "d19_run_history_observation",
+            "d19_run_history_observation_attestation",
+        ),
+    )
+    parent = _normalized_scheduled_d6_airflow_run(parent_airflow_run)
+    history_reader = history_client or _default_d19_history_client()
+    fence_manager = fence_client or _default_d19_history_fence_client()
+    writer = snapshot_writer or write_immutable_evidence_snapshot
+    sealer = attestation_sealer or _default_d19_history_attestation_sealer()
+    now_fn = clock or (lambda: datetime.now(UTC))
+    fence: dict[str, Any] | None = None
+    try:
+        raw_fence = fence_manager.acquire(parent_airflow_run=parent)
+        fence = _normalized_d19_history_fence(raw_fence, parent_airflow_run=parent)
+        raw_history = history_reader.collect(parent_logical_date=parent["logicalDate"])
+        generated_at_dt = now_fn()
+        if generated_at_dt.tzinfo is None:
+            raise ValueError("D19 history observer clock must be timezone-aware")
+        generated_at = generated_at_dt.astimezone(UTC)
+        parent_start = _datetime_value(parent["startDate"], "parentAirflowRun.startDate")
+        if generated_at < parent_start or generated_at - parent_start > timedelta(minutes=5):
+            raise ValueError(
+                "D19 history observation must be produced within five minutes of parent start"
+            )
+        normalized_history = _normalized_d19_history_client_result(
+            raw_history,
+            parent_airflow_run=parent,
+            artifact_root_path=_required_str(plan, "artifact_root_path"),
+        )
+        fence = _normalized_d19_history_fence(
+            fence,
+            parent_airflow_run=parent,
+            observed_at=generated_at,
+        )
+        payload = {
+            **normalized_history,
+            "fence": fence,
+            "generatedAt": generated_at.isoformat().replace("+00:00", "Z"),
+            "parentAirflowRun": parent,
+            "producer": {
+                "namespace": _D19_RUN_HISTORY_OBSERVER_NAMESPACE,
+                "serviceAccount": _D19_RUN_HISTORY_OBSERVER_SERVICE_ACCOUNT,
+            },
+            "schema": _D19_RUN_HISTORY_OBSERVATION_SCHEMA,
+        }
+        observation_path = artifact_paths["d19_run_history_observation"]
+        written = writer(
+            artifact_path=observation_path,
+            artifact_type="d19_run_history_observation",
+            operation_id=_required_str(plan, "operation_id"),
+            payload=payload,
+        )
+        observation_evidence = _written_worm_evidence_reference(
+            written,
+            observation_path,
+            "D19 run history observation",
+        )
+        attestation_evidence, verification = sealer(
+            written,
+            purpose=_D19_RUN_HISTORY_OBSERVATION_PURPOSE,
+        )
+        try:
+            normalized_attestation = _worm_evidence_reference(
+                {"attestationEvidence": attestation_evidence},
+                "attestationEvidence",
+            )
+            if (
+                normalized_attestation["s3Uri"]
+                != artifact_paths["d19_run_history_observation_attestation"]
+            ):
+                raise ValueError("D19 history Transit attestation path does not match the plan")
+            normalized_verification = _normalized_d19_history_attestation_verification(
+                verification,
+                expected_subject=observation_evidence,
+                expected_attestation=normalized_attestation,
+            )
+        except (KeyError, ValueError) as exc:
+            raise ValueError("D19 history requires a valid Transit attestation") from exc
+        d19_trigger_conf = dict(_required_mapping(plan, "d19_trigger_conf"))
+        d19_trigger_conf["scheduled_d6_fence"] = fence
+        return {
+            "d19RunHistoryObservationAttestationEvidence": normalized_attestation,
+            "d19RunHistoryObservationEvidence": observation_evidence,
+            "d19RunHistoryObservationVerification": normalized_verification,
+            "d19TriggerConf": d19_trigger_conf,
+            "fence": fence,
+        }
+    except Exception:
+        if fence is not None:
+            fence_manager.release(fence)
+        raise
+
+
+def _normalized_scheduled_d6_airflow_run(
+    airflow_run: Mapping[str, Any] | str,
+) -> dict[str, str]:
+    metadata = _json_object(airflow_run, "parent_airflow_run")
+    _reject_raw_secrets(metadata)
+    if set(metadata) != {"dagId", "logicalDate", "runId", "runType", "startDate"}:
+        raise ValueError("scheduled D6 parentAirflowRun fields are unsupported")
+    if _required_str(metadata, "dagId") != _SCHEDULED_D6_DAG_ID:
+        raise ValueError("scheduled D6 parentAirflowRun dagId does not match")
+    if _required_str(metadata, "runType") != "scheduled":
+        raise ValueError("scheduled D6 parentAirflowRun runType must be scheduled")
+    logical_date = _required_datetime_string(metadata, "logicalDate")
+    start_date = _required_datetime_string(metadata, "startDate")
+    if _datetime_value(start_date, "parentAirflowRun.startDate") < _datetime_value(
+        logical_date,
+        "parentAirflowRun.logicalDate",
+    ):
+        raise ValueError("scheduled D6 parent startDate precedes logicalDate")
+    return {
+        "dagId": _SCHEDULED_D6_DAG_ID,
+        "logicalDate": logical_date,
+        "runId": _required_str(metadata, "runId"),
+        "runType": "scheduled",
+        "startDate": start_date,
+    }
+
+
+def _normalized_d19_history_client_result(
+    result: Mapping[str, Any],
+    *,
+    parent_airflow_run: Mapping[str, str],
+    artifact_root_path: str,
+) -> dict[str, Any]:
+    if set(result) != {
+        "acceptedRunVerifications",
+        "activeRunQuery",
+        "api",
+        "pagination",
+        "query",
+        "runs",
+        "verificationPointerQuery",
+    }:
+        raise ValueError("D19 history client result fields are unsupported")
+    active = _required_mapping(result, "activeRunQuery")
+    if set(active) != {"dagId", "states", "totalEntries"}:
+        raise ValueError("D19 active-run query fields are unsupported")
+    if _required_str(active, "dagId") != _D19_DAG_ID:
+        raise ValueError("D19 active-run query dagId does not match")
+    if _required_str_list(active, "states") != ["queued", "running"]:
+        raise ValueError("D19 active-run query states are unsupported")
+    if _required_non_negative_int(active, "totalEntries") != 0:
+        raise ValueError("D19 history fence cannot admit active D19 runs")
+    api = _required_mapping(result, "api")
+    if set(api) != {"apiVersion", "airflowVersion", "serverAuthority"}:
+        raise ValueError("D19 history API fields are unsupported")
+    expected_api = {
+        "apiVersion": "v2",
+        "airflowVersion": "3.1.6",
+        "serverAuthority": "airflow-api-server.airflow.svc.cluster.local:8080",
+    }
+    if {field: _required_str(api, field) for field in expected_api} != expected_api:
+        raise ValueError("D19 history API authority/version is unsupported")
+    query = _required_mapping(result, "query")
+    if set(query) != {"apiPath", "dagId", "logicalDateLt", "orderBy"}:
+        raise ValueError("D19 history query fields are unsupported")
+    expected_query = {
+        "apiPath": f"/api/v2/dags/{_D19_DAG_ID}/dagRuns",
+        "dagId": _D19_DAG_ID,
+        "logicalDateLt": parent_airflow_run["logicalDate"],
+        "orderBy": ["logical_date", "run_id"],
+    }
+    normalized_query = {
+        "apiPath": _required_str(query, "apiPath"),
+        "dagId": _required_str(query, "dagId"),
+        "logicalDateLt": _required_datetime_string(query, "logicalDateLt"),
+        "orderBy": _required_str_list(query, "orderBy"),
+    }
+    if normalized_query != expected_query:
+        if normalized_query["logicalDateLt"] != expected_query["logicalDateLt"]:
+            raise ValueError("D19 history query logicalDateLt must match parent logicalDate")
+        raise ValueError("D19 history query is unsupported")
+    raw_runs = result.get("runs")
+    if not isinstance(raw_runs, list) or not all(isinstance(run, Mapping) for run in raw_runs):
+        raise ValueError("D19 history runs must be a list of objects")
+    runs = [
+        _normalized_d19_history_run(run, parent_logical_date=parent_airflow_run["logicalDate"])
+        for run in raw_runs
+    ]
+    run_order = [(run["logicalDate"], run["runId"]) for run in runs]
+    if run_order != sorted(run_order) or len(set(run_order)) != len(run_order):
+        raise ValueError("D19 history runs must be unique and canonically ordered")
+    pagination = _required_mapping(result, "pagination")
+    if set(pagination) != {
+        "complete",
+        "observedEntries",
+        "pageCount",
+        "pageLimit",
+        "totalEntries",
+    }:
+        raise ValueError("D19 history pagination fields are unsupported")
+    if pagination.get("complete") is not True:
+        raise ValueError("D19 history requires complete pagination")
+    observed_entries = _required_non_negative_int(pagination, "observedEntries")
+    total_entries = _required_non_negative_int(pagination, "totalEntries")
+    page_count = _required_non_negative_int(pagination, "pageCount")
+    page_limit = _required_positive_int(pagination, "pageLimit")
+    if page_limit > 500:
+        raise ValueError("D19 history pageLimit exceeds the supported bound")
+    expected_pages = (total_entries + page_limit - 1) // page_limit
+    if observed_entries != len(runs) or total_entries != len(runs) or page_count != expected_pages:
+        raise ValueError("D19 history requires complete pagination with matching totals")
+    verification_pointer_query = _normalized_d19_verification_pointer_query(
+        _required_mapping(result, "verificationPointerQuery")
+    )
+    accepted_verifications = _normalized_d19_history_accepted_verifications(
+        result.get("acceptedRunVerifications"),
+        history_runs=runs,
+        artifact_root_path=artifact_root_path,
+    )
+    return {
+        "acceptedRunVerifications": accepted_verifications,
+        "activeRunQuery": {
+            "dagId": _D19_DAG_ID,
+            "states": ["queued", "running"],
+            "totalEntries": 0,
+        },
+        "api": expected_api,
+        "pagination": {
+            "complete": True,
+            "observedEntries": observed_entries,
+            "pageCount": page_count,
+            "pageLimit": page_limit,
+            "totalEntries": total_entries,
+        },
+        "query": expected_query,
+        "runs": runs,
+        "verificationPointerQuery": verification_pointer_query,
+    }
+
+
+def _normalized_d19_history_run(
+    run: Mapping[str, Any],
+    *,
+    parent_logical_date: str,
+) -> dict[str, str]:
+    if set(run) != {"dagId", "logicalDate", "runId", "runType", "state"}:
+        raise ValueError("D19 history run fields are unsupported")
+    if _required_str(run, "dagId") != _D19_DAG_ID:
+        raise ValueError("D19 history contains a foreign dagId")
+    logical_date = _required_datetime_string(run, "logicalDate")
+    if _datetime_value(logical_date, "D19 history logicalDate") >= _datetime_value(
+        parent_logical_date,
+        "parentAirflowRun.logicalDate",
+    ):
+        raise ValueError("D19 history run is outside the pre-parent window")
+    run_type = _required_str(run, "runType")
+    if run_type not in {"asset_triggered", "backfill", "manual", "scheduled"}:
+        raise ValueError("D19 history runType is unsupported")
+    state = _required_str(run, "state")
+    if state not in {"failed", "queued", "running", "success"}:
+        raise ValueError("D19 history state is unsupported")
+    return {
+        "dagId": _D19_DAG_ID,
+        "logicalDate": logical_date,
+        "runId": _required_str(run, "runId"),
+        "runType": run_type,
+        "state": state,
+    }
+
+
+def _normalized_d19_verification_pointer_query(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    expected = {
+        "apiPathTemplate": (
+            f"/api/v2/dags/{_D19_DAG_ID}/dagRuns/{{dagRunId}}/"
+            "taskInstances/persist_paired_evaluation_verification_evidence/"
+            "xcomEntries/return_value"
+        ),
+        "deserialize": True,
+        "mapIndex": -1,
+        "stringify": False,
+        "taskId": "persist_paired_evaluation_verification_evidence",
+        "xcomKey": "return_value",
+    }
+    if set(value) != set(expected):
+        raise ValueError("D19 verification pointer query fields are unsupported")
+    normalized = {
+        "apiPathTemplate": _required_str(value, "apiPathTemplate"),
+        "deserialize": value.get("deserialize"),
+        "mapIndex": value.get("mapIndex"),
+        "stringify": value.get("stringify"),
+        "taskId": _required_str(value, "taskId"),
+        "xcomKey": _required_str(value, "xcomKey"),
+    }
+    if normalized != expected:
+        raise ValueError("D19 verification pointer query is unsupported")
+    return expected
+
+
+def _normalized_d19_history_accepted_verifications(
+    value: Any,
+    *,
+    history_runs: Sequence[Mapping[str, str]],
+    artifact_root_path: str,
+) -> list[dict[str, Any]]:
+    if (
+        not isinstance(value, list)
+        or len(value) != _SCHEDULED_D6_PRIOR_STREAK_LENGTH
+        or not all(isinstance(item, Mapping) for item in value)
+    ):
+        raise ValueError("D19 history requires exactly three accepted verification pointers")
+    if len(history_runs) < _SCHEDULED_D6_PRIOR_STREAK_LENGTH:
+        raise ValueError("D19 history requires at least three prior runs")
+    expected_runs = list(history_runs[-_SCHEDULED_D6_PRIOR_STREAK_LENGTH:])
+    if any(run["state"] != "success" or run["runType"] != "manual" for run in expected_runs):
+        raise ValueError("last three historical D19 runs must be successful admitted runs")
+    logical_dates = [
+        _datetime_value(run["logicalDate"], "D19 history logicalDate") for run in expected_runs
+    ]
+    if logical_dates != sorted(logical_dates) or len(set(logical_dates)) != len(logical_dates):
+        raise ValueError("last three historical D19 logical dates must be strictly increasing")
+    normalized: list[dict[str, Any]] = []
+    for index, (raw_pointer, expected_run) in enumerate(
+        zip(value, expected_runs, strict=True),
+        start=1,
+    ):
+        pointer = cast(Mapping[str, Any], raw_pointer)
+        if set(pointer) != {
+            "airflowRun",
+            "pairedEvaluationVerificationEvidence",
+            "receiptStatus",
+            "requestId",
+        }:
+            raise ValueError("D19 history verification pointer fields are unsupported")
+        airflow_run = _normalized_d19_airflow_run(_required_mapping(pointer, "airflowRun"))
+        expected_airflow_run = {
+            key: expected_run[key] for key in ("dagId", "logicalDate", "runId", "runType")
+        }
+        if airflow_run != expected_airflow_run:
+            raise ValueError("D19 history verification pointer does not match its run")
+        if _required_str(pointer, "receiptStatus") != "accepted":
+            raise ValueError("D19 history verification pointer must be accepted")
+        evidence = _worm_evidence_reference(
+            pointer,
+            "pairedEvaluationVerificationEvidence",
+        )
+        _require_worm_evidence_within_artifact_root(
+            evidence,
+            artifact_root_path,
+            f"acceptedRunVerifications[{index}]",
+        )
+        normalized.append(
+            {
+                "airflowRun": airflow_run,
+                "pairedEvaluationVerificationEvidence": evidence,
+                "receiptStatus": "accepted",
+                "requestId": str(_required_uuid(pointer, "requestId")),
+            }
+        )
+    request_ids = [item["requestId"] for item in normalized]
+    if len(set(request_ids)) != len(request_ids):
+        raise ValueError("D19 history verification pointer requestId values must be unique")
+    evidence_identities = [
+        (
+            item["pairedEvaluationVerificationEvidence"]["s3Uri"],
+            item["pairedEvaluationVerificationEvidence"]["versionId"],
+        )
+        for item in normalized
+    ]
+    if len(set(evidence_identities)) != len(evidence_identities):
+        raise ValueError("D19 history verification WORM handles must be unique")
+    return normalized
+
+
+def _normalized_d19_history_fence(
+    fence: Mapping[str, Any],
+    *,
+    parent_airflow_run: Mapping[str, str],
+    observed_at: datetime | None = None,
+) -> dict[str, Any]:
+    expected_fields = {
+        "acquiredAt",
+        "expiresAt",
+        "holderIdentity",
+        "leaseDurationSeconds",
+        "leaseName",
+        "namespace",
+        "parentDagId",
+        "parentRunId",
+        "resourceVersion",
+        "schema",
+    }
+    if set(fence) != expected_fields:
+        raise ValueError("D19 history fence fields are unsupported")
+    if _required_str(fence, "schema") != "D19HistoryFence/v1":
+        raise ValueError("D19 history fence schema is unsupported")
+    if _required_str(fence, "leaseName") != "serp-d19-history-fence":
+        raise ValueError("D19 history fence leaseName is unsupported")
+    if _required_str(fence, "namespace") != _D19_RUN_HISTORY_OBSERVER_NAMESPACE:
+        raise ValueError("D19 history fence namespace is unsupported")
+    if _required_str(fence, "parentDagId") != parent_airflow_run["dagId"]:
+        raise ValueError("D19 history fence parentDagId does not match")
+    if _required_str(fence, "parentRunId") != parent_airflow_run["runId"]:
+        raise ValueError("D19 history fence parentRunId does not match")
+    expected_holder = f"d6:{parent_airflow_run['runId']}"
+    if _required_str(fence, "holderIdentity") != expected_holder:
+        raise ValueError("D19 history fence holderIdentity does not match parent")
+    acquired = _datetime_value(
+        _required_datetime_string(fence, "acquiredAt"),
+        "D19 history fence acquiredAt",
+    )
+    expires = _datetime_value(
+        _required_datetime_string(fence, "expiresAt"),
+        "D19 history fence expiresAt",
+    )
+    if observed_at is not None and not acquired <= observed_at < expires:
+        raise ValueError("D19 history fence must remain active through observation")
+    duration = _required_positive_int(fence, "leaseDurationSeconds")
+    if duration > 86_400 or expires - acquired != timedelta(seconds=duration):
+        raise ValueError("D19 history fence duration is unsupported")
+    parent_start = _datetime_value(parent_airflow_run["startDate"], "parent startDate")
+    if acquired < parent_start:
+        raise ValueError("D19 history fence must be acquired after parent start")
+    return {
+        "acquiredAt": acquired.isoformat().replace("+00:00", "Z"),
+        "expiresAt": expires.isoformat().replace("+00:00", "Z"),
+        "holderIdentity": expected_holder,
+        "leaseDurationSeconds": duration,
+        "leaseName": "serp-d19-history-fence",
+        "namespace": _D19_RUN_HISTORY_OBSERVER_NAMESPACE,
+        "parentDagId": parent_airflow_run["dagId"],
+        "parentRunId": parent_airflow_run["runId"],
+        "resourceVersion": _required_str(fence, "resourceVersion"),
+        "schema": "D19HistoryFence/v1",
+    }
+
+
+def _normalized_d19_history_attestation_verification(
+    verification: Mapping[str, Any],
+    *,
+    expected_subject: Mapping[str, str],
+    expected_attestation: Mapping[str, str],
+) -> dict[str, Any]:
+    try:
+        normalized, _ = _paired_evaluation_verification_descriptor(
+            verification,
+            field_name="D19 history Transit attestation verification",
+            expected_purpose=_D19_RUN_HISTORY_OBSERVATION_PURPOSE,
+            expected_subject=expected_subject,
+            expected_attestation=expected_attestation,
+        )
+    except (KeyError, ValueError) as exc:
+        raise ValueError("D19 history requires a valid Transit attestation") from exc
+    signer = _required_mapping(normalized, "signer")
+    expected_signer = {
+        "authRole": "serp-d19-history-observer-attestor-role",
+        "serviceAccountName": _D19_RUN_HISTORY_OBSERVER_SERVICE_ACCOUNT,
+        "serviceAccountNamespace": _D19_RUN_HISTORY_OBSERVER_NAMESPACE,
+        "tokenPolicy": "serp-d19-history-observer-attestor",
+    }
+    for field_name, expected in expected_signer.items():
+        if _required_str(signer, field_name) != expected:
+            raise ValueError("D19 history Transit attestation signer identity is unsupported")
+    return normalized
+
+
+def write_scheduled_d6_regression_receipt(
+    plan_json: Mapping[str, Any] | str,
+    history_result: Mapping[str, Any] | str,
+    triggered_verification: Mapping[str, Any] | str,
+    current_run_observation: Mapping[str, Any] | str,
+    *,
+    evidence_reader: Callable[[Mapping[str, str], str], Mapping[str, Any]] | None = None,
+    snapshot_writer: Callable[..., dict[str, Any]] | None = None,
+    s3_client: Any | None = None,
+    clock: Callable[[], datetime] | None = None,
+) -> dict[str, Any]:
+    """Seal the scheduled D6 receipt from exact WORM history and D19 evidence."""
+
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != _SCHEDULED_D6_DAG_ID:
+        raise ValueError("plan dag_id does not match scheduled D6 receipt writer")
+    artifact_paths = _required_artifact_paths(plan, ("scheduled_regression_receipt",))
+    history_output = _json_object(history_result, "history_result")
+    _reject_raw_secrets(history_output)
+    expected_history_fields = {
+        "d19RunHistoryObservationAttestationEvidence",
+        "d19RunHistoryObservationEvidence",
+        "d19RunHistoryObservationVerification",
+        "d19TriggerConf",
+        "fence",
+    }
+    if set(history_output) != expected_history_fields:
+        raise ValueError("scheduled D6 history result fields are unsupported")
+    history_evidence = _worm_evidence_reference(
+        history_output,
+        "d19RunHistoryObservationEvidence",
+    )
+    history_attestation_evidence = _worm_evidence_reference(
+        history_output,
+        "d19RunHistoryObservationAttestationEvidence",
+    )
+    history_verification = _normalized_d19_history_attestation_verification(
+        _required_mapping(history_output, "d19RunHistoryObservationVerification"),
+        expected_subject=history_evidence,
+        expected_attestation=history_attestation_evidence,
+    )
+
+    def read_json(evidence: Mapping[str, str], field_name: str) -> dict[str, Any]:
+        if evidence_reader is not None:
+            value = evidence_reader(evidence, field_name)
+            if not isinstance(value, Mapping):
+                raise ValueError(f"{field_name} reader must return an object")
+            return dict(value)
+        client = s3_client or _s3_read_client(evidence["s3Uri"])
+        payload = _read_exact_worm_evidence_bytes(
+            evidence,
+            field_name=field_name,
+            s3_client=client,
+        )
+        return dict(_canonical_json_object_bytes(payload, field_name))
+
+    history_observation = _normalized_d19_history_observation(
+        read_json(history_evidence, "D19 run history observation"),
+        expected_evidence=history_evidence,
+        expected_fence=_required_mapping(history_output, "fence"),
+        artifact_root_path=_required_str(plan, "artifact_root_path"),
+    )
+    _validate_d19_history_attestation_receipt(
+        read_json(
+            history_attestation_evidence,
+            "D19 run history observation attestation",
+        ),
+        expected_subject=history_evidence,
+        expected_verification=history_verification,
+    )
+    parent_run = cast(dict[str, str], history_observation["parentAirflowRun"])
+    plan_fence = _normalized_d19_history_fence(
+        _required_mapping(history_output, "fence"),
+        parent_airflow_run=parent_run,
+    )
+    if plan_fence != history_observation["fence"]:
+        raise ValueError("scheduled D6 history result fence does not match its WORM snapshot")
+    trigger_conf = dict(_required_mapping(history_output, "d19TriggerConf"))
+    if trigger_conf != {
+        **dict(_required_mapping(plan, "d19_trigger_conf")),
+        "scheduled_d6_fence": plan_fence,
+    }:
+        raise ValueError("scheduled D6 D19 trigger conf does not match its fenced plan")
+
+    prior_pointers = cast(
+        list[dict[str, Any]],
+        history_observation["acceptedRunVerifications"],
+    )
+    prior_verifications: list[dict[str, Any]] = []
+    for index, pointer in enumerate(prior_pointers, start=1):
+        handle = _worm_evidence_reference(
+            pointer,
+            "pairedEvaluationVerificationEvidence",
+        )
+        verification = _normalized_paired_evaluation_verification_evidence(
+            read_json(handle, f"prior paired evaluation verification {index}"),
+            evidence_handle=handle,
+        )
+        if (
+            verification["airflowRun"] != pointer["airflowRun"]
+            or verification["requestId"] != pointer["requestId"]
+            or pointer["receiptStatus"] != "accepted"
+        ):
+            raise ValueError("D19 history pointer does not match its WORM verification evidence")
+        prior_verifications.append(verification)
+    history_runs = cast(list[dict[str, str]], history_observation["runs"])
+    expected_prior_runs = [verification["airflowRun"] for verification in prior_verifications]
+    if len(history_runs) < _SCHEDULED_D6_PRIOR_STREAK_LENGTH or history_runs[-3:] != [
+        {**run, "state": "success"} for run in expected_prior_runs
+    ]:
+        raise ValueError(
+            "last three historical D19 runs must exactly match prior accepted evidence"
+        )
+
+    triggered = _json_object(triggered_verification, "triggered_verification")
+    _reject_raw_secrets(triggered)
+    if set(triggered) != {
+        "airflowRun",
+        "pairedEvaluationVerificationEvidence",
+        "receiptStatus",
+        "requestId",
+    }:
+        raise ValueError("triggered D19 verification result fields are unsupported")
+    current_handle = _worm_evidence_reference(
+        triggered,
+        "pairedEvaluationVerificationEvidence",
+    )
+    current_verification = _normalized_paired_evaluation_verification_evidence(
+        read_json(current_handle, "triggered paired evaluation verification"),
+        evidence_handle=current_handle,
+    )
+    if (
+        _normalized_d19_airflow_run(_required_mapping(triggered, "airflowRun"))
+        != current_verification["airflowRun"]
+        or _required_str(triggered, "requestId") != current_verification["requestId"]
+        or _required_str(triggered, "receiptStatus") != "accepted"
+    ):
+        raise ValueError("triggered D19 verification result does not match its WORM evidence")
+    current_observation = _normalized_d19_current_run_observation(current_run_observation)
+    child_run = cast(dict[str, str], current_verification["airflowRun"])
+    if {key: current_observation[key] for key in ("dagId", "logicalDate", "runId")} != {
+        key: child_run[key] for key in ("dagId", "logicalDate", "runId")
+    }:
+        raise ValueError("current D19 observation does not match the triggered child")
+    if child_run["logicalDate"] != parent_run["logicalDate"]:
+        raise ValueError("triggered D19 logicalDate must match scheduled D6 parent")
+
+    all_verifications = [*prior_verifications, current_verification]
+    receipt_records = [
+        _normalized_accepted_v9_receipt(
+            read_json(
+                verification["receiptPointer"]["receiptEvidence"],
+                f"paired evaluation receipt {index}",
+            ),
+            verification=verification,
+        )
+        for index, verification in enumerate(all_verifications, start=1)
+    ]
+    request_ids = [str(item["requestId"]) for item in all_verifications]
+    if len(set(request_ids)) != len(request_ids):
+        raise ValueError("scheduled D6 requestId values must be unique")
+    run_identities = [
+        (item["airflowRun"]["logicalDate"], item["airflowRun"]["runId"])
+        for item in all_verifications
+    ]
+    if len(set(run_identities)) != len(run_identities):
+        raise ValueError("scheduled D6 D19 run identities must be unique")
+    verification_identities = [
+        (item["verificationEvidence"]["s3Uri"], item["verificationEvidence"]["versionId"])
+        for item in all_verifications
+    ]
+    if len(set(verification_identities)) != len(verification_identities):
+        raise ValueError("scheduled D6 verification S3 identities must be unique")
+    receipt_identities = [
+        (
+            item["receiptPointer"]["receiptEvidence"]["s3Uri"],
+            item["receiptPointer"]["receiptEvidence"]["versionId"],
+        )
+        for item in all_verifications
+    ]
+    if len(set(receipt_identities)) != len(receipt_identities):
+        raise ValueError("scheduled D6 receipt S3 identities must be unique")
+    authorities = [record["authority"] for record in receipt_records]
+    if any(authority != authorities[0] for authority in authorities[1:]):
+        raise ValueError("scheduled D6 promotion authority must remain identical")
+    if authorities[0]["evaluationReleasePromotionEvidence"] != _worm_evidence_reference(
+        plan,
+        "evaluation_release_promotion_evidence",
+    ):
+        raise ValueError("scheduled D6 receipt promotion does not match its plan")
+
+    now = _aware_datetime(clock or (lambda: datetime.now(UTC)), "scheduled D6 receipt clock")
+    observed_at = _datetime_value(current_observation["observedAt"], "observedAt")
+    fence_expires = _datetime_value(plan_fence["expiresAt"], "fence expiresAt")
+    if not observed_at <= now < fence_expires:
+        raise ValueError("scheduled D6 receipt must be written while its fence is active")
+    entries = [
+        {
+            "airflowRun": verification["airflowRun"],
+            "receiptEvidence": verification["receiptPointer"]["receiptEvidence"],
+            "requestId": verification["requestId"],
+            "verificationEvidence": verification["verificationEvidence"],
+        }
+        for verification in all_verifications
+    ]
+    payload = {
+        "acceptedStreakLength": 4,
+        "authority": authorities[0],
+        "currentRunObservation": current_observation,
+        "generatedAt": now.isoformat().replace("+00:00", "Z"),
+        "historyObservationAttestationEvidence": history_attestation_evidence,
+        "historyObservationEvidence": history_evidence,
+        "historyObservationVerification": history_verification,
+        "operationId": _required_str(plan, "operation_id"),
+        "parentAirflowRun": parent_run,
+        "priorAcceptedEvaluations": entries[:3],
+        "schema": _SCHEDULED_D6_RECEIPT_SCHEMA,
+        "status": "accepted",
+        "triggeredEvaluation": entries[3],
+    }
+    writer = snapshot_writer or write_immutable_evidence_snapshot
+    output_path = artifact_paths["scheduled_regression_receipt"]
+    written = writer(
+        artifact_path=output_path,
+        artifact_type="scheduled_d6_regression_receipt",
+        operation_id=_required_str(plan, "operation_id"),
+        payload=payload,
+        s3_client=s3_client,
+    )
+    output_evidence = _written_worm_evidence_reference(
+        written,
+        output_path,
+        "scheduled D6 regression receipt",
+    )
+    persisted = read_json(output_evidence, "scheduled D6 regression receipt")
+    if persisted != payload:
+        raise ValueError("scheduled D6 regression receipt readback does not match")
+    return {
+        "operationId": _required_str(plan, "operation_id"),
+        "scheduledD6RegressionEvidence": output_evidence,
+        "status": "accepted",
+    }
+
+
+def _aware_datetime(clock: Callable[[], datetime], field_name: str) -> datetime:
+    value = clock()
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{field_name} must be timezone-aware")
+    return value.astimezone(UTC)
+
+
+def _normalized_d19_history_observation(
+    observation: Mapping[str, Any],
+    *,
+    expected_evidence: Mapping[str, str],
+    expected_fence: Mapping[str, Any],
+    artifact_root_path: str,
+) -> dict[str, Any]:
+    expected_fields = {
+        "acceptedRunVerifications",
+        "activeRunQuery",
+        "api",
+        "fence",
+        "generatedAt",
+        "pagination",
+        "parentAirflowRun",
+        "producer",
+        "query",
+        "runs",
+        "schema",
+        "verificationPointerQuery",
+    }
+    if set(observation) != expected_fields:
+        raise ValueError("D19 run history observation fields are unsupported")
+    if _required_str(observation, "schema") != _D19_RUN_HISTORY_OBSERVATION_SCHEMA:
+        raise ValueError("D19 run history observation schema is unsupported")
+    parent = _normalized_scheduled_d6_airflow_run(
+        _required_mapping(observation, "parentAirflowRun")
+    )
+    generated_at = _datetime_value(
+        _required_datetime_string(observation, "generatedAt"),
+        "D19 history generatedAt",
+    )
+    parent_start = _datetime_value(parent["startDate"], "parent startDate")
+    if not parent_start <= generated_at <= parent_start + timedelta(minutes=5):
+        raise ValueError("D19 run history observation is not runtime-fresh")
+    producer = _required_mapping(observation, "producer")
+    if set(producer) != {"namespace", "serviceAccount"} or dict(producer) != {
+        "namespace": _D19_RUN_HISTORY_OBSERVER_NAMESPACE,
+        "serviceAccount": _D19_RUN_HISTORY_OBSERVER_SERVICE_ACCOUNT,
+    }:
+        raise ValueError("D19 run history observation producer is unsupported")
+    history = _normalized_d19_history_client_result(
+        {
+            key: observation[key]
+            for key in (
+                "acceptedRunVerifications",
+                "activeRunQuery",
+                "api",
+                "pagination",
+                "query",
+                "runs",
+                "verificationPointerQuery",
+            )
+        },
+        parent_airflow_run=parent,
+        artifact_root_path=artifact_root_path,
+    )
+    fence = _normalized_d19_history_fence(
+        _required_mapping(observation, "fence"),
+        parent_airflow_run=parent,
+        observed_at=generated_at,
+    )
+    normalized_expected_fence = _normalized_d19_history_fence(
+        expected_fence,
+        parent_airflow_run=parent,
+    )
+    if fence != normalized_expected_fence:
+        raise ValueError("D19 run history observation fence does not match")
+    _worm_evidence_reference({"evidence": expected_evidence}, "evidence")
+    return {
+        **history,
+        "fence": fence,
+        "generatedAt": generated_at.isoformat().replace("+00:00", "Z"),
+        "parentAirflowRun": parent,
+        "producer": dict(producer),
+        "schema": _D19_RUN_HISTORY_OBSERVATION_SCHEMA,
+    }
+
+
+def _validate_d19_history_attestation_receipt(
+    receipt: Mapping[str, Any],
+    *,
+    expected_subject: Mapping[str, str],
+    expected_verification: Mapping[str, Any],
+) -> None:
+    expected_fields = {
+        "domain",
+        "purpose",
+        "schema",
+        "signatureProvider",
+        "signer",
+        "statementSha256",
+        "subject",
+        "transit",
+    }
+    if set(receipt) != expected_fields:
+        raise ValueError("D19 history attestation receipt fields are unsupported")
+    if (
+        _required_str(receipt, "domain") != "serp.adapstory.ai/evaluation-governance/v1"
+        or _required_str(receipt, "purpose") != _D19_RUN_HISTORY_OBSERVATION_PURPOSE
+        or _required_str(receipt, "schema") != "ArtifactSignatureAttestationReceipt/v2"
+        or _required_str(receipt, "signatureProvider") != "vault-transit"
+    ):
+        raise ValueError("D19 history attestation receipt trust contract is unsupported")
+    if _worm_evidence_reference(receipt, "subject") != dict(expected_subject):
+        raise ValueError("D19 history attestation receipt subject does not match")
+    if dict(_required_mapping(receipt, "signer")) != expected_verification["signer"]:
+        raise ValueError("D19 history attestation receipt signer does not match")
+    if (
+        _required_sha256_prefixed(receipt, "statementSha256")
+        != expected_verification["statementSha256"]
+    ):
+        raise ValueError("D19 history attestation receipt statement does not match")
+    transit = _required_mapping(receipt, "transit")
+    expected_transit = expected_verification["transit"]
+    for receipt_field, verification_field in (
+        ("key", "key"),
+        ("keyVersion", "keyVersion"),
+        ("signature", "signature"),
+        ("verifyRequestId", "verifyRequestId"),
+    ):
+        if transit.get(receipt_field) != expected_transit[verification_field]:
+            raise ValueError("D19 history attestation receipt Transit proof does not match")
+
+
+def _normalized_paired_evaluation_verification_evidence(
+    payload: Mapping[str, Any],
+    *,
+    evidence_handle: Mapping[str, str],
+) -> dict[str, Any]:
+    if set(payload) != {"airflowRun", "operationId", "receiptPointer", "requestId", "schema"}:
+        raise ValueError("paired evaluation verification evidence fields are unsupported")
+    if _required_str(payload, "schema") != _PAIRED_EVALUATION_VERIFICATION_EVIDENCE_SCHEMA:
+        raise ValueError("paired evaluation verification evidence schema is unsupported")
+    operation_id = _required_str(payload, "operationId")
+    if _required_str(payload, "requestId") != operation_id:
+        raise ValueError("paired evaluation verification requestId does not match operationId")
+    pointer = _required_mapping(payload, "receiptPointer")
+    if set(pointer) != {
+        "receiptAttestationEvidence",
+        "receiptEvidence",
+        "receiptStatus",
+        "receiptVerification",
+    }:
+        raise ValueError("paired evaluation receipt pointer fields are unsupported")
+    if _required_str(pointer, "receiptStatus") != "accepted":
+        raise ValueError("scheduled D6 requires accepted paired evaluation receipts")
+    receipt_evidence = _worm_evidence_reference(pointer, "receiptEvidence")
+    attestation_evidence = _worm_evidence_reference(pointer, "receiptAttestationEvidence")
+    receipt_verification, _ = _paired_evaluation_verification_descriptor(
+        _required_mapping(pointer, "receiptVerification"),
+        field_name="scheduled D6 receiptVerification",
+        expected_purpose=_PAIRED_EVALUATION_FINAL_RECEIPT_PURPOSE,
+        expected_subject=receipt_evidence,
+        expected_attestation=attestation_evidence,
+    )
+    return {
+        "airflowRun": _normalized_d19_airflow_run(_required_mapping(payload, "airflowRun")),
+        "operationId": operation_id,
+        "receiptPointer": {
+            "receiptAttestationEvidence": attestation_evidence,
+            "receiptEvidence": receipt_evidence,
+            "receiptStatus": "accepted",
+            "receiptVerification": receipt_verification,
+        },
+        "requestId": operation_id,
+        "schema": _PAIRED_EVALUATION_VERIFICATION_EVIDENCE_SCHEMA,
+        "verificationEvidence": dict(evidence_handle),
+    }
+
+
+def _normalized_d19_current_run_observation(
+    payload: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    value = _json_object(payload, "current_run_observation")
+    _reject_raw_secrets(value)
+    expected_fields = {
+        "dagId",
+        "logicalDate",
+        "observedAt",
+        "runId",
+        "sameLogicalDateRunCount",
+        "sameLogicalDateSuccessCount",
+        "schema",
+        "state",
+    }
+    if set(value) != expected_fields:
+        raise ValueError("D19 current run observation fields are unsupported")
+    if _required_str(value, "schema") != "D19CurrentRunObservation/v1":
+        raise ValueError("D19 current run observation schema is unsupported")
+    if _required_str(value, "dagId") != _D19_DAG_ID:
+        raise ValueError("D19 current run observation dagId is unsupported")
+    if _required_str(value, "state") != "success":
+        raise ValueError("D19 current run observation state must be success")
+    if _required_non_negative_int(value, "sameLogicalDateRunCount") != 1:
+        raise ValueError("D19 sameLogicalDateRunCount must equal one")
+    if _required_non_negative_int(value, "sameLogicalDateSuccessCount") != 1:
+        raise ValueError("D19 sameLogicalDateSuccessCount must equal one")
+    return {
+        "dagId": _D19_DAG_ID,
+        "logicalDate": _required_datetime_string(value, "logicalDate"),
+        "observedAt": _required_datetime_string(value, "observedAt"),
+        "runId": _required_str(value, "runId"),
+        "sameLogicalDateRunCount": 1,
+        "sameLogicalDateSuccessCount": 1,
+        "schema": "D19CurrentRunObservation/v1",
+        "state": "success",
+    }
+
+
+def _normalized_accepted_v9_receipt(
+    receipt: Mapping[str, Any],
+    *,
+    verification: Mapping[str, Any],
+) -> dict[str, Any]:
+    expected_fields = {
+        "attestationVerifications",
+        "baselineReleaseEvidence",
+        "candidateReleaseEvidence",
+        "contractVersion",
+        "evaluationBindingEvidence",
+        "evaluationBindingId",
+        "evaluationObjectiveAttestationEvidence",
+        "evaluationObjectiveEvidence",
+        "evaluationReleasePromotionEvidence",
+        "metricCompatibilityMatrixEvidence",
+        "pairedEvaluation",
+        "requestEvidence",
+        "requestId",
+        "status",
+    }
+    if set(receipt) != expected_fields:
+        raise ValueError("paired evaluation v9 receipt fields are unsupported")
+    if _required_str(receipt, "contractVersion") != _PAIRED_EVALUATION_RECEIPT_CONTRACT_VERSION:
+        raise ValueError("paired evaluation receipt contract must be v9")
+    request_id = _required_str(receipt, "requestId")
+    if request_id != verification["requestId"] or _required_str(receipt, "status") != "accepted":
+        raise ValueError("scheduled D6 requires the exact accepted paired evaluation receipt")
+    paired = _required_mapping(receipt, "pairedEvaluation")
+    if (
+        _required_str(paired, "contractVersion") != "serp-paired-evaluation/v5"
+        or _required_str(paired, "operationId") != request_id
+        or _required_str(paired, "status") != "accepted"
+    ):
+        raise ValueError("scheduled D6 pairedEvaluation result is unsupported")
+    return {
+        "authority": {
+            "candidateReleaseEvidence": _worm_evidence_reference(
+                receipt, "candidateReleaseEvidence"
+            ),
+            "evaluationObjectiveEvidence": _worm_evidence_reference(
+                receipt, "evaluationObjectiveEvidence"
+            ),
+            "evaluationReleasePromotionEvidence": _worm_evidence_reference(
+                receipt, "evaluationReleasePromotionEvidence"
+            ),
+        },
+        "requestId": request_id,
+    }
+
+
+def _default_d19_history_client() -> Any:
+    from dags.serp_d19_history_observer import AirflowD19HistoryClient
+
+    return AirflowD19HistoryClient.from_environment()
+
+
+def _default_d19_history_fence_client() -> Any:
+    from dags.serp_d19_history_observer import KubernetesD19HistoryFenceClient
+
+    return KubernetesD19HistoryFenceClient.from_environment()
+
+
+def _default_d19_history_attestation_sealer() -> Callable[..., Any]:
+    from dags.serp_d19_history_observer import seal_d19_history_observation_attestation
+
+    return seal_d19_history_observation_attestation
 
 
 def build_mandatory_benchmark_dataset_evidence_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
@@ -1051,7 +1827,7 @@ def build_model_catalog_promotion_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
 
 
 def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
-    """Create scoreless D19 from immutable v4 promotion authority only."""
+    """Create D19 from immutable v5 promotion authority only."""
 
     payload = _payload(conf)
     _reject_raw_secrets(payload)
@@ -1094,6 +1870,10 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
                 ),
                 ("paired_eval_request", "paired-eval-request.json"),
                 ("paired_eval_receipt", "paired-eval-receipt.json"),
+                (
+                    "paired_evaluation_verification_evidence",
+                    "paired-evaluation-verification-evidence.json",
+                ),
                 ("benchmark_pack_build_result", "benchmark-pack-build-result.json"),
                 (
                     "benchmark_pack_lifecycle_result",
@@ -1106,7 +1886,7 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
                 ("paired_execution_manifest", "paired-execution-manifest.json"),
             ),
         ),
-        "dag_id": "serp_benchmark_improvement_wave",
+        "dag_id": _D19_DAG_ID,
         "generated_at": generated_at,
         "evaluation_release_promotion_evidence": promotion_evidence,
         "normalized_gate_floor": SERP_NORMALIZED_GATE_FLOOR,
@@ -1115,6 +1895,7 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
         "registry_resource_type": registry_resource_type,
         "tasks": _tasks(
             (
+                "validate_d19_fence_admission",
                 "validate_benchmark_improvement_wave_plan",
                 "materialize_live_benchmark_catalog",
                 "load_materialized_benchmark_catalog",
@@ -1128,6 +1909,7 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
                 "write_paired_evaluation_assembly_plan",
                 "assemble_paired_execution_manifest",
                 "run_paired_benchmark_evaluation",
+                "persist_paired_evaluation_verification_evidence",
                 "notify_governance_eval_surfaces",
             )
         ),
@@ -2396,33 +3178,8 @@ def write_airflow_plan_artifact(plan: SerpDagPlan) -> str:
         plan.payload,
         ("airflow_plan",),
     )
-    artifact_payload = (
-        _nightly_gateway_airflow_plan_payload(plan.payload)
-        if plan.payload.get("dag_id") == "serp_nightly_regression_suite"
-        else plan.payload
-    )
-    _write_json_artifact(artifact_paths["airflow_plan"], artifact_payload)
+    _write_json_artifact(artifact_paths["airflow_plan"], plan.payload)
     return plan_json
-
-
-def _nightly_gateway_airflow_plan_payload(plan: Mapping[str, Any]) -> dict[str, Any]:
-    """Project the internal D6 plan onto the gateway's exact admission contract."""
-
-    return {
-        "actor_id": _required_str(plan, "actor_id"),
-        "candidateReleaseEvidence": dict(_required_mapping(plan, "candidateReleaseEvidence")),
-        "dag_id": _required_str(plan, "dag_id"),
-        "generated_at": _required_datetime_string(plan, "generated_at"),
-        "normalized_gate_floor": _required_number(plan, "normalized_gate_floor"),
-        "operation_id": _required_str(plan, "operation_id"),
-        "pack_version_ids": _required_str_list(plan, "pack_version_ids"),
-        "registry_resource_id": _required_str(plan, "registry_resource_id"),
-        "registry_resource_type": _required_resource_type(plan, "registry_resource_type"),
-        "reranker_profile_version": _required_str(plan, "reranker_profile_version"),
-        "retrieval_profile_version": _required_str(plan, "retrieval_profile_version"),
-        "selected_suite_ids": _required_str_list(plan, "selected_suite_ids"),
-        "tenant_id": _required_str(plan, "tenant_id"),
-    }
 
 
 def build_evidence_artifact_paths(
@@ -5097,77 +5854,6 @@ def _public_docs_crawl_state_payload(
     }
 
 
-def write_nightly_suite_plan_artifact(
-    plan_json: Mapping[str, Any] | str,
-    benchmark_catalog_snapshot: Mapping[str, Any] | str | None = None,
-) -> dict[str, Any]:
-    plan = _json_object(plan_json, "plan_json")
-    _reject_raw_secrets(plan)
-    if _required_str(plan, "dag_id") != "serp_nightly_regression_suite":
-        raise ValueError("plan dag_id does not match nightly suite-plan writer")
-    if benchmark_catalog_snapshot is None:
-        raise ValueError("nightly suite plan requires the live benchmark catalog snapshot")
-    catalog_snapshot = _json_object(benchmark_catalog_snapshot, "benchmark_catalog_snapshot")
-    artifact_paths = _required_artifact_paths(plan, ("suite_plan", "benchmark_catalog"))
-    if _required_str(catalog_snapshot, "artifactPath") != artifact_paths["benchmark_catalog"]:
-        raise ValueError("benchmark catalog snapshot must match the plan artifact path")
-    if _required_str(catalog_snapshot, "objectLockMode") != "COMPLIANCE":
-        raise ValueError("benchmark catalog snapshot must use COMPLIANCE object lock")
-    if not _required_str(catalog_snapshot, "artifactVersionId"):
-        raise ValueError("benchmark catalog snapshot must include an S3 object version")
-    catalog_status = _required_str(catalog_snapshot, "catalogStatus")
-    if catalog_status != "ready":
-        blocking_suite_ids = _required_str_list(catalog_snapshot, "blockingSuiteIds")
-        blocking_reason_by_suite = _required_catalog_blocking_reason_by_suite(
-            catalog_snapshot,
-            blocking_suite_ids,
-        )
-        blocks_by_reason = {
-            reason: [
-                suite_id
-                for suite_id in blocking_suite_ids
-                if blocking_reason_by_suite[suite_id] == reason
-            ]
-            for reason in _CATALOG_BLOCKING_REASON_ORDER
-        }
-        raise ValueError(
-            "benchmark catalog blocks D6: "
-            + "; ".join(
-                f"{reason}={', '.join(suite_ids)}"
-                for reason, suite_ids in blocks_by_reason.items()
-                if suite_ids
-            )
-        )
-    payload = _nightly_suite_plan_payload(plan)
-    artifact_path = artifact_paths["suite_plan"]
-    _write_json_artifact(artifact_path, payload)
-    return _artifact_result(
-        artifact_path,
-        artifact_type="suite_plan",
-        operation_id=_required_str(plan, "operation_id"),
-        payload=payload,
-    )
-
-
-def _required_catalog_blocking_reason_by_suite(
-    catalog_snapshot: Mapping[str, Any],
-    blocking_suite_ids: Sequence[str],
-) -> dict[str, str]:
-    raw_reasons = _required_mapping(catalog_snapshot, "blockingReasonBySuite")
-    expected_suite_ids = set(blocking_suite_ids)
-    if set(raw_reasons) != expected_suite_ids:
-        raise ValueError("catalog-evidence-invalid: blocking reasons must match blocking suites")
-    reasons: dict[str, str] = {}
-    for suite_id in blocking_suite_ids:
-        reason = _required_str(raw_reasons, suite_id)
-        if reason not in _CATALOG_BLOCKING_REASON_ORDER:
-            raise ValueError(
-                "catalog-evidence-invalid: unsupported blocking reason for " + suite_id
-            )
-        reasons[suite_id] = reason
-    return reasons
-
-
 def write_online_eval_rollup_plan_artifact(
     plan_json: Mapping[str, Any] | str,
 ) -> dict[str, Any]:
@@ -5459,107 +6145,6 @@ def _execute_retired_pack_cleanup_noop_spec(spec: Mapping[str, Any]) -> dict[str
     )
 
 
-def write_nightly_benchmark_export_artifact(
-    nightly_report_artifact: Mapping[str, Any] | str,
-) -> dict[str, Any]:
-    report = _artifact_payload(nightly_report_artifact, "nightly_report")
-    artifact_paths = _required_artifact_paths(report, ("benchmark_gate_export",))
-    payload = _benchmark_export_payload(report)
-    _validate_benchmark_export_payload(payload)
-    artifact_path = artifact_paths["benchmark_gate_export"]
-    _write_json_artifact(artifact_path, payload)
-    return _artifact_result(
-        artifact_path,
-        artifact_type="benchmark_gate_export",
-        operation_id=_required_str(report, "operation_id"),
-        payload=payload,
-    )
-
-
-def write_nightly_registry_submissions_artifact(
-    benchmark_export_artifact: Mapping[str, Any] | str,
-) -> dict[str, Any]:
-    export_payload = _artifact_payload(benchmark_export_artifact, "benchmark_gate_export")
-    artifact_paths = _required_artifact_paths(
-        export_payload,
-        ("nightly_registry_submissions", "nightly_registry_receipts"),
-    )
-    submissions = {
-        "artifact_paths": artifact_paths,
-        "contractVersion": "serp-bc21-dry-run-submissions/v1",
-        "dryRun": True,
-        "generatedAt": _required_str(export_payload, "generatedAt"),
-        "items": [
-            {
-                "benchmarkResultId": _required_str(item, "benchmarkResultId"),
-                "evidenceBundleId": _required_str(item, "evidenceBundleId"),
-                "gateStatus": _required_str(item, "gateStatus"),
-                "normalizedScore": _required_str(item, "normalizedScore"),
-                "registryResourceId": _required_str(item, "registryResourceId"),
-                "registryResourceType": _required_str(item, "registryResourceType"),
-                "sourceEvidenceBundleId": _required_str(item, "sourceEvidenceBundleId"),
-                "suiteCode": _required_str(item, "suiteCode"),
-            }
-            for item in _required_object_list(export_payload, "items")
-        ],
-        "operationId": _required_str(export_payload, "operationId"),
-        "status": "ready_for_dry_run_submission",
-        "tenantId": _required_str(export_payload, "tenantId"),
-    }
-    artifact_path = artifact_paths["nightly_registry_submissions"]
-    _write_json_artifact(artifact_path, submissions)
-    return _artifact_result(
-        artifact_path,
-        artifact_type="nightly_registry_submissions",
-        operation_id=_required_str(export_payload, "operationId"),
-        payload=submissions,
-    )
-
-
-def write_nightly_registry_receipts_artifact(
-    registry_submissions_artifact: Mapping[str, Any] | str,
-) -> dict[str, Any]:
-    submissions = _artifact_payload(registry_submissions_artifact, "nightly_registry_submissions")
-    artifact_paths = _required_artifact_paths(submissions, ("nightly_registry_receipts",))
-    receipts = {
-        "contractVersion": "serp-bc21-dry-run-receipts/v1",
-        "dryRun": True,
-        "generatedAt": _required_str(submissions, "generatedAt"),
-        "operationId": _required_str(submissions, "operationId"),
-        "receipts": [
-            {
-                "accepted": True,
-                "benchmarkResultId": _required_str(item, "benchmarkResultId"),
-                "dryRun": True,
-                "evidenceBundleId": _required_str(item, "evidenceBundleId"),
-                "registryReceiptId": str(
-                    uuid5(
-                        _BENCHMARK_NAMESPACE,
-                        "bc21-dry-run-receipt|"
-                        f"{_required_str(submissions, 'operationId')}|"
-                        f"{_required_str(item, 'suiteCode')}|"
-                        f"{_required_str(item, 'benchmarkResultId')}",
-                    )
-                ),
-                "sourceEvidenceBundleId": _required_str(item, "sourceEvidenceBundleId"),
-                "statusCode": 202,
-                "suiteCode": _required_str(item, "suiteCode"),
-            }
-            for item in _required_object_list(submissions, "items")
-        ],
-        "status": "dry_run_accepted",
-        "tenantId": _required_str(submissions, "tenantId"),
-    }
-    artifact_path = artifact_paths["nightly_registry_receipts"]
-    _write_json_artifact(artifact_path, receipts)
-    return _artifact_result(
-        artifact_path,
-        artifact_type="nightly_registry_receipts",
-        operation_id=_required_str(submissions, "operationId"),
-        payload=receipts,
-    )
-
-
 def write_paired_eval_request_artifact(
     plan_json: Mapping[str, Any] | str,
     catalog_snapshot: Mapping[str, Any],
@@ -5628,68 +6213,269 @@ def write_paired_eval_request_artifact(
     }
 
 
-def build_nightly_runner_cli_spec(plan_json: str) -> dict[str, Any]:
-    return _gateway_cli_spec(
-        plan_json,
-        dag_id="serp_nightly_regression_suite",
-        task_id="run_mandatory_benchmark_suites",
-        command="nightly-report",
-        input_path_keys=("airflow_plan", "suite_plan"),
-        output_path_key="nightly_report",
-        option_names=("--airflow-plan", "--suite-plan"),
+def write_paired_evaluation_verification_evidence(
+    plan_json: Mapping[str, Any] | str,
+    evaluator_result: Mapping[str, Any] | str,
+    airflow_run: Mapping[str, Any] | str,
+    *,
+    s3_client: Any | None = None,
+) -> dict[str, Any]:
+    """Seal the identity-bound D19 v9 verification handoff consumed by D6."""
+
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != _D19_DAG_ID:
+        raise ValueError("plan dag_id does not match paired-evaluation verification writer")
+    artifact_paths = _required_artifact_paths(
+        plan,
+        ("paired_eval_receipt", "paired_evaluation_verification_evidence"),
+    )
+    result = _json_object(evaluator_result, "evaluator_result")
+    if set(result) != {
+        "receiptAttestationEvidence",
+        "receiptEvidence",
+        "receiptStatus",
+        "receiptVerification",
+    }:
+        raise ValueError("paired evaluation result fields are unsupported")
+    receipt_status = _required_str(result, "receiptStatus")
+    if receipt_status not in {"accepted", "rejected"}:
+        raise ValueError("paired evaluation receipt status is unsupported")
+    receipt_evidence = _paired_evaluation_receipt_worm_evidence(
+        result,
+        expected_path=artifact_paths["paired_eval_receipt"],
+    )
+    receipt_attestation_evidence = _worm_evidence_reference(
+        result,
+        "receiptAttestationEvidence",
+    )
+    client = s3_client or _s3_client(
+        receipt_evidence["s3Uri"],
+        receipt_attestation_evidence["s3Uri"],
+        artifact_paths["paired_evaluation_verification_evidence"],
+    )
+    receipt_bytes = _read_exact_worm_evidence_bytes(
+        receipt_evidence,
+        field_name="paired evaluation receipt",
+        s3_client=client,
+    )
+    receipt = _canonical_json_object_bytes(receipt_bytes, "paired evaluation receipt")
+    if _required_str(receipt, "contractVersion") != _PAIRED_EVALUATION_RECEIPT_CONTRACT_VERSION:
+        raise ValueError("paired evaluation receipt contract must be v9")
+    operation_id = _required_str(plan, "operation_id")
+    if _required_str(receipt, "requestId") != operation_id:
+        raise ValueError("paired evaluation receipt requestId does not match operationId")
+    if _required_str(receipt, "status") != receipt_status:
+        raise ValueError("paired evaluation receipt status does not match evaluator result")
+
+    receipt_verification, final_request_ids = _paired_evaluation_verification_descriptor(
+        _required_mapping(result, "receiptVerification"),
+        field_name="receiptVerification",
+        expected_purpose=_PAIRED_EVALUATION_FINAL_RECEIPT_PURPOSE,
+        expected_subject=receipt_evidence,
+        expected_attestation=receipt_attestation_evidence,
+    )
+    attestation_verifications = _required_mapping(receipt, "attestationVerifications")
+    if set(attestation_verifications) != set(_PAIRED_EVALUATION_ATTESTATION_PURPOSES):
+        raise ValueError("paired evaluation receipt attestation verification set is unsupported")
+    request_ids = list(final_request_ids)
+    for descriptor_name, expected_purpose in _PAIRED_EVALUATION_ATTESTATION_PURPOSES.items():
+        _, descriptor_request_ids = _paired_evaluation_verification_descriptor(
+            _required_mapping(attestation_verifications, descriptor_name),
+            field_name=f"attestationVerifications.{descriptor_name}",
+            expected_purpose=expected_purpose,
+        )
+        request_ids.extend(descriptor_request_ids)
+    if len(set(request_ids)) != len(request_ids):
+        raise ValueError("paired evaluation verification request IDs must be unique")
+
+    _read_exact_worm_evidence_bytes(
+        receipt_attestation_evidence,
+        field_name="paired evaluation receipt attestation",
+        s3_client=client,
+    )
+    normalized_airflow_run = _normalized_d19_airflow_run(airflow_run)
+    receipt_pointer = {
+        "receiptAttestationEvidence": receipt_attestation_evidence,
+        "receiptEvidence": receipt_evidence,
+        "receiptStatus": receipt_status,
+        "receiptVerification": receipt_verification,
+    }
+    payload = {
+        "airflowRun": normalized_airflow_run,
+        "operationId": operation_id,
+        "receiptPointer": receipt_pointer,
+        "requestId": operation_id,
+        "schema": _PAIRED_EVALUATION_VERIFICATION_EVIDENCE_SCHEMA,
+    }
+    verification_path = artifact_paths["paired_evaluation_verification_evidence"]
+    written = write_immutable_evidence_snapshot(
+        verification_path,
+        artifact_type="paired_evaluation_verification_evidence",
+        operation_id=operation_id,
+        payload=payload,
+        s3_client=client,
+    )
+    verification_evidence = _written_worm_evidence_reference(
+        written,
+        verification_path,
+        "paired evaluation verification evidence",
+    )
+    persisted_bytes = _read_exact_worm_evidence_bytes(
+        verification_evidence,
+        field_name="paired evaluation verification evidence",
+        s3_client=client,
+    )
+    persisted = _canonical_json_object_bytes(
+        persisted_bytes,
+        "paired evaluation verification evidence",
+    )
+    if dict(persisted) != payload:
+        raise ValueError("paired evaluation verification evidence readback does not match")
+    return {
+        "airflowRun": normalized_airflow_run,
+        "pairedEvaluationVerificationEvidence": verification_evidence,
+        "receiptStatus": receipt_status,
+        "requestId": operation_id,
+    }
+
+
+def _paired_evaluation_receipt_worm_evidence(
+    result: Mapping[str, Any],
+    *,
+    expected_path: str,
+) -> dict[str, str]:
+    raw = _required_mapping(result, "receiptEvidence")
+    expected_fields = {
+        "artifactETag",
+        "artifactPath",
+        "artifactSha256",
+        "artifactType",
+        "artifactVersionId",
+        "objectLockMode",
+        "objectLockRetainUntil",
+        "status",
+    }
+    if set(raw) != expected_fields:
+        raise ValueError("paired evaluation receipt evidence fields are unsupported")
+    if _required_str(raw, "artifactPath") != expected_path:
+        raise ValueError("paired evaluation receipt path does not match the D19 plan")
+    if _required_str(raw, "artifactType") != "serp_paired_eval_receipt":
+        raise ValueError("paired evaluation receipt artifact type is unsupported")
+    if _required_str(raw, "status") != "written":
+        raise ValueError("paired evaluation receipt was not written")
+    _required_str(raw, "artifactETag")
+    return _worm_evidence_reference(
+        {
+            "receiptEvidence": {
+                "objectLockMode": _required_str(raw, "objectLockMode"),
+                "retainUntil": _required_datetime_string(raw, "objectLockRetainUntil"),
+                "s3Uri": expected_path,
+                "sha256": "sha256:" + _required_sha256_hex(raw, "artifactSha256"),
+                "versionId": _required_str(raw, "artifactVersionId"),
+            }
+        },
+        "receiptEvidence",
     )
 
 
-def build_nightly_registry_cli_spec(plan_json: str) -> dict[str, Any]:
-    return _gateway_cli_spec(
-        plan_json,
-        dag_id="serp_nightly_regression_suite",
-        task_id="build_bc21_benchmark_run_submissions",
-        command="nightly-registry-submissions",
-        input_path_keys=("airflow_plan", "nightly_report"),
-        output_path_key="nightly_registry_submissions",
-        option_names=("--airflow-plan", "--nightly-report"),
+def _read_exact_worm_evidence_bytes(
+    evidence: Mapping[str, str],
+    *,
+    field_name: str,
+    s3_client: Any,
+) -> bytes:
+    payload, version_id, retain_until = _read_compliance_locked_s3_bytes(
+        s3_client,
+        evidence["s3Uri"],
+        field_name=field_name,
+        version_id=evidence["versionId"],
+        max_bytes=_D19_VERIFICATION_EVIDENCE_MAX_BYTES,
     )
+    if version_id != evidence["versionId"]:
+        raise ValueError(f"{field_name} VersionId does not match")
+    if retain_until != evidence["retainUntil"]:
+        raise ValueError(f"{field_name} retention does not match")
+    if "sha256:" + sha256(payload).hexdigest() != evidence["sha256"]:
+        raise ValueError(f"{field_name} SHA-256 does not match")
+    return payload
 
 
-def build_nightly_registry_submit_cli_spec(plan_json: str) -> dict[str, Any]:
-    return _gateway_cli_spec(
-        plan_json,
-        dag_id="serp_nightly_regression_suite",
-        task_id="submit_bc21_benchmark_run_submissions",
-        command="submit-nightly-registry-submissions",
-        input_path_keys=("airflow_plan", "nightly_registry_submissions"),
-        output_path_key="nightly_registry_receipts",
-        option_names=("--airflow-plan", "--nightly-registry-submissions"),
-        extra_options=(
-            "--bc21-base-url",
-            _required_bc21_base_url(_json_object(plan_json, "plan_json")),
-        ),
-    )
+def _paired_evaluation_verification_descriptor(
+    descriptor: Mapping[str, Any],
+    *,
+    field_name: str,
+    expected_purpose: str,
+    expected_subject: Mapping[str, str] | None = None,
+    expected_attestation: Mapping[str, str] | None = None,
+) -> tuple[dict[str, Any], tuple[str, str]]:
+    expected_fields = {
+        "attestationEvidence",
+        "consumerVerification",
+        "purpose",
+        "signer",
+        "statementSha256",
+        "subject",
+        "transit",
+    }
+    if set(descriptor) != expected_fields:
+        raise ValueError(f"{field_name} fields are unsupported")
+    purpose = _required_str(descriptor, "purpose")
+    if purpose != expected_purpose:
+        raise ValueError(f"{field_name} purpose is unsupported")
+    attestation = _worm_evidence_reference(descriptor, "attestationEvidence")
+    subject = _worm_evidence_reference(descriptor, "subject")
+    if expected_attestation is not None and attestation != dict(expected_attestation):
+        raise ValueError("paired evaluation receipt verification attestation does not match")
+    if expected_subject is not None and subject != dict(expected_subject):
+        raise ValueError("paired evaluation receipt verification subject does not match")
+    consumer = _required_mapping(descriptor, "consumerVerification")
+    if set(consumer) != {"requestId", "valid"}:
+        raise ValueError(f"{field_name} consumerVerification fields are unsupported")
+    _required_true(consumer, "valid")
+    consumer_request_id = str(_required_uuid(consumer, "requestId"))
+    signer = dict(_required_mapping(descriptor, "signer"))
+    if not signer:
+        raise ValueError(f"{field_name} signer is required")
+    _reject_raw_secrets(signer)
+    transit = _required_mapping(descriptor, "transit")
+    if set(transit) != {"key", "keyVersion", "signature", "verifyRequestId"}:
+        raise ValueError(f"{field_name} transit fields are unsupported")
+    if _required_str(transit, "key") != _PAIRED_EVALUATION_PURPOSE_TRANSIT_KEYS[purpose]:
+        raise ValueError(f"{field_name} transit key is unsupported")
+    transit_request_id = str(_required_uuid(transit, "verifyRequestId"))
+    normalized = {
+        "attestationEvidence": attestation,
+        "consumerVerification": {"requestId": consumer_request_id, "valid": True},
+        "purpose": purpose,
+        "signer": signer,
+        "statementSha256": _required_sha256_prefixed(descriptor, "statementSha256"),
+        "subject": subject,
+        "transit": {
+            "key": _required_str(transit, "key"),
+            "keyVersion": _required_positive_int(transit, "keyVersion"),
+            "signature": _required_str(transit, "signature"),
+            "verifyRequestId": transit_request_id,
+        },
+    }
+    return normalized, (consumer_request_id, transit_request_id)
 
 
-def build_nightly_benchmark_export_cli_spec(plan_json: str) -> dict[str, Any]:
-    return _gateway_cli_spec(
-        plan_json,
-        dag_id="serp_nightly_regression_suite",
-        task_id="build_c1_benchmark_gate_export",
-        command="nightly-benchmark-export",
-        input_path_keys=(
-            "airflow_plan",
-            "nightly_report",
-            "evaluation_objective",
-            "paired_evaluation_receipt",
-            "paired_evaluation_verification",
-        ),
-        output_path_key="benchmark_gate_export",
-        option_names=(
-            "--airflow-plan",
-            "--nightly-report",
-            "--evaluation-objective",
-            "--paired-evaluation-receipt",
-            "--paired-evaluation-verification",
-        ),
-    )
+def _normalized_d19_airflow_run(airflow_run: Mapping[str, Any] | str) -> dict[str, str]:
+    metadata = _json_object(airflow_run, "airflow_run")
+    _reject_raw_secrets(metadata)
+    if set(metadata) != {"dagId", "logicalDate", "runId", "runType"}:
+        raise ValueError("D19 airflowRun fields are unsupported")
+    if _required_str(metadata, "dagId") != _D19_DAG_ID:
+        raise ValueError("D19 airflowRun dagId does not match")
+    if _required_str(metadata, "runType") != "manual":
+        raise ValueError("D19 airflowRun runType must be manual")
+    return {
+        "dagId": _D19_DAG_ID,
+        "logicalDate": _required_datetime_string(metadata, "logicalDate"),
+        "runId": _required_str(metadata, "runId"),
+        "runType": "manual",
+    }
 
 
 def build_tenant_golden_runner_cli_spec(plan_json: str) -> dict[str, Any]:
@@ -5738,29 +6524,6 @@ def build_online_eval_registry_cli_spec(plan_json: str) -> dict[str, Any]:
         output_path_key="online_eval_registry_submissions",
         option_names=("--airflow-plan", "--online-eval-rollup"),
     )
-
-
-def evaluate_nightly_regression_gate(report: Mapping[str, Any]) -> dict[str, Any]:
-    payload = _payload(report)
-    findings: list[dict[str, Any]] = []
-    for suite in _required_object_list(payload, "suite_results"):
-        suite_id = _required_str(suite, "suite_id")
-        for metric in _required_object_list(suite, "metric_results"):
-            normalized_score = _required_number(metric, "normalized_score")
-            if normalized_score < SERP_NORMALIZED_GATE_FLOOR:
-                findings.append(
-                    {
-                        "metric": _required_str(metric, "metric"),
-                        "metric_family": _required_str(metric, "metric_family"),
-                        "normalized_score": normalized_score,
-                        "suite_id": suite_id,
-                    }
-                )
-    return {
-        "blocking_findings": findings,
-        "normalized_gate_floor": SERP_NORMALIZED_GATE_FLOOR,
-        "status": "blocked" if findings else "passed",
-    }
 
 
 def evaluate_tenant_golden_gate(report: Mapping[str, Any]) -> dict[str, Any]:
@@ -7153,402 +7916,6 @@ def _frontier_metadata(
     }
 
 
-def _nightly_suite_plan_payload(plan: Mapping[str, Any]) -> dict[str, Any]:
-    generated_at = _required_datetime_string(plan, "generated_at")
-    selected_suite_ids = _required_str_list(plan, "selected_suite_ids")
-    pack_version_ids = _required_str_list(plan, "pack_version_ids")
-    tenant_id = _required_str(plan, "tenant_id")
-    retrieval_profile_version = _required_str(plan, "retrieval_profile_version")
-    reranker_profile_version = _required_str(plan, "reranker_profile_version")
-    return {
-        "artifact_paths": dict(_required_mapping(plan, "artifact_paths")),
-        "candidateReleaseEvidence": dict(_required_mapping(plan, "candidateReleaseEvidence")),
-        "contract_version": _EVAL_CONTRACT_VERSION,
-        "generated_at": generated_at,
-        "metadata": {
-            "airflowOperationId": _required_str(plan, "operation_id"),
-            "trigger": "airflow-nightly",
-        },
-        "pack_version_ids": pack_version_ids,
-        "registry_resource_id": _required_str(plan, "registry_resource_id"),
-        "registry_resource_type": _required_resource_type(plan, "registry_resource_type"),
-        "reranker_profile_version": reranker_profile_version,
-        "retrieval_profile_version": retrieval_profile_version,
-        "schedule_id": _required_str(plan, "dag_id"),
-        "selected_suite_ids": selected_suite_ids,
-        "suites": _required_nightly_benchmark_suite_inputs(
-            plan,
-            selected_suite_ids=tuple(selected_suite_ids),
-        ),
-        "tenant_id": tenant_id,
-    }
-
-
-def _nightly_report_from_suite_plan_payload(
-    suite_plan: Mapping[str, Any],
-) -> dict[str, Any]:
-    if _required_str(suite_plan, "contract_version") != _EVAL_CONTRACT_VERSION:
-        raise ValueError("unsupported suite plan contract_version")
-    selected_suite_ids = _required_str_list(suite_plan, "selected_suite_ids")
-    suites_by_id = {
-        _required_str(suite, "suite_id"): suite
-        for suite in _required_object_list(suite_plan, "suites")
-    }
-    if tuple(suites_by_id) != tuple(selected_suite_ids):
-        raise ValueError("suites must match selected_suite_ids")
-    suite_results = [
-        _suite_result_from_suite_plan(suites_by_id[suite_id]) for suite_id in selected_suite_ids
-    ]
-    status = "blocked" if any(suite["status"] == "blocked" for suite in suite_results) else "passed"
-    operation_id = _operation_id(
-        "serp-nightly-regression",
-        _required_str(suite_plan, "schedule_id"),
-        _required_str(suite_plan, "tenant_id"),
-        _required_str(suite_plan, "generated_at"),
-        ",".join(_required_str_list(suite_plan, "pack_version_ids")),
-        ",".join(selected_suite_ids),
-        ",".join(_required_str(suite, "operation_id") for suite in suite_results),
-    )
-    return {
-        "artifact_paths": dict(_required_mapping(suite_plan, "artifact_paths")),
-        "contract_version": _EVAL_CONTRACT_VERSION,
-        "generated_at": _required_str(suite_plan, "generated_at"),
-        "metadata": dict(_required_mapping(suite_plan, "metadata")),
-        "operation_id": operation_id,
-        "pack_version_ids": _required_str_list(suite_plan, "pack_version_ids"),
-        "registry_resource_id": _required_str(suite_plan, "registry_resource_id"),
-        "registry_resource_type": _required_resource_type(suite_plan, "registry_resource_type"),
-        "reranker_profile_version": _required_str(suite_plan, "reranker_profile_version"),
-        "retrieval_profile_version": _required_str(suite_plan, "retrieval_profile_version"),
-        "schedule_id": _required_str(suite_plan, "schedule_id"),
-        "selected_suite_ids": selected_suite_ids,
-        "status": status,
-        "suite_results": suite_results,
-        "tenant_id": _required_str(suite_plan, "tenant_id"),
-    }
-
-
-def _suite_result_from_suite_plan(suite: Mapping[str, Any]) -> dict[str, Any]:
-    if _required_str(suite, "suite_contract_version") != _BENCHMARK_SUITE_CONTRACT_VERSION:
-        raise ValueError("unsupported suite_contract_version")
-    metric_compatibility = _required_metric_compatibility(
-        _required_mapping(suite, "metric_compatibility"),
-        selected_suite_ids=MANDATORY_SERP_BENCHMARK_SUITES,
-        contract_version_field="contract_version",
-        matrix_uri_field="matrix_uri",
-        matrix_sha256_field="matrix_sha256",
-        matrix_version_id_field="matrix_version_id",
-        suite_id_field="suite_id",
-        metric_families_field="metric_families",
-    )
-    required_metric_families = _metric_families_for_suite(
-        metric_compatibility,
-        _required_str(suite, "suite_id"),
-    )
-    _validate_nightly_suite_metric_records(
-        suite,
-        required_metric_families=required_metric_families,
-    )
-    query_ids = [_required_str(case, "query_id") for case in _required_object_list(suite, "cases")]
-    metric_results = [
-        _metric_result_from_reference(suite, reference)
-        for reference in _required_object_list(suite, "references")
-    ]
-    if {metric["metric_family"] for metric in metric_results} != set(required_metric_families):
-        raise ValueError(
-            "suite results must exactly match metric_compatibility required metric families"
-        )
-    status = (
-        "blocked" if any(metric["status"] == "blocked" for metric in metric_results) else "passed"
-    )
-    operation_id = _operation_id(
-        "retrieval-eval",
-        _required_str(suite, "suite_id"),
-        _required_str(suite, "suite_version"),
-        _required_str(suite, "tenant_id"),
-        ",".join(query_ids),
-        ",".join(_required_str(metric, "metric") for metric in metric_results),
-    )
-    operation_sha256 = sha256(
-        _canonical_json(
-            {
-                "metric_results": metric_results,
-                "operation_id": operation_id,
-                "query_ids": query_ids,
-                "suite_id": _required_str(suite, "suite_id"),
-                "suite_version": _required_str(suite, "suite_version"),
-            }
-        ).encode("utf-8")
-    ).hexdigest()
-    return {
-        "metadata": {
-            **dict(_required_mapping(suite, "metadata")),
-            "metric_compatibility": metric_compatibility,
-        },
-        "metric_count": len(metric_results),
-        "metric_results": metric_results,
-        "operation_id": operation_id,
-        "operation_sha256": operation_sha256,
-        "query_ids": query_ids,
-        "status": status,
-        "suite_id": _required_str(suite, "suite_id"),
-        "suite_version": _required_str(suite, "suite_version"),
-    }
-
-
-def _metric_result_from_reference(
-    suite: Mapping[str, Any],
-    reference: Mapping[str, Any],
-) -> dict[str, Any]:
-    metric = _required_str(reference, "metric")
-    metric_family = _required_str(reference, "metric_family")
-    reference_score = _required_number(reference, "reference_score")
-    threshold = _required_number(reference, "threshold")
-    score = (
-        _retrieval_score(suite, metric)
-        if metric_family == "retrieval"
-        else _observed_metric_score(suite, metric_family, metric)
-    )
-    normalized_score = score / reference_score
-    return {
-        "metric": metric,
-        "metric_family": metric_family,
-        "normalized_score": normalized_score,
-        "reference_id": _required_str(reference, "reference_id"),
-        "reference_score": reference_score,
-        "score": score,
-        "status": "passed" if normalized_score >= threshold else "blocked",
-        "threshold": threshold,
-    }
-
-
-def _retrieval_score(suite: Mapping[str, Any], metric: str) -> float:
-    if metric != "MRR@10":
-        raise ValueError("D6 suite-plan runner currently supports retrieval MRR@10")
-    scores: list[float] = []
-    for case in _required_object_list(suite, "cases"):
-        relevant = set(_required_str_list(case, "relevant_chunk_ids"))
-        ranked = _required_str_list(case, "ranked_chunk_ids")[:10]
-        score = 0.0
-        for index, chunk_id in enumerate(ranked, start=1):
-            if chunk_id in relevant:
-                score = 1.0 / index
-                break
-        scores.append(score)
-    return sum(scores) / len(scores)
-
-
-def _observed_metric_score(
-    suite: Mapping[str, Any],
-    metric_family: str,
-    metric: str,
-) -> float:
-    observations = {
-        (_required_str(item, "metric_family"), _required_str(item, "metric")): item
-        for item in _required_object_list(suite, "metric_observations")
-    }
-    key = (metric_family, metric)
-    if key not in observations:
-        raise ValueError(f"missing metric_observation {metric_family}/{metric}")
-    return _required_number(observations[key], "score")
-
-
-def _live_registry_submissions_payload(
-    report: Mapping[str, Any],
-    *,
-    actor_id: str,
-) -> dict[str, Any]:
-    _require_non_empty("actor_id", actor_id)
-    if _required_str(report, "status") != "passed":
-        raise ValueError("nightly report must pass before registry submission")
-    submissions = [
-        _live_registry_submission(report, suite, metric_family, actor_id)
-        for suite in _required_object_list(report, "suite_results")
-        for metric_family in _suite_result_metric_families(suite)
-    ]
-    return {
-        "contract_version": _EVAL_CONTRACT_VERSION,
-        "nightly_operation_id": _required_str(report, "operation_id"),
-        "operation_id": _operation_id(
-            "serp-nightly-registry-bridge",
-            _required_str(report, "tenant_id"),
-            _required_str(report, "operation_id"),
-            ",".join(_required_str(item, "idempotencyKey") for item in submissions),
-        ),
-        "submissions": submissions,
-        "tenant_id": _required_str(report, "tenant_id"),
-    }
-
-
-def _live_registry_submission(
-    report: Mapping[str, Any],
-    suite: Mapping[str, Any],
-    metric_family: str,
-    actor_id: str,
-) -> dict[str, Any]:
-    suite_code = _required_str(suite, "suite_id")
-    metrics = [
-        metric
-        for metric in _required_object_list(suite, "metric_results")
-        if _required_str(metric, "metric_family") == metric_family
-    ]
-    if not metrics:
-        raise ValueError(f"missing mandatory metric_family {suite_code}/{metric_family}")
-    body = {
-        "actorId": actor_id,
-        "cases": [
-            {
-                "caseId": (
-                    f"{_required_str(suite, 'operation_id')}:"
-                    f"{_required_str(metric, 'metric')}:"
-                    f"{_required_str(metric, 'reference_id')}:"
-                    f"{_required_str(suite, 'operation_sha256')}"
-                ),
-                "expectedScore": _required_number(metric, "reference_score"),
-                "observedScore": _required_number(metric, "score"),
-            }
-            for metric in metrics
-        ],
-        "evaluationContractCode": _BENCHMARK_EVALUATION_CONTRACT_CODE,
-        "metricFamily": metric_family,
-        "provenance": _benchmark_run_provenance(suite),
-        "referenceSourceType": "official_baseline",
-        "resourceId": _required_str(report, "registry_resource_id"),
-        "resourceType": _required_resource_type(report, "registry_resource_type"),
-        "runnerVersion": "airflow-d6-serp-eval-runner@2026.07.3",
-        "scoringAlgorithmVersion": f"airflow-d6-eval-contract@{_EVAL_CONTRACT_VERSION}",
-        "suiteCode": suite_code,
-        "suiteVersion": _required_str(suite, "suite_version"),
-    }
-    idempotency_key = uuid5(
-        NAMESPACE_URL,
-        "\n".join(
-            (
-                "serp-nightly-registry-idempotency-v1",
-                _required_str(report, "tenant_id"),
-                _required_str(report, "operation_id"),
-                suite_code,
-                metric_family,
-                _required_str(suite, "operation_sha256"),
-            )
-        ),
-    )
-    return {
-        "body": body,
-        "endpointPath": "/api/bc-21/serp/v1/governance/benchmark-runs",
-        "fingerprint": "sha256:" + sha256(_canonical_json(body).encode("utf-8")).hexdigest(),
-        "idempotencyKey": str(idempotency_key),
-        "metricFamily": metric_family,
-        "suiteCode": suite_code,
-        "tenantId": _required_str(report, "tenant_id"),
-        "trustedActorId": actor_id,
-    }
-
-
-def _benchmark_run_provenance(suite: Mapping[str, Any]) -> dict[str, str]:
-    metadata = _required_mapping(suite, "metadata")
-    metric_compatibility = _required_mapping(metadata, "metric_compatibility")
-    return {
-        "adapterId": _required_str(metadata, "adapter_id"),
-        "adapterVersion": _required_str(metadata, "adapter_version"),
-        "adapterSourceUri": _required_str(metadata, "adapter_source_uri"),
-        "adapterSourceRevision": _required_str(metadata, "adapter_source_revision"),
-        "adapterImageDigest": _required_str(metadata, "adapter_image_digest"),
-        "datasetLicenseId": _required_str(metadata, "dataset_license_id"),
-        "datasetDistributionRule": _required_str(metadata, "dataset_distribution_rule"),
-        "datasetRightsStatus": _required_str(metadata, "dataset_rights_status"),
-        "datasetManifestUri": _required_str(metadata, "dataset_manifest_uri"),
-        "datasetManifestSha256": _required_str(metadata, "dataset_manifest_sha256"),
-        "datasetManifestVersionId": _required_str(metadata, "dataset_manifest_version_id"),
-        "executionEvidenceUri": _required_str(metadata, "execution_evidence_uri"),
-        "executionEvidenceSha256": _required_str(metadata, "execution_evidence_sha256"),
-        "executionEvidenceVersionId": _required_str(metadata, "execution_evidence_version_id"),
-        "metricCompatibilityUri": _required_str(metric_compatibility, "matrix_uri"),
-        "metricCompatibilitySha256": _required_str(metric_compatibility, "matrix_sha256"),
-        "metricCompatibilityVersionId": _required_str(metric_compatibility, "matrix_version_id"),
-        "referenceSourceUri": _required_str(metadata, "reference_source_uri"),
-    }
-
-
-def _submit_live_registry_submissions(
-    submissions: Mapping[str, Any],
-    *,
-    bc21_base_url: str,
-) -> dict[str, Any]:
-    base_url = _required_bc21_base_url({"bc21_base_url": bc21_base_url}).rstrip("/")
-    tenant_id = _required_str(submissions, "tenant_id")
-    receipts = [
-        _submit_live_registry_submission(base_url, tenant_id, submission)
-        for submission in _required_object_list(submissions, "submissions")
-    ]
-    return {
-        "contract_version": _EVAL_CONTRACT_VERSION,
-        "nightly_operation_id": _required_str(submissions, "nightly_operation_id"),
-        "operation_id": _operation_id(
-            "serp-nightly-registry-receipts",
-            _required_str(submissions, "operation_id"),
-            ",".join(_required_str(receipt, "benchmarkResultId") for receipt in receipts),
-        ),
-        "receipts": receipts,
-        "status": "accepted",
-        "tenant_id": tenant_id,
-    }
-
-
-def _submit_live_registry_submission(
-    base_url: str,
-    tenant_id: str,
-    submission: Mapping[str, Any],
-) -> dict[str, Any]:
-    body = _required_mapping(submission, "body")
-    endpoint_path = _required_str(submission, "endpointPath")
-    request = Request(
-        base_url + endpoint_path,
-        data=_canonical_json(body).encode("utf-8"),
-        method="POST",
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "X-Adapstory-Actor-Id": _required_str(submission, "trustedActorId"),
-            "X-Adapstory-Tenant-Id": tenant_id,
-            "X-Fingerprint": _required_str(submission, "fingerprint"),
-            "X-Idempotency-Key": _required_str(submission, "idempotencyKey"),
-            **_bc21_workload_authorization_headers(),
-        },
-    )
-    try:
-        with urlopen(request, timeout=5.0) as response:
-            status_code = response.status
-            response_payload = _json_object(
-                response.read().decode("utf-8"), "benchmark_registry_response"
-            )
-    except HTTPError as exc:
-        raise ValueError(
-            "benchmark registry submission for "
-            f"{_required_str(submission, 'suiteCode')}/"
-            f"{_required_str(submission, 'metricFamily')} failed: status={exc.code}"
-            f"{_safe_bc21_problem_detail(exc)}"
-        ) from exc
-    except (URLError, TimeoutError, OSError) as exc:
-        raise ValueError(
-            "benchmark registry submission failed for "
-            f"{_required_str(submission, 'suiteCode')}/"
-            f"{_required_str(submission, 'metricFamily')}"
-        ) from exc
-    if status_code < 200 or status_code >= 300:
-        raise ValueError(f"benchmark registry submission failed: status={status_code}")
-    return {
-        "benchmarkResultId": _required_str(response_payload, "benchmarkResultId"),
-        "endpointPath": endpoint_path,
-        "gateStatus": _required_str(response_payload, "gateStatus"),
-        "metricFamily": _required_str(submission, "metricFamily"),
-        "responseBodySha256": sha256(_canonical_json(response_payload).encode("utf-8")).hexdigest(),
-        "runId": _required_str(response_payload, "runId"),
-        "statusCode": status_code,
-        "suiteCode": _required_str(submission, "suiteCode"),
-    }
-
-
 def _ensure_public_docs_catalog_source(
     plan: Mapping[str, Any],
     *,
@@ -7696,81 +8063,6 @@ def _safe_bc21_problem_detail(exc: HTTPError) -> str:
     if not normalized_title or not normalized_detail:
         return ""
     return f" problem={normalized_title[:120]}: {normalized_detail[:240]}"
-
-
-def _benchmark_export_payload(report: Mapping[str, Any]) -> dict[str, Any]:
-    artifact_paths = _required_artifact_paths(
-        report,
-        (
-            "benchmark_gate_export",
-            "nightly_registry_submissions",
-            "nightly_registry_receipts",
-        ),
-    )
-    items: list[dict[str, Any]] = []
-    for suite in _required_object_list(report, "suite_results"):
-        suite_id = _required_str(suite, "suite_id")
-        normalized_score = min(
-            _required_number(metric, "normalized_score")
-            for metric in _required_object_list(suite, "metric_results")
-        )
-        operation_id = _required_str(suite, "operation_id")
-        benchmark_result_id = str(
-            uuid5(
-                _BENCHMARK_NAMESPACE,
-                "benchmark-result|"
-                f"{_required_str(report, 'operation_id')}|{suite_id}|"
-                f"{operation_id}",
-            )
-        )
-        evidence_bundle_id = str(
-            uuid5(
-                _BENCHMARK_NAMESPACE,
-                "evidence-bundle|"
-                f"{_required_str(report, 'operation_id')}|{suite_id}|"
-                f"{_required_str(suite, 'operation_sha256')}",
-            )
-        )
-        items.append(
-            {
-                "benchmarkResultId": benchmark_result_id,
-                "evidenceBundleId": evidence_bundle_id,
-                "gateStatus": _required_str(suite, "status"),
-                "generatedAt": _required_str(report, "generated_at"),
-                "normalizedScore": f"{normalized_score:.4f}",
-                "operationSha256": _required_str(suite, "operation_sha256"),
-                "registryResourceId": _required_str(report, "registry_resource_id"),
-                "registryResourceType": _required_resource_type(report, "registry_resource_type"),
-                "runId": operation_id,
-                "sourceEvidenceBundleId": evidence_bundle_id,
-                "suiteCode": suite_id,
-                "suiteVersion": _required_str(suite, "suite_version"),
-                "tenantId": _required_str(report, "tenant_id"),
-            }
-        )
-    return {
-        "artifact_paths": artifact_paths,
-        "contractVersion": "serp-c1-benchmark-gate-export/v1",
-        "generatedAt": _required_str(report, "generated_at"),
-        "items": items,
-        "normalizedGateFloor": f"{SERP_NORMALIZED_GATE_FLOOR:.4f}",
-        "operationId": _required_str(report, "operation_id"),
-        "packVersionIds": _required_str_list(report, "pack_version_ids"),
-        "status": "passed",
-        "tenantId": _required_str(report, "tenant_id"),
-    }
-
-
-def _validate_benchmark_export_payload(payload: Mapping[str, Any]) -> None:
-    items = _required_object_list(payload, "items")
-    suites = [_required_str(item, "suiteCode") for item in items]
-    if suites != list(MANDATORY_SERP_BENCHMARK_SUITES):
-        raise ValueError("benchmark export must include every mandatory suite")
-    for item in items:
-        if _required_str(item, "gateStatus") != "passed":
-            raise ValueError("benchmark export includes a non-passing suite")
-        if float(_required_str(item, "normalizedScore")) < SERP_NORMALIZED_GATE_FLOOR:
-            raise ValueError("benchmark export normalized score is below gate floor")
 
 
 def _paired_eval_request_payload(
@@ -8077,44 +8369,6 @@ def _required_metric_compatibility(
         "matrix_version_id": matrix_version_id,
         "requirements": [requirements_by_suite[suite_id] for suite_id in selected_suite_ids],
     }
-
-
-def _metric_families_for_suite(metric_compatibility: Mapping[str, Any], suite_id: str) -> list[str]:
-    for requirement in _required_object_list(metric_compatibility, "requirements"):
-        if _required_str(requirement, "suite_id") == suite_id:
-            return _required_str_list(requirement, "metric_families")
-    raise ValueError(f"metric_compatibility does not include suite {suite_id!r}")
-
-
-def _metric_compatibility_requirement_pairs(
-    metric_compatibility: Mapping[str, Any],
-) -> list[tuple[str, list[str]]]:
-    return [
-        (
-            _required_str(requirement, "suite_id"),
-            _required_str_list(requirement, "metric_families"),
-        )
-        for requirement in _required_object_list(metric_compatibility, "requirements")
-    ]
-
-
-def _suite_result_metric_families(suite_result: Mapping[str, Any]) -> list[str]:
-    suite_id = _required_str(suite_result, "suite_id")
-    metric_compatibility = _required_metric_compatibility(
-        _required_mapping(_required_mapping(suite_result, "metadata"), "metric_compatibility"),
-        selected_suite_ids=MANDATORY_SERP_BENCHMARK_SUITES,
-        contract_version_field="contract_version",
-        matrix_uri_field="matrix_uri",
-        matrix_sha256_field="matrix_sha256",
-        matrix_version_id_field="matrix_version_id",
-        suite_id_field="suite_id",
-        metric_families_field="metric_families",
-    )
-    return _metric_families_for_suite(metric_compatibility, suite_id)
-
-
-def _mandatory_metric_families() -> tuple[str, str, str, str]:
-    return _BENCHMARK_METRIC_FAMILIES
 
 
 def _public_docs_seed_registry(
@@ -9803,7 +10057,3 @@ def _required_str_ref(value: str | None) -> str:
     if value is None or not value.strip():
         raise ValueError("artifact reference is incomplete")
     return value
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

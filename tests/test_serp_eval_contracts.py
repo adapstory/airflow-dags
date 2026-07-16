@@ -32,11 +32,7 @@ from dags.serp_eval_contracts import (
     _fetch_public_docs_crawler_response,
     build_benchmark_improvement_wave_plan,
     build_mandatory_benchmark_dataset_evidence_plan,
-    build_nightly_benchmark_export_cli_spec,
-    build_nightly_registry_cli_spec,
-    build_nightly_registry_submit_cli_spec,
     build_nightly_regression_plan,
-    build_nightly_runner_cli_spec,
     build_online_eval_registry_cli_spec,
     build_online_eval_rollup_cli_spec,
     build_online_eval_rollup_plan,
@@ -52,7 +48,6 @@ from dags.serp_eval_contracts import (
     default_public_docs_seed_refresh_conf,
     discover_public_docs_crawler_frontier,
     dispatch_public_docs_seed_refresh_handoff,
-    evaluate_nightly_regression_gate,
     evaluate_tenant_golden_gate,
     execute_gateway_cli_spec,
     execute_pipeline_cli_spec,
@@ -61,7 +56,6 @@ from dags.serp_eval_contracts import (
     materialize_live_benchmark_catalog_artifact,
     submit_public_docs_bc21_pipeline_state_artifact,
     write_airflow_plan_artifact,
-    write_nightly_suite_plan_artifact,
     write_online_eval_rollup_plan_artifact,
     write_paired_eval_request_artifact,
     write_public_docs_coverage_proof_artifact,
@@ -72,6 +66,7 @@ from dags.serp_eval_contracts import (
     write_public_docs_search_serve_smoke_artifact,
     write_public_docs_seed_refresh_plan_artifact,
     write_public_docs_seed_registry_artifact,
+    write_scheduled_d6_regression_receipt,
 )
 from dags.serp_public_docs_seed_catalog import (
     P0_PUBLIC_DOCS_SOURCES,
@@ -440,77 +435,81 @@ def test_governed_airflow_json_parser_rejects_ambiguous_bytes(payload: bytes) ->
         serp_eval_contracts_module._canonical_json_object_bytes(payload, "artifact")
 
 
-def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:
-    plan = build_nightly_regression_plan(_nightly_conf())
+def test_build_nightly_regression_plan_is_reference_only_d19_orchestrator() -> None:
+    plan = build_nightly_regression_plan(_scheduled_d6_conf())
     repeated = build_nightly_regression_plan(json.loads(plan.to_canonical_json()))
 
     assert plan.to_canonical_json() == repeated.to_canonical_json()
     assert plan.payload["dag_id"] == "serp_nightly_regression_suite"
-    assert plan.payload["normalized_gate_floor"] == SERP_NORMALIZED_GATE_FLOOR
     assert plan.payload["artifact_paths"] == {
         "airflow_plan": (
-            f"/var/opt/adapstory/serp-evals/{plan.payload['operation_id']}/airflow-plan.json"
+            "s3://airflow-serp-evidence/serp-evals/"
+            f"{plan.payload['operation_id']}/airflow-plan.json"
         ),
-        "nightly_registry_submissions": (
-            "/var/opt/adapstory/serp-evals/"
-            f"{plan.payload['operation_id']}/nightly-registry-submissions.json"
+        "d19_run_history_observation": (
+            "s3://airflow-serp-evidence/serp-evals/"
+            f"{plan.payload['operation_id']}/d19-run-history-observation.json"
         ),
-        "nightly_registry_receipts": (
-            "/var/opt/adapstory/serp-evals/"
-            f"{plan.payload['operation_id']}/nightly-registry-receipts.json"
+        "d19_run_history_observation_attestation": (
+            "s3://airflow-serp-evidence/serp-evals/"
+            f"{plan.payload['operation_id']}/d19-run-history-observation.attestation.json"
         ),
-        "nightly_report": (
-            f"/var/opt/adapstory/serp-evals/{plan.payload['operation_id']}/nightly-report.json"
-        ),
-        "benchmark_gate_export": (
-            "/var/opt/adapstory/serp-evals/"
-            f"{plan.payload['operation_id']}/benchmark-gate-export.json"
-        ),
-        "benchmark_catalog": (
-            f"/var/opt/adapstory/serp-evals/{plan.payload['operation_id']}/benchmark-catalog.json"
-        ),
-        "benchmark_catalog_receipt": (
-            "/var/opt/adapstory/serp-evals/"
-            f"{plan.payload['operation_id']}/benchmark-catalog-materialization-receipt.json"
-        ),
-        "evaluation_objective": _nightly_worm_evidence("evaluation-objective")["s3Uri"],
-        "paired_evaluation_receipt": _nightly_worm_evidence("paired-evaluation-receipt")["s3Uri"],
-        "paired_evaluation_verification": _nightly_worm_evidence("paired-evaluation-verification")[
-            "s3Uri"
-        ],
-        "suite_plan": (
-            f"/var/opt/adapstory/serp-evals/{plan.payload['operation_id']}/suite-plan.json"
+        "scheduled_regression_receipt": (
+            "s3://airflow-serp-evidence/serp-evals/"
+            f"{plan.payload['operation_id']}/scheduled-d6-regression-receipt.json"
         ),
     }
-    assert plan.payload["selected_suite_ids"] == list(MANDATORY_SERP_BENCHMARK_SUITES)
+    assert plan.payload["d19_trigger_conf"] == {
+        "actor_id": "airflow-serp-eval-runner",
+        "artifact_root_path": "s3://airflow-serp-evidence/serp-evals",
+        "evaluation_release_promotion_evidence": _d19_worm_evidence(
+            "model-releases/d17-promotion", "c"
+        ),
+        "generated_at": "2026-07-17T00:00:00Z",
+        "registry_resource_id": REGISTRY_RESOURCE_ID,
+        "registry_resource_type": "workflow",
+        "tenant_id": TENANT_ID,
+    }
+    assert "prior_paired_evaluation_verification_evidence" not in plan.payload
     assert [task["task_id"] for task in plan.payload["tasks"]] == [
         "validate_nightly_regression_plan",
-        "materialize_live_benchmark_catalog",
-        "load_materialized_benchmark_catalog",
-        "write_nightly_suite_plan",
-        "run_mandatory_benchmark_suites",
-        "build_c1_benchmark_gate_export",
-        "build_bc21_benchmark_run_submissions",
-        "submit_bc21_benchmark_run_submissions",
+        "produce_d19_run_history_observation",
+        "trigger_benchmark_improvement_wave",
+        "load_triggered_d19_verification",
+        "observe_triggered_d19_run",
+        "write_scheduled_d6_regression_receipt",
+        "release_d19_history_fence",
         "notify_governance_eval_surfaces",
     ]
-
-    missing_suite_conf = _nightly_conf()
-    missing_suite_conf["selected_suite_ids"] = list(MANDATORY_SERP_BENCHMARK_SUITES[:-1])
-    with pytest.raises(ValueError, match="selected_suite_ids must include every mandatory suite"):
-        build_nightly_regression_plan(missing_suite_conf)
-
-    url_artifact_root = _nightly_conf()
-    url_artifact_root["artifact_root_path"] = "https://example.invalid/serp-evals"
-    with pytest.raises(
-        ValueError, match="artifact_root_path must be an absolute path or s3:// URI"
+    serialized = plan.to_canonical_json()
+    for legacy_field in (
+        "benchmark_suite_inputs",
+        "nightly_report",
+        "normalized_gate_floor",
+        "prior_paired_evaluation_verification_evidence",
+        "selected_suite_ids",
+        "suite_plan",
     ):
+        assert legacy_field not in serialized
+
+    url_artifact_root = _scheduled_d6_conf()
+    url_artifact_root["artifact_root_path"] = "https://example.invalid/serp-evals"
+    with pytest.raises(ValueError, match="scheduled D6 requires an s3:// artifact_root_path"):
         build_nightly_regression_plan(url_artifact_root)
 
-    unsafe_bc21_base_url = _nightly_conf()
-    unsafe_bc21_base_url["bc21_base_url"] = "http://example.invalid"
-    with pytest.raises(ValueError, match="bc21_base_url must use https"):
-        build_nightly_regression_plan(unsafe_bc21_base_url)
+    caller_history = _scheduled_d6_conf()
+    caller_history["d19_run_history_observation_evidence"] = _d19_worm_evidence(
+        "history/caller-supplied", "e"
+    )
+    with pytest.raises(ValueError, match="history observation is runtime-produced"):
+        build_nightly_regression_plan(caller_history)
+
+    caller_prior_handles = _scheduled_d6_conf()
+    caller_prior_handles["prior_paired_evaluation_verification_evidence"] = [
+        _d19_worm_evidence(f"verification/prior-{index}", str(index)) for index in range(1, 4)
+    ]
+    with pytest.raises(ValueError, match="legacy D6 scorer fields are unsupported"):
+        build_nightly_regression_plan(caller_prior_handles)
 
 
 def test_default_nightly_regression_conf_is_runtime_owned_and_canonical(
@@ -518,25 +517,12 @@ def test_default_nightly_regression_conf_is_runtime_owned_and_canonical(
 ) -> None:
     runtime_defaults = {
         "ADAPSTORY_AIRFLOW_ARTIFACT_ROOT": "s3://airflow-serp-evidence/serp-evals",
-        "ADAPSTORY_SERP_BC21_BASE_URL": "http://serp-context-platform.env-dev.svc.cluster.local",
         "ADAPSTORY_SERP_D6_ACTOR_ID": "airflow-serp-eval-runner",
-        "ADAPSTORY_SERP_D6_CANDIDATE_RELEASE_EVIDENCE": json.dumps(
-            _nightly_worm_evidence("candidate-release")
-        ),
-        "ADAPSTORY_SERP_D6_EVALUATION_OBJECTIVE_EVIDENCE": json.dumps(
-            _nightly_worm_evidence("evaluation-objective")
-        ),
-        "ADAPSTORY_SERP_D6_PACK_VERSION_IDS": json.dumps([PACK_VERSION_ID]),
-        "ADAPSTORY_SERP_D6_PAIRED_EVALUATION_RECEIPT_EVIDENCE": json.dumps(
-            _nightly_worm_evidence("paired-evaluation-receipt")
-        ),
-        "ADAPSTORY_SERP_D6_PAIRED_EVALUATION_VERIFICATION_EVIDENCE": json.dumps(
-            _nightly_worm_evidence("paired-evaluation-verification")
+        "ADAPSTORY_SERP_D6_EVALUATION_RELEASE_PROMOTION_EVIDENCE": json.dumps(
+            _d19_worm_evidence("model-releases/d17-promotion", "c")
         ),
         "ADAPSTORY_SERP_D6_REGISTRY_RESOURCE_ID": REGISTRY_RESOURCE_ID,
         "ADAPSTORY_SERP_D6_REGISTRY_RESOURCE_TYPE": "workflow",
-        "ADAPSTORY_SERP_D6_RERANKER_PROFILE_VERSION": "reranker@2026.07.1",
-        "ADAPSTORY_SERP_D6_RETRIEVAL_PROFILE_VERSION": "hybrid@2026.07.1",
         "ADAPSTORY_SERP_D6_TENANT_ID": TENANT_ID,
     }
     for name, value in runtime_defaults.items():
@@ -545,13 +531,314 @@ def test_default_nightly_regression_conf_is_runtime_owned_and_canonical(
     conf = default_nightly_regression_conf(generated_at="2026-07-14T08:00:00Z")
     plan = build_nightly_regression_plan(conf)
 
-    assert conf["selected_suite_ids"] == list(MANDATORY_SERP_BENCHMARK_SUITES)
-    assert conf["candidateReleaseEvidence"] == _nightly_worm_evidence("candidate-release")
-    assert plan.payload["selected_suite_ids"] == list(MANDATORY_SERP_BENCHMARK_SUITES)
+    assert conf == _scheduled_d6_conf() | {"generated_at": "2026-07-14T08:00:00Z"}
+    assert (
+        plan.payload["d19_trigger_conf"]["evaluation_release_promotion_evidence"]
+        == conf["evaluation_release_promotion_evidence"]
+    )
 
-    monkeypatch.delenv("ADAPSTORY_SERP_D6_PACK_VERSION_IDS")
-    with pytest.raises(ValueError, match="ADAPSTORY_SERP_D6_PACK_VERSION_IDS is required"):
+    monkeypatch.setenv(
+        "ADAPSTORY_SERP_D6_PRIOR_PAIRED_EVALUATION_VERIFICATION_EVIDENCE",
+        json.dumps(
+            [_d19_worm_evidence(f"verification/prior-{index}", str(index)) for index in range(1, 4)]
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match="legacy D6 prior verification env pointers are unsupported",
+    ):
         default_nightly_regression_conf(generated_at="2026-07-14T08:00:00Z")
+
+
+def test_d6_history_observation_is_runtime_fresh_fenced_worm_and_transit_attested() -> None:
+    plan = build_nightly_regression_plan(_scheduled_d6_conf())
+    parent_run = _scheduled_d6_airflow_run()
+    history = _scheduled_d6_history_client_result(parent_run)
+    fence_client = _D6FenceClient(_scheduled_d6_fence(parent_run))
+    writes: list[dict[str, Any]] = []
+
+    def snapshot_writer(**kwargs: Any) -> dict[str, Any]:
+        writes.append(kwargs)
+        payload = cast(Mapping[str, Any], kwargs["payload"])
+        return _d6_write_receipt(
+            str(kwargs["artifact_path"]),
+            serp_eval_contracts_module._canonical_json(payload).encode("utf-8"),
+            artifact_type=str(kwargs["artifact_type"]),
+        )
+
+    def attestation_sealer(
+        write_receipt: Mapping[str, Any],
+        *,
+        purpose: str,
+    ) -> tuple[dict[str, str], dict[str, Any]]:
+        assert purpose == "serp-d19-run-history-observation"
+        subject = _d6_worm_from_write_receipt(write_receipt)
+        attestation = _d6_history_attestation_evidence(plan)
+        return attestation, _d6_history_attestation_verification(
+            subject=subject,
+            attestation=attestation,
+        )
+
+    result = serp_eval_contracts_module.produce_d19_run_history_observation(
+        plan.to_canonical_json(),
+        parent_run,
+        history_client=_StaticD6HistoryClient(history),
+        fence_client=fence_client,
+        clock=lambda: datetime(2026, 7, 17, 0, 0, 10, tzinfo=UTC),
+        snapshot_writer=snapshot_writer,
+        attestation_sealer=attestation_sealer,
+    )
+
+    assert result["d19TriggerConf"] == {
+        **plan.payload["d19_trigger_conf"],
+        "scheduled_d6_fence": _scheduled_d6_fence(parent_run),
+    }
+    assert result["fence"] == _scheduled_d6_fence(parent_run)
+    assert set(result) == {
+        "d19RunHistoryObservationAttestationEvidence",
+        "d19RunHistoryObservationEvidence",
+        "d19RunHistoryObservationVerification",
+        "d19TriggerConf",
+        "fence",
+    }
+    assert len(writes) == 1
+    payload = cast(Mapping[str, Any], writes[0]["payload"])
+    assert payload == {
+        **history,
+        "fence": _scheduled_d6_fence(parent_run),
+        "generatedAt": "2026-07-17T00:00:10Z",
+        "parentAirflowRun": parent_run,
+        "producer": {
+            "namespace": "airflow",
+            "serviceAccount": "airflow-serp-d19-history-observer",
+        },
+        "schema": "D19RunHistoryObservation/v1",
+    }
+    assert (
+        writes[0]["artifact_path"] == plan.payload["artifact_paths"]["d19_run_history_observation"]
+    )
+    assert writes[0]["artifact_type"] == "d19_run_history_observation"
+    assert fence_client.released == []
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    (
+        ("stale", "within five minutes of parent start"),
+        ("wrong_window", "logicalDateLt must match parent"),
+        ("truncated", "complete pagination"),
+        ("active_race", "active D19 runs"),
+        ("expired_fence", "fence must remain active"),
+        ("missing_attestation", "Transit attestation"),
+    ),
+)
+def test_d6_history_observation_fails_closed_and_releases_fence(
+    mutation: str,
+    match: str,
+) -> None:
+    plan = build_nightly_regression_plan(_scheduled_d6_conf())
+    parent_run = _scheduled_d6_airflow_run()
+    history = _scheduled_d6_history_client_result(parent_run)
+    fence = _scheduled_d6_fence(parent_run)
+    clock_at = datetime(2026, 7, 17, 0, 0, 10, tzinfo=UTC)
+    if mutation == "stale":
+        clock_at = datetime(2026, 7, 17, 0, 6, tzinfo=UTC)
+    elif mutation == "wrong_window":
+        history["query"]["logicalDateLt"] = "2026-07-17T00:00:01Z"
+    elif mutation == "truncated":
+        history["pagination"]["complete"] = False
+    elif mutation == "active_race":
+        history["activeRunQuery"]["totalEntries"] = 1
+    elif mutation == "expired_fence":
+        fence["acquiredAt"] = "2026-07-17T00:00:04Z"
+        fence["expiresAt"] = "2026-07-17T00:00:09Z"
+        fence["leaseDurationSeconds"] = 5
+    fence_client = _D6FenceClient(fence)
+
+    def clock() -> datetime:
+        return clock_at
+
+    def snapshot_writer(**kwargs: Any) -> dict[str, Any]:
+        payload = cast(Mapping[str, Any], kwargs["payload"])
+        return _d6_write_receipt(
+            str(kwargs["artifact_path"]),
+            serp_eval_contracts_module._canonical_json(payload).encode("utf-8"),
+            artifact_type=str(kwargs["artifact_type"]),
+        )
+
+    def attestation_sealer(
+        write_receipt: Mapping[str, Any],
+        *,
+        purpose: str,
+    ) -> tuple[dict[str, str], dict[str, Any]]:
+        if mutation == "missing_attestation":
+            return {}, {}
+        subject = _d6_worm_from_write_receipt(write_receipt)
+        attestation = _d6_history_attestation_evidence(plan)
+        return attestation, _d6_history_attestation_verification(
+            subject=subject,
+            attestation=attestation,
+        )
+
+    with pytest.raises(ValueError, match=match):
+        serp_eval_contracts_module.produce_d19_run_history_observation(
+            plan.to_canonical_json(),
+            parent_run,
+            history_client=_StaticD6HistoryClient(history),
+            fence_client=fence_client,
+            clock=clock,
+            snapshot_writer=snapshot_writer,
+            attestation_sealer=attestation_sealer,
+        )
+
+    assert fence_client.released == [fence]
+
+
+def test_scheduled_d6_receipt_proves_three_prior_accepts_and_one_unique_child() -> None:
+    fixture = _scheduled_d6_receipt_fixture()
+    written_payloads: list[dict[str, Any]] = []
+
+    def writer(**kwargs: Any) -> dict[str, Any]:
+        payload = dict(cast(Mapping[str, Any], kwargs["payload"]))
+        written_payloads.append(payload)
+        receipt = _d6_write_receipt(
+            str(kwargs["artifact_path"]),
+            serp_eval_contracts_module._canonical_json(payload).encode("utf-8"),
+            artifact_type=str(kwargs["artifact_type"]),
+        )
+        fixture["objects"][(receipt["artifactPath"], receipt["artifactVersionId"])] = payload
+        return receipt
+
+    result = write_scheduled_d6_regression_receipt(
+        fixture["plan"].to_canonical_json(),
+        fixture["history_result"],
+        fixture["triggered_verification"],
+        fixture["current_observation"],
+        evidence_reader=fixture["reader"],
+        snapshot_writer=writer,
+        clock=lambda: datetime(2026, 7, 17, 4, 0, tzinfo=UTC),
+    )
+
+    assert result["status"] == "accepted"
+    assert result["operationId"] == fixture["plan"].payload["operation_id"]
+    assert (
+        result["scheduledD6RegressionEvidence"]["s3Uri"]
+        == fixture["plan"].payload["artifact_paths"]["scheduled_regression_receipt"]
+    )
+    assert len(written_payloads) == 1
+    payload = written_payloads[0]
+    assert payload["schema"] == "ScheduledD6RegressionReceipt/v1"
+    assert payload["status"] == "accepted"
+    assert payload["acceptedStreakLength"] == 4
+    assert len(payload["priorAcceptedEvaluations"]) == 3
+    assert payload["triggeredEvaluation"]["airflowRun"] == fixture["child_run"]
+    assert payload["currentRunObservation"] == fixture["current_observation"]
+
+
+def test_scheduled_d6_self_advances_the_exact_streak_on_the_next_daily_run() -> None:
+    first = _scheduled_d6_receipt_fixture()
+    first_history = first["objects"][first["history_observation_key"]]
+    shifted_runs = [
+        *[dict(run) for run in first_history["runs"][1:]],
+        {**first["child_run"], "state": "success"},
+    ]
+    shifted_pointers = [
+        *[dict(pointer) for pointer in first_history["acceptedRunVerifications"][1:]],
+        dict(first["triggered_verification"]),
+    ]
+    second = _scheduled_d6_receipt_fixture(
+        generated_at="2026-07-18T00:00:00Z",
+        prior_runs=shifted_runs,
+        prior_pointers=shifted_pointers,
+        seed_objects=first["objects"],
+        current_request_index=5,
+    )
+    written_payloads: list[dict[str, Any]] = []
+
+    def writer(**kwargs: Any) -> dict[str, Any]:
+        payload = dict(cast(Mapping[str, Any], kwargs["payload"]))
+        written_payloads.append(payload)
+        receipt = _d6_write_receipt(
+            str(kwargs["artifact_path"]),
+            serp_eval_contracts_module._canonical_json(payload).encode("utf-8"),
+            artifact_type=str(kwargs["artifact_type"]),
+        )
+        second["objects"][(receipt["artifactPath"], receipt["artifactVersionId"])] = payload
+        return receipt
+
+    result = write_scheduled_d6_regression_receipt(
+        second["plan"].to_canonical_json(),
+        second["history_result"],
+        second["triggered_verification"],
+        second["current_observation"],
+        evidence_reader=second["reader"],
+        snapshot_writer=writer,
+        clock=lambda: datetime(2026, 7, 18, 4, 0, tzinfo=UTC),
+    )
+
+    assert result["status"] == "accepted"
+    assert "prior_paired_evaluation_verification_evidence" not in second["plan"].payload
+    assert [
+        entry["airflowRun"]["runId"] for entry in written_payloads[0]["priorAcceptedEvaluations"]
+    ] == [run["runId"] for run in shifted_runs]
+    assert (
+        written_payloads[0]["priorAcceptedEvaluations"][-1]["verificationEvidence"]
+        == first["triggered_verification"]["pairedEvaluationVerificationEvidence"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    (
+        ("duplicate_request", "requestId values must be unique"),
+        ("intervening_failure", "last three historical D19 runs"),
+        ("promotion_drift", "promotion authority must remain identical"),
+        ("duplicate_child", "sameLogicalDateRunCount must equal one"),
+    ),
+)
+def test_scheduled_d6_receipt_rejects_fabricated_streaks(
+    mutation: str,
+    match: str,
+) -> None:
+    fixture = _scheduled_d6_receipt_fixture()
+    if mutation == "duplicate_request":
+        current = fixture["objects"][fixture["current_verification_key"]]
+        current["requestId"] = _d6_request_id(3)
+        current["operationId"] = _d6_request_id(3)
+        current_receipt = fixture["objects"][fixture["current_receipt_key"]]
+        current_receipt["requestId"] = _d6_request_id(3)
+        current_receipt["pairedEvaluation"]["operationId"] = _d6_request_id(3)
+        fixture["triggered_verification"]["requestId"] = _d6_request_id(3)
+    elif mutation == "intervening_failure":
+        history = fixture["objects"][fixture["history_observation_key"]]
+        history["runs"].append(
+            {
+                "dagId": "serp_benchmark_improvement_wave",
+                "logicalDate": "2026-07-16T12:00:00Z",
+                "runId": "manual__intervening-failure",
+                "runType": "manual",
+                "state": "failed",
+            }
+        )
+        history["pagination"].update({"observedEntries": 4, "pageCount": 1, "totalEntries": 4})
+    elif mutation == "promotion_drift":
+        current_receipt = fixture["objects"][fixture["current_receipt_key"]]
+        current_receipt["evaluationReleasePromotionEvidence"] = _d19_worm_evidence(
+            "model-releases/foreign-promotion", "9"
+        )
+    elif mutation == "duplicate_child":
+        fixture["current_observation"]["sameLogicalDateRunCount"] = 2
+
+    with pytest.raises(ValueError, match=match):
+        write_scheduled_d6_regression_receipt(
+            fixture["plan"].to_canonical_json(),
+            fixture["history_result"],
+            fixture["triggered_verification"],
+            fixture["current_observation"],
+            evidence_reader=fixture["reader"],
+            snapshot_writer=lambda **_: {},
+            clock=lambda: datetime(2026, 7, 17, 4, 0, tzinfo=UTC),
+        )
 
 
 def test_mandatory_benchmark_dataset_evidence_plan_is_isolated_from_scoring() -> None:
@@ -736,80 +1023,15 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
 
 
 def test_nightly_regression_plan_rejects_caller_supplied_suite_inputs() -> None:
-    conf = _nightly_conf()
+    conf = _scheduled_d6_conf()
     conf["benchmark_suite_inputs"] = [{"synthetic": "must-not-reach-d6"}]
 
-    with pytest.raises(ValueError, match="must be produced by canonical live adapters"):
+    with pytest.raises(ValueError, match="legacy D6 scorer fields are unsupported"):
         build_nightly_regression_plan(conf)
 
 
-def test_nightly_catalog_materialization_writes_all_live_evidence_before_native_ready() -> None:
-    plan = build_nightly_regression_plan(
-        {**_nightly_conf(), "artifact_root_path": "s3://airflow-serp-evidence/serp-evals"}
-    )
-    written: list[dict[str, object]] = []
-
-    def snapshot_writer(**kwargs: object) -> dict[str, object]:
-        written.append(kwargs)
-        return {
-            "artifactPath": kwargs["artifact_path"],
-            "artifactSha256": "f" * 64,
-            "artifactType": kwargs["artifact_type"],
-            "artifactVersionId": "version-20260713",
-            "objectLockMode": "COMPLIANCE",
-            "operationId": kwargs["operation_id"],
-            "status": "written",
-        }
-
-    def snapshot_bytes_writer(**kwargs: object) -> dict[str, object]:
-        written.append(kwargs)
-        payload = cast(bytes, kwargs["payload"])
-        return {
-            "artifactPath": kwargs["artifact_path"],
-            "artifactSha256": sha256(payload).hexdigest(),
-            "artifactType": kwargs["artifact_type"],
-            "artifactVersionId": "version-20260713",
-            "objectLockMode": "COMPLIANCE",
-            "operationId": kwargs["operation_id"],
-            "status": "written",
-        }
-
-    result = materialize_live_benchmark_catalog_artifact(
-        plan.to_canonical_json(),
-        fetch_bytes=lambda url: url.encode("utf-8"),
-        snapshot_writer=snapshot_writer,
-        snapshot_bytes_writer=snapshot_bytes_writer,
-        native_adapter_materializer=_native_adapter_materializer,
-        native_corpus_materializer=_native_corpus_materializer,
-        execution_substrate_materializer=_execution_substrate_materializer,
-    )
-
-    assert result["catalogStatus"] == "ready"
-    assert result["blockingSuiteIds"] == []
-    assert [entry["suiteId"] for entry in result["suiteSummary"]] == list(
-        MANDATORY_SERP_BENCHMARK_SUITES
-    )
-    assert written[-1]["artifact_path"] == plan.payload["artifact_paths"]["benchmark_catalog"]
-    assert len(written) == (
-        (len(MANDATORY_SERP_BENCHMARK_SUITES) * 6)
-        + 4
-        + sum(len(roles) for roles in MANDATORY_EXECUTION_SUBSTRATE_ROLES.values())
-    )
-
-
-@pytest.mark.parametrize(
-    "dag_id",
-    ("serp_nightly_regression_suite", "serp_benchmark_improvement_wave"),
-)
-def test_load_materialized_catalog_binds_receipt_and_catalog_s3_versions(
-    dag_id: str,
-) -> None:
-    if dag_id == "serp_nightly_regression_suite":
-        plan = build_nightly_regression_plan(
-            {**_nightly_conf(), "artifact_root_path": "s3://airflow-serp-evidence/serp-evals"}
-        )
-    else:
-        plan = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
+def test_load_materialized_catalog_binds_receipt_and_catalog_s3_versions() -> None:
+    plan = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
     catalog_path = plan.payload["artifact_paths"]["benchmark_catalog"]
     receipt_path = plan.payload["artifact_paths"]["benchmark_catalog_receipt"]
     corpus_role_by_suite = {
@@ -1010,29 +1232,11 @@ def test_load_materialized_catalog_binds_receipt_and_catalog_s3_versions(
         )
 
 
-def test_build_nightly_regression_plan_accepts_s3_artifact_root_from_env(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    conf = _nightly_conf()
-    conf.pop("artifact_root_path")
-    monkeypatch.setenv(
-        "ADAPSTORY_AIRFLOW_ARTIFACT_ROOT",
-        "s3://airflow-serp-artifacts/serp-evals",
-    )
-
-    plan = build_nightly_regression_plan(conf)
-
-    assert plan.payload["artifact_root_path"] == "s3://airflow-serp-artifacts/serp-evals"
-    assert plan.payload["artifact_paths"]["airflow_plan"].startswith(
-        "s3://airflow-serp-artifacts/serp-evals/"
-    )
-
-
 def test_write_airflow_plan_artifact_writes_s3_artifact_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    conf = _nightly_conf()
-    conf["artifact_root_path"] = "s3://airflow-serp-artifacts/serp-evals"
+    conf = _scheduled_d6_conf()
+    conf["artifact_root_path"] = "s3://airflow-serp-evidence/serp-evals"
     plan = build_nightly_regression_plan(conf)
     airflow_plan_path = plan.payload["artifact_paths"]["airflow_plan"]
     bucket, key = airflow_plan_path.removeprefix("s3://").split("/", 1)
@@ -1056,192 +1260,14 @@ def test_write_airflow_plan_artifact_writes_s3_artifact_root(
     plan_json = write_airflow_plan_artifact(plan)
 
     assert json.loads(plan_json) == plan.payload
-    gateway_plan = {
-        "actor_id": plan.payload["actor_id"],
-        "candidateReleaseEvidence": plan.payload["candidateReleaseEvidence"],
-        "dag_id": plan.payload["dag_id"],
-        "generated_at": plan.payload["generated_at"],
-        "normalized_gate_floor": plan.payload["normalized_gate_floor"],
-        "operation_id": plan.payload["operation_id"],
-        "pack_version_ids": plan.payload["pack_version_ids"],
-        "registry_resource_id": plan.payload["registry_resource_id"],
-        "registry_resource_type": plan.payload["registry_resource_type"],
-        "reranker_profile_version": plan.payload["reranker_profile_version"],
-        "retrieval_profile_version": plan.payload["retrieval_profile_version"],
-        "selected_suite_ids": plan.payload["selected_suite_ids"],
-        "tenant_id": plan.payload["tenant_id"],
-    }
     assert put_calls == [
         (
             bucket,
             key,
-            json.dumps(gateway_plan, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+            plan.to_canonical_json(),
             "application/json",
         )
     ]
-
-
-def test_build_nightly_gateway_cli_specs_are_file_based_and_deterministic() -> None:
-    plan = build_nightly_regression_plan(_nightly_conf())
-    runner = build_nightly_runner_cli_spec(plan.to_canonical_json())
-    benchmark_export = build_nightly_benchmark_export_cli_spec(plan.to_canonical_json())
-    submissions = build_nightly_registry_cli_spec(plan.to_canonical_json())
-    submit = build_nightly_registry_submit_cli_spec(plan.to_canonical_json())
-
-    assert runner["status"] == "ready_for_gateway_cli_runner"
-    assert runner["task_id"] == "run_mandatory_benchmark_suites"
-    assert runner["argv"] == [
-        "python",
-        "-m",
-        "adapstory_serp_mcp_gateway.airflow_eval_cli",
-        "nightly-report",
-        "--airflow-plan",
-        plan.payload["artifact_paths"]["airflow_plan"],
-        "--suite-plan",
-        plan.payload["artifact_paths"]["suite_plan"],
-    ]
-    assert runner["stdout_path"] == plan.payload["artifact_paths"]["nightly_report"]
-    assert runner["input_paths"] == [
-        plan.payload["artifact_paths"]["airflow_plan"],
-        plan.payload["artifact_paths"]["suite_plan"],
-    ]
-
-    assert benchmark_export["status"] == "ready_for_gateway_cli_runner"
-    assert benchmark_export["task_id"] == "build_c1_benchmark_gate_export"
-    assert benchmark_export["argv"] == [
-        "python",
-        "-m",
-        "adapstory_serp_mcp_gateway.airflow_eval_cli",
-        "nightly-benchmark-export",
-        "--airflow-plan",
-        plan.payload["artifact_paths"]["airflow_plan"],
-        "--nightly-report",
-        plan.payload["artifact_paths"]["nightly_report"],
-        "--evaluation-objective",
-        plan.payload["artifact_paths"]["evaluation_objective"],
-        "--paired-evaluation-receipt",
-        plan.payload["artifact_paths"]["paired_evaluation_receipt"],
-        "--paired-evaluation-verification",
-        plan.payload["artifact_paths"]["paired_evaluation_verification"],
-    ]
-    assert (
-        benchmark_export["stdout_path"] == plan.payload["artifact_paths"]["benchmark_gate_export"]
-    )
-    assert benchmark_export["input_paths"] == [
-        plan.payload["artifact_paths"]["airflow_plan"],
-        plan.payload["artifact_paths"]["nightly_report"],
-        plan.payload["artifact_paths"]["evaluation_objective"],
-        plan.payload["artifact_paths"]["paired_evaluation_receipt"],
-        plan.payload["artifact_paths"]["paired_evaluation_verification"],
-    ]
-
-    assert submissions["status"] == "ready_for_gateway_cli_runner"
-    assert submissions["task_id"] == "build_bc21_benchmark_run_submissions"
-    assert submissions["argv"] == [
-        "python",
-        "-m",
-        "adapstory_serp_mcp_gateway.airflow_eval_cli",
-        "nightly-registry-submissions",
-        "--airflow-plan",
-        plan.payload["artifact_paths"]["airflow_plan"],
-        "--nightly-report",
-        plan.payload["artifact_paths"]["nightly_report"],
-    ]
-    assert (
-        submissions["stdout_path"] == plan.payload["artifact_paths"]["nightly_registry_submissions"]
-    )
-
-    assert submit["status"] == "ready_for_gateway_cli_runner"
-    assert submit["task_id"] == "submit_bc21_benchmark_run_submissions"
-    assert submit["argv"] == [
-        "python",
-        "-m",
-        "adapstory_serp_mcp_gateway.airflow_eval_cli",
-        "submit-nightly-registry-submissions",
-        "--airflow-plan",
-        plan.payload["artifact_paths"]["airflow_plan"],
-        "--nightly-registry-submissions",
-        plan.payload["artifact_paths"]["nightly_registry_submissions"],
-        "--bc21-base-url",
-        plan.payload["bc21_base_url"],
-    ]
-    assert submit["stdout_path"] == plan.payload["artifact_paths"]["nightly_registry_receipts"]
-
-
-def test_nightly_d6_airflow_path_blocks_before_gateway_runner_when_rights_policy_blocks(
-    tmp_path: Path,
-) -> None:
-    conf = _nightly_conf()
-    conf["artifact_root_path"] = str(tmp_path)
-    plan = build_nightly_regression_plan(conf)
-    plan_json = write_airflow_plan_artifact(plan)
-
-    catalog_snapshot = {
-        "artifactPath": plan.payload["artifact_paths"]["benchmark_catalog"],
-        "artifactVersionId": "version-20260713",
-        "blockingSuiteIds": ["CodeRAG-Bench", "SWE-bench Verified", "rusBEIR"],
-        "blockingReasonBySuite": {
-            "CodeRAG-Bench": "rights-policy-blocked",
-            "SWE-bench Verified": "rights-policy-blocked",
-            "rusBEIR": "rights-policy-blocked",
-        },
-        "catalogStatus": "blocked",
-        "objectLockMode": "COMPLIANCE",
-    }
-
-    with pytest.raises(
-        ValueError,
-        match=(
-            "benchmark catalog blocks D6: rights-policy-blocked=CodeRAG-Bench, "
-            "SWE-bench Verified, rusBEIR"
-        ),
-    ):
-        write_nightly_suite_plan_artifact(json.loads(plan_json), catalog_snapshot)
-
-
-def test_nightly_provenance_requires_internal_only_boundary_for_unverified_rights() -> None:
-    metadata = dict(cast(Mapping[str, Any], _nightly_benchmark_suite_input("BEIR")["metadata"]))
-    metadata["dataset_rights_status"] = "rights-unverified"
-    metadata["dataset_distribution_rule"] = "internal-only"
-
-    with pytest.raises(ValueError, match="rights-unverified"):
-        serp_eval_contracts_module._validate_nightly_benchmark_suite_provenance(metadata)
-
-
-def test_nightly_metric_compatibility_requires_immutable_matrix_version() -> None:
-    suites = [
-        _nightly_benchmark_suite_input(suite_id) for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
-    ]
-    cast(dict[str, object], suites[0]["metric_compatibility"]).pop("matrix_version_id")
-
-    with pytest.raises(ValueError, match="matrix_version_id is required"):
-        serp_eval_contracts_module._required_nightly_benchmark_suite_inputs(
-            {"benchmark_suite_inputs": suites},
-            selected_suite_ids=MANDATORY_SERP_BENCHMARK_SUITES,
-        )
-
-
-def test_airflow_registry_submission_preserves_d6_executable_provenance() -> None:
-    suite = serp_eval_contracts_module._suite_result_from_suite_plan(
-        _nightly_benchmark_suite_input("BEIR")
-    )
-    submission = serp_eval_contracts_module._live_registry_submission(
-        {
-            "operation_id": "serp-nightly-fixture",
-            "registry_resource_id": REGISTRY_RESOURCE_ID,
-            "registry_resource_type": "workflow",
-            "tenant_id": TENANT_ID,
-        },
-        suite,
-        "retrieval",
-        "airflow-serp-eval-runner",
-    )
-
-    assert submission["body"]["evaluationContractCode"] == "d6-evidence-2026.07.3"
-    assert submission["body"]["provenance"]["adapterId"] == "fixture-beir"
-    assert submission["body"]["provenance"]["metricCompatibilityVersionId"] == (
-        "fixture-metric-compatibility-version"
-    )
 
 
 def test_build_online_eval_rollup_plan_materializes_d7_contract(tmp_path: Path) -> None:
@@ -2037,46 +2063,6 @@ def test_execute_gateway_cli_spec_materializes_s3_inputs_and_uploads_stdout(
     )
 
 
-def test_evaluate_nightly_regression_gate_enforces_exact_090_boundary() -> None:
-    gate = evaluate_nightly_regression_gate(
-        {
-            "suite_results": [
-                {
-                    "suite_id": "RAGBench",
-                    "metric_results": [
-                        {
-                            "metric": "Recall@10",
-                            "metric_family": "retrieval",
-                            "normalized_score": 0.899,
-                        }
-                    ],
-                },
-                {
-                    "suite_id": "APIBench",
-                    "metric_results": [
-                        {
-                            "metric": "nDCG@10",
-                            "metric_family": "retrieval",
-                            "normalized_score": 0.9,
-                        }
-                    ],
-                },
-            ]
-        }
-    )
-
-    assert gate["status"] == "blocked"
-    assert gate["normalized_gate_floor"] == 0.9
-    assert gate["blocking_findings"] == [
-        {
-            "metric": "Recall@10",
-            "metric_family": "retrieval",
-            "normalized_score": 0.899,
-            "suite_id": "RAGBench",
-        }
-    ]
-
-
 def test_build_tenant_golden_regression_plan_preserves_workflow_provenance() -> None:
     plan = build_tenant_golden_regression_plan(_tenant_golden_conf())
 
@@ -2224,6 +2210,10 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
             "s3://airflow-serp-evidence/serp-evals/"
             f"{plan.payload['operation_id']}/paired-eval-receipt.json"
         ),
+        "paired_evaluation_verification_evidence": (
+            "s3://airflow-serp-evidence/serp-evals/"
+            f"{plan.payload['operation_id']}/paired-evaluation-verification-evidence.json"
+        ),
         "paired_evaluation_assembly_plan": (
             "s3://airflow-serp-evidence/serp-evals/"
             f"{plan.payload['operation_id']}/paired-evaluation-assembly-plan.json"
@@ -2238,6 +2228,7 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
         ),
     }
     assert [task["task_id"] for task in plan.payload["tasks"]] == [
+        "validate_d19_fence_admission",
         "validate_benchmark_improvement_wave_plan",
         "materialize_live_benchmark_catalog",
         "load_materialized_benchmark_catalog",
@@ -2280,6 +2271,7 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
         "write_paired_evaluation_assembly_plan",
         "assemble_paired_execution_manifest",
         "run_paired_benchmark_evaluation",
+        "persist_paired_evaluation_verification_evidence",
         "notify_governance_eval_surfaces",
     ]
 
@@ -2290,6 +2282,79 @@ def test_build_benchmark_improvement_wave_plan_rejects_caller_supplied_candidate
 
     with pytest.raises(ValueError, match="inline D19 field is forbidden"):
         build_benchmark_improvement_wave_plan(conf)
+
+
+def test_d19_persists_identity_bound_v9_verification_as_exact_five_field_worm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS", "365")
+    plan = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
+    evaluator_result, objects = _d19_evaluator_result(plan)
+    s3_client = _D19VerificationS3(objects)
+    airflow_run = _d19_airflow_run()
+
+    persisted = serp_eval_contracts_module.write_paired_evaluation_verification_evidence(
+        plan.to_canonical_json(),
+        evaluator_result,
+        airflow_run,
+        s3_client=s3_client,
+    )
+
+    verification_evidence = persisted["pairedEvaluationVerificationEvidence"]
+    assert set(verification_evidence) == {
+        "objectLockMode",
+        "retainUntil",
+        "s3Uri",
+        "sha256",
+        "versionId",
+    }
+    assert (
+        verification_evidence["s3Uri"]
+        == plan.payload["artifact_paths"]["paired_evaluation_verification_evidence"]
+    )
+    assert verification_evidence["versionId"] == "verification-version-001"
+    assert persisted["requestId"] == plan.payload["operation_id"]
+    assert persisted["receiptStatus"] == "accepted"
+
+    verification_payload = json.loads(
+        s3_client.objects[(verification_evidence["s3Uri"], verification_evidence["versionId"])]
+    )
+    expected_pointer = {
+        **evaluator_result,
+        "receiptEvidence": _d19_receipt_subject(evaluator_result),
+    }
+    assert verification_payload == {
+        "airflowRun": airflow_run,
+        "operationId": plan.payload["operation_id"],
+        "receiptPointer": expected_pointer,
+        "requestId": plan.payload["operation_id"],
+        "schema": "PairedEvaluationVerificationEvidence/v1",
+    }
+    assert verification_payload["receiptPointer"]["receiptEvidence"] == (
+        _d19_receipt_subject(evaluator_result)
+    )
+
+
+@pytest.mark.parametrize("tamper", ("receipt-digest", "verification-subject"))
+def test_d19_verification_persistence_rejects_tampered_receipt_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tamper: str,
+) -> None:
+    monkeypatch.setenv("ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS", "365")
+    plan = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
+    evaluator_result, objects = _d19_evaluator_result(plan)
+    if tamper == "receipt-digest":
+        evaluator_result["receiptEvidence"]["artifactSha256"] = "0" * 64
+    else:
+        evaluator_result["receiptVerification"]["subject"]["sha256"] = "sha256:" + "0" * 64
+
+    with pytest.raises(ValueError, match="receipt.*(SHA-256|subject)"):
+        serp_eval_contracts_module.write_paired_evaluation_verification_evidence(
+            plan.to_canonical_json(),
+            evaluator_result,
+            _d19_airflow_run(),
+            s3_client=_D19VerificationS3(objects),
+        )
 
 
 def test_paired_eval_request_derives_canonical_catalog_bindings_as_worm_evidence(
@@ -2428,6 +2493,7 @@ def test_build_paired_benchmark_plan_exposes_only_server_owned_evaluation_paths(
         "benchmark_pack_build_result",
         "benchmark_pack_lifecycle_result",
         "paired_evaluation_assembly_plan",
+        "paired_evaluation_verification_evidence",
         "paired_execution_manifest",
         "paired_eval_request",
         "paired_eval_receipt",
@@ -5295,13 +5361,12 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
             "serp_nightly_regression_suite",
             [
                 "validate_nightly_regression_plan",
-                "materialize_live_benchmark_catalog",
-                "load_materialized_benchmark_catalog",
-                "write_nightly_suite_plan",
-                "run_mandatory_benchmark_suites",
-                "build_c1_benchmark_gate_export",
-                "build_bc21_benchmark_run_submissions",
-                "submit_bc21_benchmark_run_submissions",
+                "produce_d19_run_history_observation",
+                "trigger_benchmark_improvement_wave",
+                "load_triggered_d19_verification",
+                "observe_triggered_d19_run",
+                "write_scheduled_d6_regression_receipt",
+                "release_d19_history_fence",
                 "notify_governance_eval_surfaces",
             ],
         ),
@@ -5404,12 +5469,14 @@ def test_serp_dag_files_declare_expected_airflow_contracts(
     if dag_id == "serp_benchmark_improvement_wave":
         assert "render_template_as_native_obj=True" in source
         assert _keyword_values(tree, "PythonOperator", "task_id") == [
+            "validate_d19_fence_admission",
             "validate_benchmark_improvement_wave_plan",
             "load_materialized_benchmark_catalog",
             "load_model_catalog_promotion",
             "load_exact_nine_evaluation_binding",
             "write_paired_eval_request",
             "write_paired_evaluation_assembly_plan",
+            "persist_paired_evaluation_verification_evidence",
             "notify_governance_eval_surfaces",
         ]
         assert _keyword_values(tree, "KubernetesPodOperator", "task_id") == [
@@ -5422,10 +5489,10 @@ def test_serp_dag_files_declare_expected_airflow_contracts(
         ]
     elif dag_id == "serp_nightly_regression_suite":
         assert _keyword_values(tree, "PythonOperator", "task_id") == [
-            task_id for task_id in task_ids if task_id != "materialize_live_benchmark_catalog"
+            task_id for task_id in task_ids if task_id != "trigger_benchmark_improvement_wave"
         ]
-        assert _keyword_values(tree, "KubernetesPodOperator", "task_id") == [
-            "materialize_live_benchmark_catalog"
+        assert _keyword_values(tree, "TriggerDagRunOperator", "task_id") == [
+            "trigger_benchmark_improvement_wave"
         ]
     elif dag_id == "serp_mandatory_benchmark_dataset_evidence_snapshot":
         assert _keyword_values(tree, "PythonOperator", "task_id") == [
@@ -5473,7 +5540,6 @@ def test_every_kubernetes_pod_operator_uses_the_dedicated_controller_executor_id
         "serp_benchmark_improvement_wave.py",
         "serp_beir_scifact_live_benchmark.py",
         "serp_mandatory_benchmark_dataset_evidence_snapshot.py",
-        "serp_nightly_regression_suite.py",
         "serp_web_seed_crawl_refresh.py",
     ):
         tree = ast.parse((REPO_ROOT / "dags" / dag_file).read_text(encoding="utf-8"))
@@ -5496,44 +5562,29 @@ def test_every_kubernetes_pod_operator_uses_the_dedicated_controller_executor_id
             assert executor_config.func.id == "kubernetes_pod_launcher_executor_config", dag_file
 
 
-def test_serp_nightly_dag_uses_live_gateway_cli_for_d6_path() -> None:
+def test_serp_nightly_dag_uses_fenced_native_d19_without_gateway_scorer() -> None:
     source = (REPO_ROOT / "dags" / "serp_nightly_regression_suite.py").read_text(encoding="utf-8")
 
-    assert "write_nightly_suite_plan_artifact" in source
-    assert "load_materialized_benchmark_catalog_snapshot" in source
-    assert "materialize_catalog = KubernetesPodOperator(" in source
-    assert "BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT" in source
-    assert "BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_LABELS" in source
-    assert "benchmark_catalog_acquisition_env_vars" in source
-    assert "benchmark_catalog_acquisition_web_identity_volumes" in source
-    assert "benchmark_catalog_acquisition_web_identity_volume_mounts" in source
-    assert "BENCHMARK_CATALOG_ACQUISITION_RESOURCES" in source
-    assert "security_context=benchmark_catalog_acquisition_pod_security_context()" in source
-    assert (
-        "container_security_context=benchmark_catalog_acquisition_container_security_context()"
-        in source
-    )
-    assert "BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS" in source
-    assert "volumes=benchmark_catalog_acquisition_web_identity_volumes()" in source
-    assert "volume_mounts=benchmark_catalog_acquisition_web_identity_volume_mounts()" in source
-    assert "materialize_live_benchmark_catalog_artifact" not in source
-    assert "execute_gateway_cli_spec" in source
-    assert "build_nightly_runner_cli_spec" in source
-    assert "build_nightly_benchmark_export_cli_spec" in source
-    assert "NIGHTLY_ADMISSION_VERIFIER_EXECUTOR_CONFIG" in source
-    assert "evaluation_admission_verifier_executor_config" in source
-    export_task = source[source.index("build_benchmark_export = PythonOperator(") :]
-    export_task = export_task[: export_task.index("build_submissions = PythonOperator(")]
-    assert "executor_config=NIGHTLY_ADMISSION_VERIFIER_EXECUTOR_CONFIG" in export_task
-    assert "build_nightly_registry_submit_cli_spec" in source
-    assert "write_nightly_report_artifact" not in source
-    assert "write_nightly_registry_receipts_artifact" not in source
+    assert "produce_d19_run_history_observation" in source
+    assert "write_scheduled_d6_regression_receipt" in source
+    assert "D19_HISTORY_OBSERVER_EXECUTOR_CONFIG" in source
+    assert "airflow-serp-d19-history-observer" in source
+    assert "serp-d19-history-observer-attestor-role" in source
+    assert "TriggerDagRunOperator" in source
+    for retired_surface in (
+        "write_nightly_suite_plan_artifact",
+        "execute_gateway_cli_spec",
+        "build_nightly_runner_cli_spec",
+        "build_nightly_benchmark_export_cli_spec",
+        "build_nightly_registry_submit_cli_spec",
+        "KubernetesPodOperator",
+    ):
+        assert retired_surface not in source
 
 
 def test_every_catalog_acquisition_dag_projects_only_a_short_lived_minio_identity() -> None:
     for dag_file in (
         "serp_benchmark_improvement_wave.py",
-        "serp_nightly_regression_suite.py",
         "serp_mandatory_benchmark_dataset_evidence_snapshot.py",
     ):
         source = (REPO_ROOT / "dags" / dag_file).read_text(encoding="utf-8")
@@ -5758,6 +5809,43 @@ def test_serp_public_docs_dag_dispatches_d5_natively_and_waits_for_completion() 
         value = values[name]
         assert isinstance(value, ast.Constant)
         assert value.value == expected
+
+
+def test_scheduled_d6_triggers_one_unique_serialized_d19_child_without_legacy_scorer() -> None:
+    source = (REPO_ROOT / "dags" / "serp_nightly_regression_suite.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    trigger_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _matches_call(node, "TriggerDagRunOperator")
+    ]
+
+    assert len(trigger_calls) == 1
+    values = {keyword.arg: keyword.value for keyword in trigger_calls[0].keywords}
+    expected_constants = {
+        "task_id": "trigger_benchmark_improvement_wave",
+        "trigger_dag_id": "serp_benchmark_improvement_wave",
+        "reset_dag_run": False,
+        "wait_for_completion": True,
+        "skip_when_already_exists": False,
+        "deferrable": True,
+    }
+    for name, expected in expected_constants.items():
+        value = values[name]
+        assert isinstance(value, ast.Constant)
+        assert value.value == expected
+    assert isinstance(values["trigger_run_id"], ast.Constant)
+    assert values["trigger_run_id"].value == "d6__{{ run_id }}"
+    assert isinstance(values["logical_date"], ast.Constant)
+    assert values["logical_date"].value == "{{ logical_date }}"
+
+    for legacy_surface in (
+        "write_nightly_suite_plan_artifact",
+        "build_nightly_runner_cli_spec",
+        "run_mandatory_benchmark_suites",
+        "materialize_live_benchmark_catalog",
+    ):
+        assert legacy_surface not in source
 
 
 def test_d5_post_activation_failure_uses_direct_parent_rollback_compensation() -> None:
@@ -6185,6 +6273,7 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     models.V1ResourceRequirements = FakeKubernetesModel
     models.V1SeccompProfile = FakeKubernetesModel
     models.V1SecretKeySelector = FakeKubernetesModel
+    models.V1SecretVolumeSource = FakeKubernetesModel
     models.V1SecurityContext = FakeKubernetesModel
     models.V1ServiceAccountTokenProjection = FakeKubernetesModel
     models.V1KeyToPath = FakeKubernetesModel
@@ -7193,25 +7282,510 @@ def _pipeline_seed_refresh_payload(
     }
 
 
-def _nightly_conf() -> dict[str, object]:
+def _scheduled_d6_conf(
+    *,
+    generated_at: str = "2026-07-17T00:00:00Z",
+) -> dict[str, object]:
     return {
         "actor_id": "airflow-serp-eval-runner",
-        "artifact_root_path": "/var/opt/adapstory/serp-evals",
-        "bc21_base_url": "http://serp-context-platform.env-dev.svc.cluster.local",
-        "candidateReleaseEvidence": _nightly_worm_evidence("candidate-release"),
-        "evaluationObjectiveEvidence": _nightly_worm_evidence("evaluation-objective"),
-        "generated_at": "2026-07-05T21:00:00Z",
-        "pack_version_ids": [PACK_VERSION_ID],
-        "pairedEvaluationReceiptEvidence": _nightly_worm_evidence("paired-evaluation-receipt"),
-        "pairedEvaluationVerificationEvidence": _nightly_worm_evidence(
-            "paired-evaluation-verification"
+        "artifact_root_path": "s3://airflow-serp-evidence/serp-evals",
+        "evaluation_release_promotion_evidence": _d19_worm_evidence(
+            "model-releases/d17-promotion", "c"
         ),
+        "generated_at": generated_at,
         "registry_resource_id": REGISTRY_RESOURCE_ID,
         "registry_resource_type": "workflow",
-        "reranker_profile_version": "reranker@2026.07.1",
-        "retrieval_profile_version": "hybrid@2026.07.1",
-        "selected_suite_ids": list(MANDATORY_SERP_BENCHMARK_SUITES),
         "tenant_id": TENANT_ID,
+    }
+
+
+def _scheduled_d6_airflow_run(
+    *,
+    logical_date: str = "2026-07-17T00:00:00Z",
+) -> dict[str, str]:
+    logical_at = datetime.fromisoformat(logical_date.replace("Z", "+00:00"))
+    return {
+        "dagId": "serp_nightly_regression_suite",
+        "logicalDate": logical_at.isoformat().replace("+00:00", "Z"),
+        "runId": f"scheduled__{logical_at.isoformat()}",
+        "runType": "scheduled",
+        "startDate": (logical_at + timedelta(seconds=1)).isoformat().replace("+00:00", "Z"),
+    }
+
+
+def _scheduled_d6_history_client_result(
+    parent_run: Mapping[str, str],
+    *,
+    runs: list[dict[str, str]] | None = None,
+    accepted_verifications: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    history_runs = _scheduled_d6_prior_runs() if runs is None else runs
+    pointers = (
+        [_scheduled_d6_prior_pointer(index, run) for index, run in enumerate(history_runs, start=1)]
+        if accepted_verifications is None
+        else accepted_verifications
+    )
+    return {
+        "activeRunQuery": {
+            "dagId": "serp_benchmark_improvement_wave",
+            "states": ["queued", "running"],
+            "totalEntries": 0,
+        },
+        "api": {
+            "apiVersion": "v2",
+            "airflowVersion": "3.1.6",
+            "serverAuthority": "airflow-api-server.airflow.svc.cluster.local:8080",
+        },
+        "acceptedRunVerifications": pointers,
+        "pagination": {
+            "complete": True,
+            "observedEntries": len(history_runs),
+            "pageCount": 1 if history_runs else 0,
+            "pageLimit": 100,
+            "totalEntries": len(history_runs),
+        },
+        "query": {
+            "apiPath": "/api/v2/dags/serp_benchmark_improvement_wave/dagRuns",
+            "dagId": "serp_benchmark_improvement_wave",
+            "logicalDateLt": parent_run["logicalDate"],
+            "orderBy": ["logical_date", "run_id"],
+        },
+        "runs": history_runs,
+        "verificationPointerQuery": {
+            "apiPathTemplate": (
+                "/api/v2/dags/serp_benchmark_improvement_wave/dagRuns/{dagRunId}/"
+                "taskInstances/persist_paired_evaluation_verification_evidence/"
+                "xcomEntries/return_value"
+            ),
+            "deserialize": True,
+            "mapIndex": -1,
+            "stringify": False,
+            "taskId": "persist_paired_evaluation_verification_evidence",
+            "xcomKey": "return_value",
+        },
+    }
+
+
+def _scheduled_d6_prior_runs() -> list[dict[str, str]]:
+    return [
+        {
+            "dagId": "serp_benchmark_improvement_wave",
+            "logicalDate": f"2026-07-{13 + index:02d}T00:00:00Z",
+            "runId": f"manual__prior-{index}",
+            "runType": "manual",
+            "state": "success",
+        }
+        for index in range(1, 4)
+    ]
+
+
+def _scheduled_d6_prior_pointer(
+    index: int,
+    run: Mapping[str, str],
+) -> dict[str, Any]:
+    return {
+        "airflowRun": {key: run[key] for key in ("dagId", "logicalDate", "runId", "runType")},
+        "pairedEvaluationVerificationEvidence": _d19_worm_evidence(
+            f"verification/prior-{index}", str(index)
+        ),
+        "receiptStatus": "accepted",
+        "requestId": _d6_request_id(index),
+    }
+
+
+def _d6_request_id(index: int) -> str:
+    return f"00000000-0000-4000-a000-{index:012d}"
+
+
+def _scheduled_d6_fence(parent_run: Mapping[str, str]) -> dict[str, Any]:
+    parent_start = datetime.fromisoformat(parent_run["startDate"].replace("Z", "+00:00"))
+    acquired_at = parent_start + timedelta(seconds=4)
+    return {
+        "acquiredAt": acquired_at.isoformat().replace("+00:00", "Z"),
+        "expiresAt": (acquired_at + timedelta(hours=12)).isoformat().replace("+00:00", "Z"),
+        "holderIdentity": f"d6:{parent_run['runId']}",
+        "leaseDurationSeconds": 43_200,
+        "leaseName": "serp-d19-history-fence",
+        "namespace": "airflow",
+        "parentDagId": parent_run["dagId"],
+        "parentRunId": parent_run["runId"],
+        "resourceVersion": "812345",
+        "schema": "D19HistoryFence/v1",
+    }
+
+
+class _StaticD6HistoryClient:
+    def __init__(self, result: Mapping[str, Any]) -> None:
+        self.result = result
+
+    def collect(self, *, parent_logical_date: str) -> dict[str, Any]:
+        assert parent_logical_date == _scheduled_d6_airflow_run()["logicalDate"]
+        return cast(dict[str, Any], json.loads(json.dumps(self.result)))
+
+
+class _D6FenceClient:
+    def __init__(self, fence: Mapping[str, Any]) -> None:
+        self.fence = dict(fence)
+        self.released: list[dict[str, Any]] = []
+
+    def acquire(self, *, parent_airflow_run: Mapping[str, str]) -> dict[str, Any]:
+        assert parent_airflow_run == _scheduled_d6_airflow_run()
+        return dict(self.fence)
+
+    def release(self, fence: Mapping[str, Any]) -> None:
+        self.released.append(dict(fence))
+
+
+def _d6_write_receipt(
+    path: str,
+    payload: bytes,
+    *,
+    artifact_type: str,
+) -> dict[str, Any]:
+    return {
+        "artifactETag": sha256(payload).hexdigest(),
+        "artifactPath": path,
+        "artifactSha256": sha256(payload).hexdigest(),
+        "artifactType": artifact_type,
+        "artifactVersionId": f"version-{artifact_type}",
+        "objectLockMode": "COMPLIANCE",
+        "objectLockRetainUntil": "2033-07-17T00:00:00Z",
+        "retainUntil": "2033-07-17T00:00:00Z",
+        "status": "written",
+    }
+
+
+def _d6_worm_from_write_receipt(receipt: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        "objectLockMode": str(receipt["objectLockMode"]),
+        "retainUntil": str(receipt["objectLockRetainUntil"]),
+        "s3Uri": str(receipt["artifactPath"]),
+        "sha256": "sha256:" + str(receipt["artifactSha256"]),
+        "versionId": str(receipt["artifactVersionId"]),
+    }
+
+
+def _d6_history_attestation_verification(
+    *,
+    subject: Mapping[str, str],
+    attestation: Mapping[str, str],
+) -> dict[str, Any]:
+    return {
+        "attestationEvidence": dict(attestation),
+        "consumerVerification": {
+            "requestId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "valid": True,
+        },
+        "purpose": "serp-d19-run-history-observation",
+        "signer": {
+            "authMethod": "kubernetes",
+            "authMount": "auth/kubernetes",
+            "authRole": "serp-d19-history-observer-attestor-role",
+            "entityId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "loginRequestId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            "serviceAccountName": "airflow-serp-d19-history-observer",
+            "serviceAccountNamespace": "airflow",
+            "serviceAccountUid": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            "tokenAudience": "vault",
+            "tokenPolicy": "serp-d19-history-observer-attestor",
+        },
+        "statementSha256": "sha256:" + "a" * 64,
+        "subject": dict(subject),
+        "transit": {
+            "key": "serp-d19-history-observation",
+            "keyVersion": 1,
+            "signature": "vault:v1:d19-history-observation",
+            "verifyRequestId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        },
+    }
+
+
+def _d6_history_attestation_evidence(plan: Any) -> dict[str, str]:
+    return {
+        "objectLockMode": "COMPLIANCE",
+        "retainUntil": "2033-07-17T00:00:00Z",
+        "s3Uri": plan.payload["artifact_paths"]["d19_run_history_observation_attestation"],
+        "sha256": "sha256:" + "f" * 64,
+        "versionId": "version-d19-history-observation-attestation",
+    }
+
+
+def _scheduled_d6_receipt_fixture(
+    *,
+    generated_at: str = "2026-07-17T00:00:00Z",
+    prior_runs: list[dict[str, str]] | None = None,
+    prior_pointers: list[dict[str, Any]] | None = None,
+    seed_objects: Mapping[tuple[str, str], Mapping[str, Any]] | None = None,
+    current_request_index: int = 4,
+) -> dict[str, Any]:
+    plan = build_nightly_regression_plan(_scheduled_d6_conf(generated_at=generated_at))
+    parent_run = _scheduled_d6_airflow_run(logical_date=generated_at)
+    fence = _scheduled_d6_fence(parent_run)
+    prior_run_values = _scheduled_d6_prior_runs() if prior_runs is None else prior_runs
+    history = _scheduled_d6_history_client_result(
+        parent_run,
+        runs=prior_run_values,
+        accepted_verifications=prior_pointers,
+    )
+    parent_start = datetime.fromisoformat(parent_run["startDate"].replace("Z", "+00:00"))
+    history_observation = {
+        **history,
+        "fence": fence,
+        "generatedAt": (parent_start + timedelta(seconds=9)).isoformat().replace("+00:00", "Z"),
+        "parentAirflowRun": parent_run,
+        "producer": {
+            "namespace": "airflow",
+            "serviceAccount": "airflow-serp-d19-history-observer",
+        },
+        "schema": "D19RunHistoryObservation/v1",
+    }
+    history_handle = {
+        "objectLockMode": "COMPLIANCE",
+        "retainUntil": "2033-07-17T00:00:00Z",
+        "s3Uri": plan.payload["artifact_paths"]["d19_run_history_observation"],
+        "sha256": "sha256:" + "a" * 64,
+        "versionId": "version-d19-history-observation",
+    }
+    history_attestation_handle = _d6_history_attestation_evidence(plan)
+    history_verification = _d6_history_attestation_verification(
+        subject=history_handle,
+        attestation=history_attestation_handle,
+    )
+    history_attestation = {
+        "domain": "serp.adapstory.ai/evaluation-governance/v1",
+        "purpose": "serp-d19-run-history-observation",
+        "schema": "ArtifactSignatureAttestationReceipt/v2",
+        "signatureProvider": "vault-transit",
+        "signer": history_verification["signer"],
+        "statementSha256": history_verification["statementSha256"],
+        "subject": history_handle,
+        "transit": {
+            "hashAlgorithm": "sha2-256",
+            "key": "serp-d19-history-observation",
+            "keyType": "ecdsa-p256",
+            "keyVersion": 1,
+            "mount": "transit",
+            "prehashed": False,
+            "signRequestId": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+            "signature": "vault:v1:d19-history-observation",
+            "signatureMarshalingAlgorithm": "asn1",
+            "verificationValid": True,
+            "verifyRequestId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        },
+    }
+    promotion = plan.payload["evaluation_release_promotion_evidence"]
+    candidate = _d19_worm_evidence("model-releases/candidate", "d")
+    objective = _d19_worm_evidence("evaluation-objective", "e")
+    objects: dict[tuple[str, str], dict[str, Any]] = {
+        **(
+            {
+                key: cast(dict[str, Any], json.loads(json.dumps(value)))
+                for key, value in seed_objects.items()
+            }
+            if seed_objects is not None
+            else {}
+        ),
+        (history_handle["s3Uri"], history_handle["versionId"]): history_observation,
+        (
+            history_attestation_handle["s3Uri"],
+            history_attestation_handle["versionId"],
+        ): history_attestation,
+    }
+    prior_receipt_handles: list[dict[str, str]] = []
+    for index, (verification_pointer, airflow_run) in enumerate(
+        zip(history["acceptedRunVerifications"], prior_run_values, strict=True),
+        start=1,
+    ):
+        verification_handle = verification_pointer["pairedEvaluationVerificationEvidence"]
+        verification_key = (verification_handle["s3Uri"], verification_handle["versionId"])
+        if verification_key in objects:
+            prior_receipt_handles.append(
+                dict(objects[verification_key]["receiptPointer"]["receiptEvidence"])
+            )
+            continue
+        receipt_handle = _d19_worm_evidence(f"receipts/prior-{index}", str(index + 3))
+        attestation_handle = _d19_worm_evidence(
+            f"receipts/prior-{index}.attestation", str(index + 6)
+        )
+        request_id = verification_pointer["requestId"]
+        objects[verification_key] = _d6_paired_verification_evidence(
+            airflow_run={
+                key: airflow_run[key] for key in ("dagId", "logicalDate", "runId", "runType")
+            },
+            request_id=request_id,
+            receipt_handle=receipt_handle,
+            receipt_attestation_handle=attestation_handle,
+            request_uuid_suffix=int(str(request_id)[-12:]),
+        )
+        objects[(receipt_handle["s3Uri"], receipt_handle["versionId"])] = _d6_v9_receipt(
+            request_id=request_id,
+            promotion=promotion,
+            candidate=candidate,
+            objective=objective,
+        )
+        objects[(attestation_handle["s3Uri"], attestation_handle["versionId"])] = {
+            "schema": "ArtifactSignatureAttestationReceipt/v2"
+        }
+        prior_receipt_handles.append(receipt_handle)
+
+    child_run = {
+        "dagId": "serp_benchmark_improvement_wave",
+        "logicalDate": parent_run["logicalDate"],
+        "runId": f"d6__{parent_run['runId']}",
+        "runType": "manual",
+    }
+    current_verification_handle = _d19_worm_evidence(
+        f"verification/current-{current_request_index}",
+        format(current_request_index % 16, "x"),
+    )
+    current_receipt_handle = _d19_worm_evidence(
+        f"receipts/current-{current_request_index}",
+        format((current_request_index + 4) % 16, "x"),
+    )
+    current_attestation_handle = _d19_worm_evidence(
+        f"receipts/current-{current_request_index}.attestation",
+        format((current_request_index + 8) % 16, "x"),
+    )
+    current_request_id = _d6_request_id(current_request_index)
+    objects[(current_verification_handle["s3Uri"], current_verification_handle["versionId"])] = (
+        _d6_paired_verification_evidence(
+            airflow_run=child_run,
+            request_id=current_request_id,
+            receipt_handle=current_receipt_handle,
+            receipt_attestation_handle=current_attestation_handle,
+            request_uuid_suffix=current_request_index,
+        )
+    )
+    objects[(current_receipt_handle["s3Uri"], current_receipt_handle["versionId"])] = (
+        _d6_v9_receipt(
+            request_id=current_request_id,
+            promotion=promotion,
+            candidate=candidate,
+            objective=objective,
+        )
+    )
+    objects[(current_attestation_handle["s3Uri"], current_attestation_handle["versionId"])] = {
+        "schema": "ArtifactSignatureAttestationReceipt/v2"
+    }
+
+    def reader(evidence: Mapping[str, str], _field_name: str) -> dict[str, Any]:
+        key = (evidence["s3Uri"], evidence["versionId"])
+        if key not in objects:
+            raise ValueError("fixture WORM object is missing")
+        return cast(dict[str, Any], json.loads(json.dumps(objects[key])))
+
+    return {
+        "child_run": child_run,
+        "current_observation": {
+            "dagId": "serp_benchmark_improvement_wave",
+            "logicalDate": parent_run["logicalDate"],
+            "observedAt": (
+                datetime.fromisoformat(parent_run["logicalDate"].replace("Z", "+00:00"))
+                + timedelta(hours=4)
+                - timedelta(seconds=1)
+            )
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "runId": child_run["runId"],
+            "sameLogicalDateRunCount": 1,
+            "sameLogicalDateSuccessCount": 1,
+            "schema": "D19CurrentRunObservation/v1",
+            "state": "success",
+        },
+        "current_receipt_key": (
+            current_receipt_handle["s3Uri"],
+            current_receipt_handle["versionId"],
+        ),
+        "current_verification_key": (
+            current_verification_handle["s3Uri"],
+            current_verification_handle["versionId"],
+        ),
+        "history_observation_key": (history_handle["s3Uri"], history_handle["versionId"]),
+        "history_result": {
+            "d19RunHistoryObservationAttestationEvidence": history_attestation_handle,
+            "d19RunHistoryObservationEvidence": history_handle,
+            "d19RunHistoryObservationVerification": history_verification,
+            "d19TriggerConf": {**plan.payload["d19_trigger_conf"], "scheduled_d6_fence": fence},
+            "fence": fence,
+        },
+        "objects": objects,
+        "plan": plan,
+        "prior_receipt_handles": prior_receipt_handles,
+        "reader": reader,
+        "triggered_verification": {
+            "airflowRun": child_run,
+            "pairedEvaluationVerificationEvidence": current_verification_handle,
+            "receiptStatus": "accepted",
+            "requestId": current_request_id,
+        },
+    }
+
+
+def _d6_paired_verification_evidence(
+    *,
+    airflow_run: Mapping[str, str],
+    request_id: str,
+    receipt_handle: Mapping[str, str],
+    receipt_attestation_handle: Mapping[str, str],
+    request_uuid_suffix: int,
+) -> dict[str, Any]:
+    request_uuid = f"00000000-0000-4000-8000-{request_uuid_suffix:012d}"
+    transit_uuid = f"10000000-0000-4000-8000-{request_uuid_suffix:012d}"
+    return {
+        "airflowRun": dict(airflow_run),
+        "operationId": request_id,
+        "receiptPointer": {
+            "receiptAttestationEvidence": dict(receipt_attestation_handle),
+            "receiptEvidence": dict(receipt_handle),
+            "receiptStatus": "accepted",
+            "receiptVerification": {
+                "attestationEvidence": dict(receipt_attestation_handle),
+                "consumerVerification": {"requestId": request_uuid, "valid": True},
+                "purpose": "serp-paired-evaluation-final-receipt",
+                "signer": {"serviceAccountName": "airflow-serp-benchmark-aggregator"},
+                "statementSha256": "sha256:" + "1" * 64,
+                "subject": dict(receipt_handle),
+                "transit": {
+                    "key": "serp-evaluation-runtime",
+                    "keyVersion": 1,
+                    "signature": "vault:v1:paired-receipt",
+                    "verifyRequestId": transit_uuid,
+                },
+            },
+        },
+        "requestId": request_id,
+        "schema": "PairedEvaluationVerificationEvidence/v1",
+    }
+
+
+def _d6_v9_receipt(
+    *,
+    request_id: str,
+    promotion: Mapping[str, str],
+    candidate: Mapping[str, str],
+    objective: Mapping[str, str],
+) -> dict[str, Any]:
+    return {
+        "attestationVerifications": {},
+        "baselineReleaseEvidence": _d19_worm_evidence("model-releases/baseline", "2"),
+        "candidateReleaseEvidence": dict(candidate),
+        "contractVersion": "serp-paired-eval-receipt/v9",
+        "evaluationBindingEvidence": _d19_worm_evidence("evaluation-binding", "3"),
+        "evaluationBindingId": "018f5e13-2d73-7a77-a052-8d1bcbf96701",
+        "evaluationObjectiveAttestationEvidence": _d19_worm_evidence(
+            "evaluation-objective.attestation", "4"
+        ),
+        "evaluationObjectiveEvidence": dict(objective),
+        "evaluationReleasePromotionEvidence": dict(promotion),
+        "metricCompatibilityMatrixEvidence": _d19_worm_evidence("metric-matrix", "5"),
+        "pairedEvaluation": {
+            "contractVersion": "serp-paired-evaluation/v5",
+            "operationId": request_id,
+            "status": "accepted",
+        },
+        "requestEvidence": _d19_worm_evidence(f"requests/{request_id}", "6"),
+        "requestId": request_id,
+        "status": "accepted",
     }
 
 
@@ -7222,124 +7796,6 @@ def _nightly_worm_evidence(label: str) -> dict[str, str]:
         "s3Uri": f"s3://airflow-serp-evidence/serp-evals/governed/{label}.json",
         "sha256": "sha256:" + sha256(label.encode("utf-8")).hexdigest(),
         "versionId": f"version-{label}",
-    }
-
-
-def _nightly_benchmark_suite_input(
-    suite_id: str,
-    *,
-    metric_families: tuple[str, ...] = ("retrieval", "answer-quality", "citation", "policy"),
-) -> dict[str, object]:
-    references_by_family = {
-        "retrieval": {
-            "metric": "MRR@10",
-            "metric_family": "retrieval",
-            "reference_id": f"{suite_id}:mrr10-fixture",
-            "reference_score": 1.0,
-            "threshold": SERP_NORMALIZED_GATE_FLOOR,
-        },
-        "answer-quality": {
-            "metric": "Faithfulness",
-            "metric_family": "answer-quality",
-            "reference_id": f"{suite_id}:answer-quality-fixture",
-            "reference_score": 1.0,
-            "threshold": SERP_NORMALIZED_GATE_FLOOR,
-        },
-        "citation": {
-            "metric": "Citation Accuracy",
-            "metric_family": "citation",
-            "reference_id": f"{suite_id}:citation-fixture",
-            "reference_score": 1.0,
-            "threshold": SERP_NORMALIZED_GATE_FLOOR,
-        },
-        "policy": {
-            "metric": "Policy Compliance Rate",
-            "metric_family": "policy",
-            "reference_id": f"{suite_id}:policy-fixture",
-            "reference_score": 1.0,
-            "threshold": 1.0,
-        },
-    }
-    observations_by_family = {
-        "answer-quality": {
-            "metric": "Faithfulness",
-            "metric_family": "answer-quality",
-            "score": 0.96,
-        },
-        "citation": {"metric": "Citation Accuracy", "metric_family": "citation", "score": 0.97},
-        "policy": {"metric": "Policy Compliance Rate", "metric_family": "policy", "score": 1.0},
-    }
-    return {
-        "cases": [
-            {
-                "query_id": f"{suite_id}:fixture-query-001",
-                "ranked_chunk_ids": [f"{suite_id}:chunk-a", f"{suite_id}:chunk-b"],
-                "relevant_chunk_ids": [f"{suite_id}:chunk-a"],
-            }
-        ],
-        "generated_at": "2026-07-05T21:00:00Z",
-        "metadata": {
-            "adapter_id": f"fixture-{suite_id.casefold().replace(' ', '-')}",
-            "adapter_version": "fixture@2026.07.1",
-            "adapter_source_revision": "a" * 40,
-            "adapter_source_uri": "https://example.com/adapter",
-            "adapter_image_digest": "sha256:" + "b" * 64,
-            "dataset_license_id": "Apache-2.0",
-            "dataset_distribution_rule": "snippets-only",
-            "dataset_rights_status": "attested",
-            "dataset_manifest_sha256": "sha256:" + "c" * 64,
-            "dataset_manifest_version_id": "fixture-dataset-version",
-            "dataset_manifest_uri": (
-                "s3://airflow-serp-artifacts/benchmark-fixtures/"
-                f"{suite_id.casefold().replace(' ', '-')}/dataset-manifest.json"
-            ),
-            "execution_evidence_sha256": "sha256:" + "d" * 64,
-            "execution_evidence_version_id": "fixture-execution-version",
-            "execution_evidence_uri": (
-                "s3://airflow-serp-artifacts/benchmark-fixtures/"
-                f"{suite_id.casefold().replace(' ', '-')}/execution-evidence.json"
-            ),
-            "reference_source_uri": "https://example.com/reference",
-            "suite_contract_version": "2026.07.3",
-        },
-        "metric_compatibility": _nightly_metric_compatibility(
-            beir_metric_families=metric_families if suite_id == "BEIR" else None
-        ),
-        "metric_observations": [
-            observations_by_family[metric_family]
-            for metric_family in metric_families
-            if metric_family != "retrieval"
-        ],
-        "pack_version_ids": [PACK_VERSION_ID],
-        "references": [references_by_family[metric_family] for metric_family in metric_families],
-        "reranker_profile_version": "reranker@2026.07.1",
-        "retrieval_profile_version": "hybrid@2026.07.1",
-        "suite_contract_version": "2026.07.3",
-        "suite_id": suite_id,
-        "suite_version": "fixture@2026.07.1",
-        "tenant_id": TENANT_ID,
-    }
-
-
-def _nightly_metric_compatibility(
-    *, beir_metric_families: tuple[str, ...] | None = None
-) -> dict[str, object]:
-    return {
-        "contract_version": "serp-suite-metric-compatibility/v1",
-        "matrix_sha256": "sha256:" + "e" * 64,
-        "matrix_uri": "s3://airflow-serp-artifacts/benchmark-fixtures/metric-compatibility.json",
-        "matrix_version_id": "fixture-metric-compatibility-version",
-        "requirements": [
-            {
-                "metric_families": (
-                    list(beir_metric_families)
-                    if suite_id == "BEIR" and beir_metric_families is not None
-                    else ["retrieval", "answer-quality", "citation", "policy"]
-                ),
-                "suite_id": suite_id,
-            }
-            for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
-        ],
     }
 
 
@@ -7438,6 +7894,188 @@ def _d19_worm_evidence(name: str, digest: str) -> dict[str, str]:
         "objectLockMode": "COMPLIANCE",
         "retainUntil": "2027-07-15T00:00:00Z",
     }
+
+
+def _d19_airflow_run() -> dict[str, str]:
+    return {
+        "dagId": "serp_benchmark_improvement_wave",
+        "logicalDate": "2026-07-16T21:00:00Z",
+        "runId": "manual__serp-all-nine-d19-wave-01-20260716T210000Z",
+        "runType": "manual",
+    }
+
+
+def _d19_evaluator_result(
+    plan: Any,
+) -> tuple[dict[str, Any], dict[tuple[str, str], bytes]]:
+    receipt_payload = {
+        "attestationVerifications": {
+            "evaluationObjective": _d19_verification_descriptor(
+                "evaluation-objective",
+                purpose="serp-evaluation-objective",
+                consumer_request_id="11111111-1111-4111-8111-111111111111",
+                transit_request_id="22222222-2222-4222-8222-222222222222",
+            ),
+            "evaluationReferenceSet": _d19_verification_descriptor(
+                "evaluation-reference-set",
+                purpose="serp-evaluation-reference-set",
+                consumer_request_id="33333333-3333-4333-8333-333333333333",
+                transit_request_id="44444444-4444-4444-8444-444444444444",
+            ),
+            "executionManifest": _d19_verification_descriptor(
+                "execution-manifest",
+                purpose="serp-evaluation-execution-manifest",
+                consumer_request_id="55555555-5555-4555-8555-555555555555",
+                transit_request_id="66666666-6666-4666-8666-666666666666",
+            ),
+        },
+        "contractVersion": "serp-paired-eval-receipt/v9",
+        "requestId": plan.payload["operation_id"],
+        "status": "accepted",
+    }
+    receipt_bytes = serp_eval_contracts_module._canonical_json(receipt_payload).encode("utf-8")
+    receipt_path = plan.payload["artifact_paths"]["paired_eval_receipt"]
+    receipt_version = "paired-receipt-version-001"
+    retain_until = "2033-07-16T21:00:00Z"
+    receipt_evidence = {
+        "artifactETag": sha256(receipt_bytes).hexdigest(),
+        "artifactPath": receipt_path,
+        "artifactSha256": sha256(receipt_bytes).hexdigest(),
+        "artifactType": "serp_paired_eval_receipt",
+        "artifactVersionId": receipt_version,
+        "objectLockMode": "COMPLIANCE",
+        "objectLockRetainUntil": retain_until,
+        "status": "written",
+    }
+    receipt_subject = {
+        "objectLockMode": "COMPLIANCE",
+        "retainUntil": retain_until,
+        "s3Uri": receipt_path,
+        "sha256": "sha256:" + sha256(receipt_bytes).hexdigest(),
+        "versionId": receipt_version,
+    }
+    attestation_payload = {"statement": "runtime-signed-final-receipt"}
+    attestation_bytes = serp_eval_contracts_module._canonical_json(attestation_payload).encode(
+        "utf-8"
+    )
+    attestation_path = receipt_path.removesuffix(".json") + ".attestation.json"
+    attestation_evidence = {
+        "objectLockMode": "COMPLIANCE",
+        "retainUntil": retain_until,
+        "s3Uri": attestation_path,
+        "sha256": "sha256:" + sha256(attestation_bytes).hexdigest(),
+        "versionId": "paired-receipt-attestation-version-001",
+    }
+    verification = {
+        "attestationEvidence": dict(attestation_evidence),
+        "consumerVerification": {
+            "requestId": "88888888-8888-4888-8888-888888888888",
+            "valid": True,
+        },
+        "purpose": "serp-paired-evaluation-final-receipt",
+        "signer": {
+            "namespace": "env-prod",
+            "serviceAccount": "airflow-serp-benchmark-aggregator",
+        },
+        "statementSha256": "sha256:" + "a" * 64,
+        "subject": dict(receipt_subject),
+        "transit": {
+            "key": "serp-evaluation-runtime",
+            "keyVersion": 1,
+            "signature": "vault:v1:test-signature",
+            "verifyRequestId": "99999999-9999-4999-8999-999999999999",
+        },
+    }
+    return (
+        {
+            "receiptAttestationEvidence": attestation_evidence,
+            "receiptEvidence": receipt_evidence,
+            "receiptStatus": "accepted",
+            "receiptVerification": verification,
+        },
+        {
+            (receipt_path, receipt_version): receipt_bytes,
+            (attestation_path, attestation_evidence["versionId"]): attestation_bytes,
+        },
+    )
+
+
+def _d19_verification_descriptor(
+    label: str,
+    *,
+    purpose: str,
+    consumer_request_id: str,
+    transit_request_id: str,
+) -> dict[str, object]:
+    subject = _nightly_worm_evidence(f"{label}-subject")
+    attestation = _nightly_worm_evidence(f"{label}-attestation")
+    return {
+        "attestationEvidence": attestation,
+        "consumerVerification": {"requestId": consumer_request_id, "valid": True},
+        "purpose": purpose,
+        "signer": {
+            "namespace": "airflow" if "execution" in purpose else "jenkins",
+            "serviceAccount": (
+                "airflow-serp-benchmark-aggregator"
+                if "execution" in purpose
+                else "serp-evaluation-attestor"
+            ),
+        },
+        "statementSha256": "sha256:" + sha256(label.encode("utf-8")).hexdigest(),
+        "subject": subject,
+        "transit": {
+            "key": (
+                "serp-evaluation-runtime" if "execution" in purpose else "serp-evaluation-authority"
+            ),
+            "keyVersion": 1,
+            "signature": f"vault:v1:{label}",
+            "verifyRequestId": transit_request_id,
+        },
+    }
+
+
+def _d19_receipt_subject(evaluator_result: Mapping[str, Any]) -> dict[str, str]:
+    receipt = cast(Mapping[str, Any], evaluator_result["receiptEvidence"])
+    return {
+        "objectLockMode": "COMPLIANCE",
+        "retainUntil": str(receipt["objectLockRetainUntil"]),
+        "s3Uri": str(receipt["artifactPath"]),
+        "sha256": "sha256:" + str(receipt["artifactSha256"]),
+        "versionId": str(receipt["artifactVersionId"]),
+    }
+
+
+class _D19VerificationS3:
+    def __init__(self, objects: Mapping[tuple[str, str], bytes]) -> None:
+        self.objects = dict(objects)
+
+    def head_object(self, *, Bucket: str, Key: str, VersionId: str) -> dict[str, object]:
+        uri = f"s3://{Bucket}/{Key}"
+        assert (uri, VersionId) in self.objects
+        return {
+            "ContentLength": len(self.objects[(uri, VersionId)]),
+            "ObjectLockMode": "COMPLIANCE",
+            "ObjectLockRetainUntilDate": datetime(2033, 7, 16, 21, tzinfo=UTC),
+            "VersionId": VersionId,
+        }
+
+    def get_object(self, *, Bucket: str, Key: str, VersionId: str) -> dict[str, object]:
+        uri = f"s3://{Bucket}/{Key}"
+        return {"Body": io.BytesIO(self.objects[(uri, VersionId)])}
+
+    def put_object(
+        self,
+        *,
+        Bucket: str,
+        Key: str,
+        Body: bytes,
+        ContentType: str,
+    ) -> dict[str, str]:
+        assert ContentType == "application/json"
+        uri = f"s3://{Bucket}/{Key}"
+        version_id = "verification-version-001"
+        self.objects[(uri, version_id)] = Body
+        return {"ETag": sha256(Body).hexdigest(), "VersionId": version_id}
 
 
 def _native_adapter_materializer(
