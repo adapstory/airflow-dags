@@ -41,6 +41,7 @@ EVALUATION_ADMISSION_VERIFIER_SERVICE_ACCOUNT = "serp-evaluation-admission-verif
 EVALUATION_ADMISSION_VERIFIER_VAULT_AUTH_ROLE = "serp-evaluation-runtime-verifier-role"
 _EVALUATION_SIGNER_VAULT_AUTH_ROLES = frozenset(
     {
+        "serp-d19-history-observer-attestor-role",
         "serp-evaluation-runtime-attestor-role",
     }
 )

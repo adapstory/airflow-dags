@@ -618,7 +618,67 @@ def test_d6_history_observation_is_runtime_fresh_fenced_worm_and_transit_atteste
         writes[0]["artifact_path"] == plan.payload["artifact_paths"]["d19_run_history_observation"]
     )
     assert writes[0]["artifact_type"] == "d19_run_history_observation"
+    assert fence_client.required == [_scheduled_d6_fence(parent_run)]
     assert fence_client.released == []
+
+
+@pytest.mark.parametrize("race", ("inserted_terminal_run", "terminal_state_transition"))
+def test_d6_history_observation_rejects_changes_between_fenced_history_reads(
+    race: str,
+) -> None:
+    plan = build_nightly_regression_plan(_scheduled_d6_conf())
+    parent_run = _scheduled_d6_airflow_run()
+    prior_runs = _scheduled_d6_prior_runs()
+    prior_pointers = [
+        _scheduled_d6_prior_pointer(index, run) for index, run in enumerate(prior_runs, start=1)
+    ]
+    older_run = {
+        "dagId": "serp_benchmark_improvement_wave",
+        "logicalDate": "2026-07-01T00:00:00Z",
+        "runId": "manual__terminal-race",
+        "runType": "manual",
+        "state": "failed",
+    }
+    if race == "inserted_terminal_run":
+        first = _scheduled_d6_history_client_result(
+            parent_run,
+            runs=prior_runs,
+            accepted_verifications=prior_pointers,
+        )
+        second_runs = [older_run, *prior_runs]
+    else:
+        first = _scheduled_d6_history_client_result(
+            parent_run,
+            runs=[older_run, *prior_runs],
+            accepted_verifications=prior_pointers,
+        )
+        transitioned = {**older_run, "state": "success"}
+        second_runs = [transitioned, *prior_runs]
+    second = _scheduled_d6_history_client_result(
+        parent_run,
+        runs=second_runs,
+        accepted_verifications=prior_pointers,
+    )
+    history_client = _SequenceD6HistoryClient(first, second)
+    fence = _scheduled_d6_fence(parent_run)
+    fence_client = _D6FenceClient(fence)
+
+    def unexpected_write(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("an unstable history snapshot must not be persisted")
+
+    with pytest.raises(ValueError, match="changed while the D19 fence was active"):
+        serp_eval_contracts_module.produce_d19_run_history_observation(
+            plan.to_canonical_json(),
+            parent_run,
+            history_client=history_client,
+            fence_client=fence_client,
+            clock=lambda: datetime(2026, 7, 17, 0, 0, 10, tzinfo=UTC),
+            snapshot_writer=unexpected_write,
+        )
+
+    assert history_client.collect_count == 2
+    assert fence_client.required == [fence]
+    assert fence_client.released == [fence]
 
 
 @pytest.mark.parametrize(
@@ -730,6 +790,20 @@ def test_scheduled_d6_receipt_proves_three_prior_accepts_and_one_unique_child() 
     assert payload["schema"] == "ScheduledD6RegressionReceipt/v1"
     assert payload["status"] == "accepted"
     assert payload["acceptedStreakLength"] == 4
+    current_receipt = fixture["objects"][fixture["current_receipt_key"]]
+    assert payload["authority"] == {
+        field_name: current_receipt[field_name]
+        for field_name in (
+            "baselineReleaseEvidence",
+            "candidateReleaseEvidence",
+            "evaluationBindingEvidence",
+            "evaluationBindingId",
+            "evaluationObjectiveAttestationEvidence",
+            "evaluationObjectiveEvidence",
+            "evaluationReleasePromotionEvidence",
+            "metricCompatibilityMatrixEvidence",
+        )
+    }
     assert len(payload["priorAcceptedEvaluations"]) == 3
     assert payload["triggeredEvaluation"]["airflowRun"] == fixture["child_run"]
     assert payload["currentRunObservation"] == fixture["current_observation"]
@@ -792,7 +866,11 @@ def test_scheduled_d6_self_advances_the_exact_streak_on_the_next_daily_run() -> 
     (
         ("duplicate_request", "requestId values must be unique"),
         ("intervening_failure", "last three historical D19 runs"),
-        ("promotion_drift", "promotion authority must remain identical"),
+        ("promotion_drift", "evaluation authority must remain identical"),
+        ("baseline_release_drift", "evaluation authority must remain identical"),
+        ("evaluation_binding_evidence_drift", "evaluation authority must remain identical"),
+        ("evaluation_binding_id_drift", "evaluation authority must remain identical"),
+        ("metric_matrix_drift", "evaluation authority must remain identical"),
         ("duplicate_child", "sameLogicalDateRunCount must equal one"),
     ),
 )
@@ -826,10 +904,62 @@ def test_scheduled_d6_receipt_rejects_fabricated_streaks(
         current_receipt["evaluationReleasePromotionEvidence"] = _d19_worm_evidence(
             "model-releases/foreign-promotion", "9"
         )
+    elif mutation == "baseline_release_drift":
+        current_receipt = fixture["objects"][fixture["current_receipt_key"]]
+        current_receipt["baselineReleaseEvidence"] = _d19_worm_evidence(
+            "model-releases/foreign-baseline", "9"
+        )
+    elif mutation == "evaluation_binding_evidence_drift":
+        current_receipt = fixture["objects"][fixture["current_receipt_key"]]
+        current_receipt["evaluationBindingEvidence"] = _d19_worm_evidence(
+            "evaluation-bindings/foreign", "9"
+        )
+    elif mutation == "evaluation_binding_id_drift":
+        current_receipt = fixture["objects"][fixture["current_receipt_key"]]
+        current_receipt["evaluationBindingId"] = "018f5e13-2d73-7a77-a052-8d1bcbf96799"
+    elif mutation == "metric_matrix_drift":
+        current_receipt = fixture["objects"][fixture["current_receipt_key"]]
+        current_receipt["metricCompatibilityMatrixEvidence"] = _d19_worm_evidence(
+            "metric-matrices/foreign", "9"
+        )
     elif mutation == "duplicate_child":
         fixture["current_observation"]["sameLogicalDateRunCount"] = 2
 
     with pytest.raises(ValueError, match=match):
+        write_scheduled_d6_regression_receipt(
+            fixture["plan"].to_canonical_json(),
+            fixture["history_result"],
+            fixture["triggered_verification"],
+            fixture["current_observation"],
+            evidence_reader=fixture["reader"],
+            snapshot_writer=lambda **_: {},
+            clock=lambda: datetime(2026, 7, 17, 4, 0, tzinfo=UTC),
+        )
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    (
+        "baselineReleaseEvidence",
+        "candidateReleaseEvidence",
+        "evaluationObjectiveAttestationEvidence",
+        "evaluationObjectiveEvidence",
+        "metricCompatibilityMatrixEvidence",
+    ),
+)
+def test_scheduled_d6_receipt_binds_every_release_authority_to_d17_promotion(
+    field_name: str,
+) -> None:
+    fixture = _scheduled_d6_receipt_fixture()
+    foreign = _d19_worm_evidence(f"foreign/{field_name}", "9")
+    receipt_keys = [
+        *[(handle["s3Uri"], handle["versionId"]) for handle in fixture["prior_receipt_handles"]],
+        fixture["current_receipt_key"],
+    ]
+    for key in receipt_keys:
+        fixture["objects"][key][field_name] = foreign
+
+    with pytest.raises(ValueError, match="does not match the D17 promotion"):
         write_scheduled_d6_regression_receipt(
             fixture["plan"].to_canonical_json(),
             fixture["history_result"],
@@ -5848,6 +5978,55 @@ def test_scheduled_d6_triggers_one_unique_serialized_d19_child_without_legacy_sc
         assert legacy_surface not in source
 
 
+def test_observe_triggered_d19_run_uses_task_instance_public_metadata_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    monkeypatch.delitem(sys.modules, "dags.serp_nightly_regression_suite", raising=False)
+    module = importlib.import_module("dags.serp_nightly_regression_suite")
+
+    class DagRunWithoutTaskInstanceMethods:
+        pass
+
+    class SuccessfulDagRunState:
+        value = "success"
+
+    class TaskInstance:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, object]] = []
+
+        def get_dagrun_state(self, dag_id: str, run_id: str) -> SuccessfulDagRunState:
+            self.calls.append(("get_dagrun_state", (dag_id, run_id)))
+            return SuccessfulDagRunState()
+
+        def get_dr_count(
+            self,
+            *,
+            dag_id: str,
+            logical_dates: list[datetime],
+            states: list[str] | None = None,
+        ) -> int:
+            self.calls.append(("get_dr_count", (dag_id, logical_dates, states)))
+            return 1
+
+    task_instance = TaskInstance()
+    result = module.observe_triggered_d19_run(
+        "d6__scheduled__2026-07-17T00:00:00+00:00",
+        "2026-07-17T00:00:00Z",
+        dag_run=DagRunWithoutTaskInstanceMethods(),
+        ti=task_instance,
+    )
+
+    assert result["state"] == "success"
+    assert result["sameLogicalDateRunCount"] == 1
+    assert result["sameLogicalDateSuccessCount"] == 1
+    assert [call[0] for call in task_instance.calls] == [
+        "get_dagrun_state",
+        "get_dr_count",
+        "get_dr_count",
+    ]
+
+
 def test_d5_post_activation_failure_uses_direct_parent_rollback_compensation() -> None:
     source = (REPO_ROOT / "dags" / "serp_publish_signed_pack.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -6111,6 +6290,25 @@ def test_bc10_workload_identity_projects_exact_bounded_audience(
     }
 
 
+def test_history_observer_uses_its_dedicated_transit_attestor_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    module = importlib.import_module("dags.serp_evidence_workload_identity")
+    module = importlib.reload(module)
+
+    values = {
+        env.kwargs["name"]: env.kwargs["value"]
+        for env in module.vault_transit_env_vars(
+            auth_role="serp-d19-history-observer-attestor-role"
+        )
+    }
+
+    assert values["ADAPSTORY_VAULT_KUBERNETES_AUTH_ROLE"] == (
+        "serp-d19-history-observer-attestor-role"
+    )
+
+
 def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     # The workload-identity helper can be imported earlier by a real-kubernetes
     # contract test. Remove that cached module for this test scope so the DAG
@@ -6124,6 +6322,7 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         pass
 
     class FakeTriggerRule:
+        ALL_DONE = "all_done"
         ONE_FAILED = "one_failed"
 
     class FakeDAG:
@@ -6158,6 +6357,9 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
 
         def __rshift__(self, other: object) -> object:
             return other
+
+        def __rrshift__(self, _other: object) -> FakePythonOperator:
+            return self
 
     class FakeTriggerDagRunOperator(FakePythonOperator):
         pass
@@ -7423,13 +7625,30 @@ class _StaticD6HistoryClient:
         return cast(dict[str, Any], json.loads(json.dumps(self.result)))
 
 
+class _SequenceD6HistoryClient:
+    def __init__(self, *results: Mapping[str, Any]) -> None:
+        self.results = list(results)
+        self.collect_count = 0
+
+    def collect(self, *, parent_logical_date: str) -> dict[str, Any]:
+        assert parent_logical_date == _scheduled_d6_airflow_run()["logicalDate"]
+        result = self.results[self.collect_count]
+        self.collect_count += 1
+        return cast(dict[str, Any], json.loads(json.dumps(result)))
+
+
 class _D6FenceClient:
     def __init__(self, fence: Mapping[str, Any]) -> None:
         self.fence = dict(fence)
+        self.required: list[dict[str, Any]] = []
         self.released: list[dict[str, Any]] = []
 
     def acquire(self, *, parent_airflow_run: Mapping[str, str]) -> dict[str, Any]:
         assert parent_airflow_run == _scheduled_d6_airflow_run()
+        return dict(self.fence)
+
+    def require_active(self, fence: Mapping[str, Any]) -> dict[str, Any]:
+        self.required.append(dict(fence))
         return dict(self.fence)
 
     def release(self, fence: Mapping[str, Any]) -> None:
@@ -7590,6 +7809,11 @@ def _scheduled_d6_receipt_fixture(
             history_attestation_handle["s3Uri"],
             history_attestation_handle["versionId"],
         ): history_attestation,
+        (promotion["s3Uri"], promotion["versionId"]): _d6_d17_promotion_receipt(
+            plan,
+            candidate=candidate,
+            objective=objective,
+        ),
     }
     prior_receipt_handles: list[dict[str, str]] = []
     for index, (verification_pointer, airflow_run) in enumerate(
@@ -7786,6 +8010,49 @@ def _d6_v9_receipt(
         "requestEvidence": _d19_worm_evidence(f"requests/{request_id}", "6"),
         "requestId": request_id,
         "status": "accepted",
+    }
+
+
+def _d6_d17_promotion_receipt(
+    plan: Any,
+    *,
+    candidate: Mapping[str, str],
+    objective: Mapping[str, str],
+) -> dict[str, Any]:
+    baseline = _d19_worm_evidence("model-releases/baseline", "2")
+    candidate_digest = "sha256:" + "d" * 64
+    return {
+        "baselineRelease": {
+            "evidence": baseline,
+            "releaseDigest": "sha256:" + "b" * 64,
+        },
+        "candidateRelease": {
+            "evidence": dict(candidate),
+            "releaseDigest": candidate_digest,
+        },
+        "candidateReleaseAuthority": {
+            "canaryState": "passed",
+            "evidence": dict(candidate),
+            "modelId": "serp-all-nine-candidate-router@2026.07.3",
+            "provider": "adapstory-model-gateway",
+            "purpose": "serp-benchmark-candidate",
+            "releaseDigest": candidate_digest,
+            "releaseId": "serp-all-nine-candidate@2026.07.3",
+        },
+        "dagId": "serp_model_catalog_promotion",
+        "evaluationObjectiveAttestationEvidence": _d19_worm_evidence(
+            "evaluation-objective.attestation", "4"
+        ),
+        "evaluationObjectiveEvidence": dict(objective),
+        "generatedAt": "2026-07-12T00:00:00Z",
+        "metricCompatibilityMatrixEvidence": _d19_worm_evidence("metric-matrix", "5"),
+        "operationId": "serp-model-promotion-test",
+        "promotionId": "serp-model-promotion-2026-07-12",
+        "registryResourceId": plan.payload["registry_resource_id"],
+        "registryResourceType": plan.payload["registry_resource_type"],
+        "schema": "EvaluationReleasePromotionReceipt/v5",
+        "status": "approved-for-evaluation",
+        "tenantId": plan.payload["tenant_id"],
     }
 
 

@@ -200,21 +200,22 @@ def observe_triggered_d19_run(
     logical_date: datetime | str,
     **context: Any,
 ) -> dict[str, Any]:
-    runtime = context.get("dag_run")
-    if runtime is None:
-        raise ValueError("D6 child observer requires Task SDK DagRun context")
+    task_instance = context.get("ti")
+    if task_instance is None:
+        raise ValueError("D6 child observer requires Task SDK TaskInstance context")
     logical_date_value = _datetime_value(logical_date, "D19 child logical_date")
-    state = runtime.get_dagrun_state(D19_DAG_ID, child_run_id)
-    same_logical_date_count = runtime.get_dr_count(
+    state = task_instance.get_dagrun_state(D19_DAG_ID, child_run_id)
+    state_value = getattr(state, "value", state)
+    same_logical_date_count = task_instance.get_dr_count(
         dag_id=D19_DAG_ID,
         logical_dates=[logical_date_value],
     )
-    same_logical_date_success_count = runtime.get_dr_count(
+    same_logical_date_success_count = task_instance.get_dr_count(
         dag_id=D19_DAG_ID,
         logical_dates=[logical_date_value],
         states=["success"],
     )
-    if state != "success":
+    if state_value != "success":
         raise ValueError("triggered D19 child must finish successfully")
     if same_logical_date_count != 1 or same_logical_date_success_count != 1:
         raise ValueError("scheduled D6 requires exactly one successful D19 child per logical date")

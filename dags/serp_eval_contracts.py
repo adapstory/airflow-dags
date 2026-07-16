@@ -574,7 +574,22 @@ def produce_d19_run_history_observation(
     try:
         raw_fence = fence_manager.acquire(parent_airflow_run=parent)
         fence = _normalized_d19_history_fence(raw_fence, parent_airflow_run=parent)
-        raw_history = history_reader.collect(parent_logical_date=parent["logicalDate"])
+        initial_history = _normalized_d19_history_client_result(
+            history_reader.collect(parent_logical_date=parent["logicalDate"]),
+            parent_airflow_run=parent,
+            artifact_root_path=_required_str(plan, "artifact_root_path"),
+        )
+        fence = _normalized_d19_history_fence(
+            fence_manager.require_active(fence),
+            parent_airflow_run=parent,
+        )
+        final_history = _normalized_d19_history_client_result(
+            history_reader.collect(parent_logical_date=parent["logicalDate"]),
+            parent_airflow_run=parent,
+            artifact_root_path=_required_str(plan, "artifact_root_path"),
+        )
+        if final_history != initial_history:
+            raise ValueError("D19 history changed while the D19 fence was active")
         generated_at_dt = now_fn()
         if generated_at_dt.tzinfo is None:
             raise ValueError("D19 history observer clock must be timezone-aware")
@@ -584,18 +599,13 @@ def produce_d19_run_history_observation(
             raise ValueError(
                 "D19 history observation must be produced within five minutes of parent start"
             )
-        normalized_history = _normalized_d19_history_client_result(
-            raw_history,
-            parent_airflow_run=parent,
-            artifact_root_path=_required_str(plan, "artifact_root_path"),
-        )
         fence = _normalized_d19_history_fence(
             fence,
             parent_airflow_run=parent,
             observed_at=generated_at,
         )
         payload = {
-            **normalized_history,
+            **final_history,
             "fence": fence,
             "generatedAt": generated_at.isoformat().replace("+00:00", "Z"),
             "parentAirflowRun": parent,
@@ -1077,6 +1087,14 @@ def write_scheduled_d6_regression_receipt(
         )
         return dict(_canonical_json_object_bytes(payload, field_name))
 
+    promotion_evidence = _worm_evidence_reference(
+        plan,
+        "evaluation_release_promotion_evidence",
+    )
+    promotion_receipt = _validated_evaluation_release_promotion_receipt(
+        read_json(promotion_evidence, "D17 evaluation release promotion"),
+        plan,
+    )
     history_observation = _normalized_d19_history_observation(
         read_json(history_evidence, "D19 run history observation"),
         expected_evidence=history_evidence,
@@ -1205,12 +1223,22 @@ def write_scheduled_d6_regression_receipt(
         raise ValueError("scheduled D6 receipt S3 identities must be unique")
     authorities = [record["authority"] for record in receipt_records]
     if any(authority != authorities[0] for authority in authorities[1:]):
-        raise ValueError("scheduled D6 promotion authority must remain identical")
-    if authorities[0]["evaluationReleasePromotionEvidence"] != _worm_evidence_reference(
-        plan,
-        "evaluation_release_promotion_evidence",
-    ):
-        raise ValueError("scheduled D6 receipt promotion does not match its plan")
+        raise ValueError("scheduled D6 evaluation authority must remain identical")
+    expected_promotion_authority = {
+        "baselineReleaseEvidence": promotion_receipt["baselineRelease"]["evidence"],
+        "candidateReleaseEvidence": promotion_receipt["candidateRelease"]["evidence"],
+        "evaluationObjectiveAttestationEvidence": promotion_receipt[
+            "evaluationObjectiveAttestationEvidence"
+        ],
+        "evaluationObjectiveEvidence": promotion_receipt["evaluationObjectiveEvidence"],
+        "evaluationReleasePromotionEvidence": promotion_evidence,
+        "metricCompatibilityMatrixEvidence": promotion_receipt["metricCompatibilityMatrixEvidence"],
+    }
+    observed_promotion_authority = {
+        field_name: authorities[0][field_name] for field_name in expected_promotion_authority
+    }
+    if observed_promotion_authority != expected_promotion_authority:
+        raise ValueError("scheduled D6 evaluation authority does not match the D17 promotion")
 
     now = _aware_datetime(clock or (lambda: datetime.now(UTC)), "scheduled D6 receipt clock")
     observed_at = _datetime_value(current_observation["observedAt"], "observedAt")
@@ -1519,14 +1547,25 @@ def _normalized_accepted_v9_receipt(
         raise ValueError("scheduled D6 pairedEvaluation result is unsupported")
     return {
         "authority": {
+            "baselineReleaseEvidence": _worm_evidence_reference(receipt, "baselineReleaseEvidence"),
             "candidateReleaseEvidence": _worm_evidence_reference(
                 receipt, "candidateReleaseEvidence"
+            ),
+            "evaluationBindingEvidence": _worm_evidence_reference(
+                receipt, "evaluationBindingEvidence"
+            ),
+            "evaluationBindingId": str(_required_uuid(receipt, "evaluationBindingId")),
+            "evaluationObjectiveAttestationEvidence": _worm_evidence_reference(
+                receipt, "evaluationObjectiveAttestationEvidence"
             ),
             "evaluationObjectiveEvidence": _worm_evidence_reference(
                 receipt, "evaluationObjectiveEvidence"
             ),
             "evaluationReleasePromotionEvidence": _worm_evidence_reference(
                 receipt, "evaluationReleasePromotionEvidence"
+            ),
+            "metricCompatibilityMatrixEvidence": _worm_evidence_reference(
+                receipt, "metricCompatibilityMatrixEvidence"
             ),
         },
         "requestId": request_id,
