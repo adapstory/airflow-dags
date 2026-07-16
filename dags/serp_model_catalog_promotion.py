@@ -1,4 +1,4 @@
-"""D17 immutable exact-nine EvaluationRelease/v2 promotion authority."""
+"""D17 immutable exact-nine EvaluationRelease/v3 promotion authority."""
 
 from __future__ import annotations
 

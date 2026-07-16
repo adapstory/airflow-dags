@@ -27,6 +27,7 @@ class _Body:
 class _S3:
     def __init__(self, bucket: str) -> None:
         self.bucket = bucket
+        self.fail_put = False
         self.objects: dict[str, bytes] = {}
 
     def get_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
@@ -37,6 +38,8 @@ class _S3:
 
     def put_object(self, *, Bucket: str, Key: str, Body: bytes) -> None:
         assert Bucket == self.bucket
+        if self.fail_put:
+            raise RuntimeError("injected remote log failure")
         self.objects[Key] = Body
 
     def list_objects_v2(self, **kwargs: object) -> dict[str, object]:
@@ -67,7 +70,7 @@ def _isolated_task_log_modules() -> Iterator[tuple[ModuleType, ModuleType]]:
         )
 
 
-def test_minio_sts_task_log_io_appends_and_reads_without_an_airflow_connection(
+def test_minio_sts_task_log_io_atomically_mirrors_full_local_log_without_truncation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     with _isolated_task_log_modules() as (task_logging, _workload_identity):
@@ -80,17 +83,36 @@ def test_minio_sts_task_log_io_appends_and_reads_without_an_airflow_connection(
 
         local_log.write_text("first", encoding="utf-8")
         remote.upload(local_log)
-        local_log.write_text("second", encoding="utf-8")
+        local_log.write_text("first\nsecond", encoding="utf-8")
         remote.upload(local_log)
 
         expected_key = "airflow-task-logs/dag_id=all-nine/task_id=materialize/attempt=1.log"
         assert client.objects == {expected_key: b"first\nsecond"}
-        assert local_log.read_text(encoding="utf-8") == ""
+        assert local_log.read_text(encoding="utf-8") == "first\nsecond"
         messages, logs = remote.read(
             "dag_id=all-nine/task_id=materialize/attempt=1.log", ti=object()
         )
         assert messages == [f"s3://{task_logging.TASK_LOG_BUCKET}/{expected_key}"]
         assert logs == ["first\nsecond"]
+
+
+def test_minio_sts_task_log_io_preserves_local_log_when_remote_upload_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    with _isolated_task_log_modules() as (task_logging, _workload_identity):
+        client = _S3(task_logging.TASK_LOG_BUCKET)
+        client.fail_put = True
+        monkeypatch.setattr(task_logging, "task_log_s3_client", lambda: client)
+        base_log_folder = tmp_path / "logs"
+        local_log = base_log_folder / "dag_id=d20" / "task_id=validate" / "attempt=1.log"
+        local_log.parent.mkdir(parents=True)
+        local_log.write_text("seed snapshot 17/43 written", encoding="utf-8")
+        remote = task_logging.MinioStsTaskLogIO(base_log_folder=base_log_folder)
+
+        remote.upload(local_log)
+
+        assert local_log.read_text(encoding="utf-8") == "seed snapshot 17/43 written"
+        assert client.objects == {}
 
 
 def test_task_log_sts_policy_is_limited_to_the_log_prefix() -> None:

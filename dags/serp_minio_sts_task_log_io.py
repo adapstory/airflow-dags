@@ -42,17 +42,25 @@ class MinioStsTaskLogIO:
         self.remote_base = f"s3://{TASK_LOG_BUCKET}/{TASK_LOG_PREFIX.removesuffix('/')}"
 
     def upload(self, path: os.PathLike[str] | str, ti: object | None = None) -> None:
-        """Upload only newly emitted log content, matching Airflow's S3 semantics."""
+        """Atomically mirror the complete local log without truncating crash evidence.
+
+        Replacing the remote object with the complete local file is idempotent:
+        a process crash after ``PutObject`` can safely retry without duplicating
+        the last fragment. The local copy remains available until an explicitly
+        configured successful final cleanup.
+        """
 
         del ti
         local_path, relative_path = self._resolve_local_log_path(path)
         if not local_path.is_file():
             return
-        if self.write(local_path.read_text(encoding="utf-8"), self._remote_key(relative_path)):
+        if self.write(
+            local_path.read_text(encoding="utf-8"),
+            self._remote_key(relative_path),
+            append=False,
+        ):
             if self.delete_local_copy:
                 shutil.rmtree(local_path.parent)
-            else:
-                local_path.write_text("", encoding="utf-8")
 
     def read(self, relative_path: str, ti: object) -> tuple[list[str], list[str] | None]:
         """Return the source keys and log payloads expected by Airflow's log API."""

@@ -40,6 +40,9 @@ from dags.serp_evidence_workload_identity import (
     MINIO_WEB_IDENTITY_TOKEN_FILE,
     SERP_RUNTIME_GROUP_ID,
     SERP_RUNTIME_USER_ID,
+    bc10_workload_env_vars,
+    bc10_workload_volume_mounts,
+    bc10_workload_volumes,
     bc21_workload_env_vars,
     bc21_workload_volume_mounts,
     bc21_workload_volumes,
@@ -52,6 +55,9 @@ from dags.serp_evidence_workload_identity import (
     minio_web_identity_executor_config,
     minio_web_identity_volume_mounts,
     minio_web_identity_volumes,
+    vault_transit_env_vars,
+    vault_transit_volume_mounts,
+    vault_transit_volumes,
 )
 from dags.serp_web_seed_crawl_refresh import current_airflow_runtime_image
 
@@ -147,14 +153,14 @@ _D19_BUILDER_ENV_NAMES = (
     "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT",
     "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION",
     "ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST",
+    "ADAPSTORY_BC10_GATEWAY_URL",
     "ADAPSTORY_SERP_BC21_BASE_URL",
-    "ADAPSTORY_OLLAMA_BASE_URL",
 )
 _D19_MODEL_RUNNER_ENV_NAMES = (
     "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT",
     "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION",
     "ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST",
-    "ADAPSTORY_OLLAMA_BASE_URL",
+    "ADAPSTORY_BC10_GATEWAY_URL",
 )
 D19_AGGREGATOR_VOLUMES = [
     *minio_web_identity_volumes(),
@@ -166,20 +172,24 @@ D19_AGGREGATOR_VOLUME_MOUNTS = [
 ]
 D19_BUILDER_VOLUMES = [
     *minio_web_identity_volumes(),
+    *bc10_workload_volumes(),
     *bc21_workload_volumes(),
     *hardened_runtime_volumes(),
 ]
 D19_BUILDER_VOLUME_MOUNTS = [
     *minio_web_identity_volume_mounts(),
+    *bc10_workload_volume_mounts(),
     *bc21_workload_volume_mounts(),
     *hardened_runtime_volume_mounts(),
 ]
 D19_MODEL_RUNNER_VOLUMES = [
     *minio_web_identity_volumes(),
+    *bc10_workload_volumes(),
     *hardened_runtime_volumes(),
 ]
 D19_MODEL_RUNNER_VOLUME_MOUNTS = [
     *minio_web_identity_volume_mounts(),
+    *bc10_workload_volume_mounts(),
     *hardened_runtime_volume_mounts(),
 ]
 D19_CODE_SANDBOX_INPUT_VOLUME = k8s.V1Volume(
@@ -282,6 +292,11 @@ D19_AGGREGATOR_EXECUTOR_CONFIG = minio_web_identity_executor_config(
     service_account_name=D19_AGGREGATOR_WORKLOAD_SERVICE_ACCOUNT,
     labels=D19_AGGREGATOR_WORKLOAD_LABELS,
 )
+D19_ATTESTOR_VOLUMES = [*D19_AGGREGATOR_VOLUMES, *vault_transit_volumes()]
+D19_ATTESTOR_VOLUME_MOUNTS = [
+    *D19_AGGREGATOR_VOLUME_MOUNTS,
+    *vault_transit_volume_mounts(),
+]
 D19_CODE_SANDBOX_PUBLISHER_RESOURCES = k8s.V1ResourceRequirements(
     requests={"cpu": "500m", "ephemeral-storage": "1Gi", "memory": "1Gi"},
     limits={"cpu": "1000m", "ephemeral-storage": "3Gi", "memory": "3Gi"},
@@ -294,10 +309,22 @@ def d19_aggregator_env_vars() -> list[k8s.V1EnvVar]:
     return minio_web_identity_env_vars(_D19_AGGREGATOR_ENV_NAMES)
 
 
-def d19_model_runner_env_vars() -> list[k8s.V1EnvVar]:
-    """Expose only MinIO STS plus the governed in-cluster Ollama endpoint."""
+def d19_attestor_env_vars() -> list[k8s.V1EnvVar]:
+    """Expose Vault only to the two runtime signing/verification pods."""
 
-    return minio_web_identity_env_vars(_D19_MODEL_RUNNER_ENV_NAMES)
+    return [
+        *d19_aggregator_env_vars(),
+        *vault_transit_env_vars(auth_role="serp-evaluation-runtime-attestor-role"),
+    ]
+
+
+def d19_model_runner_env_vars() -> list[k8s.V1EnvVar]:
+    """Expose only MinIO STS plus the governed BC-10 model gateway."""
+
+    return [
+        *minio_web_identity_env_vars(_D19_MODEL_RUNNER_ENV_NAMES),
+        *bc10_workload_env_vars(),
+    ]
 
 
 def d19_code_sandbox_publisher_env_vars() -> list[k8s.V1EnvVar]:
@@ -327,10 +354,11 @@ def d19_code_sandbox_publisher_env_vars() -> list[k8s.V1EnvVar]:
 
 
 def d19_builder_env_vars() -> list[k8s.V1EnvVar]:
-    """Expose isolated-artifact indexing and BC21 binding authority only."""
+    """Expose isolated-artifact indexing through BC-10 and BC-21 only."""
 
     return [
         *minio_web_identity_env_vars(_D19_BUILDER_ENV_NAMES),
+        *bc10_workload_env_vars(),
         *bc21_workload_env_vars(),
     ]
 
@@ -1237,12 +1265,12 @@ for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARN
                 "--work-item-sha256",
                 work_item_root + "['artifactSha256'] }}",
             ],
-            env_vars=d19_aggregator_env_vars(),
-            service_account_name=D19_AGGREGATOR_WORKLOAD_SERVICE_ACCOUNT,
+            env_vars=d19_model_runner_env_vars(),
+            service_account_name=D19_MODEL_RUNNER_WORKLOAD_SERVICE_ACCOUNT,
             automount_service_account_token=False,
-            volumes=D19_AGGREGATOR_VOLUMES,
-            volume_mounts=D19_AGGREGATOR_VOLUME_MOUNTS,
-            labels=D19_AGGREGATOR_WORKLOAD_LABELS,
+            volumes=D19_MODEL_RUNNER_VOLUMES,
+            volume_mounts=D19_MODEL_RUNNER_VOLUME_MOUNTS,
+            labels=D19_MODEL_RUNNER_WORKLOAD_LABELS,
             container_resources=D19_NATIVE_ADAPTER_RUNNER_RESOURCES,
             security_context=hardened_runtime_pod_security_context(),
             container_security_context=hardened_runtime_container_security_context(),
@@ -1461,11 +1489,11 @@ assemble_paired_execution_manifest = KubernetesPodOperator(
             "['assemblyPlanEvidence']['artifactSha256'] }}"
         ),
     ],
-    env_vars=d19_aggregator_env_vars(),
+    env_vars=d19_attestor_env_vars(),
     service_account_name=D19_AGGREGATOR_WORKLOAD_SERVICE_ACCOUNT,
     automount_service_account_token=False,
-    volumes=D19_AGGREGATOR_VOLUMES,
-    volume_mounts=D19_AGGREGATOR_VOLUME_MOUNTS,
+    volumes=D19_ATTESTOR_VOLUMES,
+    volume_mounts=D19_ATTESTOR_VOLUME_MOUNTS,
     labels=D19_AGGREGATOR_WORKLOAD_LABELS,
     container_resources=D19_NATIVE_ADAPTER_RUNNER_RESOURCES,
     security_context=hardened_runtime_pod_security_context(),
@@ -1516,14 +1544,29 @@ run_paired_evaluation = KubernetesPodOperator(
             "{{ ti.xcom_pull(task_ids='assemble_paired_execution_manifest')"
             "['executionManifestEvidence']['artifactSha256'] }}"
         ),
+        "--execution-manifest-attestation",
+        (
+            "{{ ti.xcom_pull(task_ids='assemble_paired_execution_manifest')"
+            "['executionManifestAttestationEvidence']['artifactPath'] }}"
+        ),
+        "--execution-manifest-attestation-version-id",
+        (
+            "{{ ti.xcom_pull(task_ids='assemble_paired_execution_manifest')"
+            "['executionManifestAttestationEvidence']['artifactVersionId'] }}"
+        ),
+        "--execution-manifest-attestation-sha256",
+        (
+            "{{ ti.xcom_pull(task_ids='assemble_paired_execution_manifest')"
+            "['executionManifestAttestationEvidence']['artifactSha256'] }}"
+        ),
         "--evidence-output",
         "{{ ti.xcom_pull(task_ids='write_paired_eval_request')['evidenceOutputPath'] }}",
     ],
-    env_vars=d19_aggregator_env_vars(),
+    env_vars=d19_attestor_env_vars(),
     service_account_name=D19_AGGREGATOR_WORKLOAD_SERVICE_ACCOUNT,
     automount_service_account_token=False,
-    volumes=D19_AGGREGATOR_VOLUMES,
-    volume_mounts=D19_AGGREGATOR_VOLUME_MOUNTS,
+    volumes=D19_ATTESTOR_VOLUMES,
+    volume_mounts=D19_ATTESTOR_VOLUME_MOUNTS,
     labels=D19_AGGREGATOR_WORKLOAD_LABELS,
     container_resources=D19_NATIVE_ADAPTER_RUNNER_RESOURCES,
     security_context=hardened_runtime_pod_security_context(),
@@ -1536,6 +1579,7 @@ run_paired_evaluation = KubernetesPodOperator(
     on_finish_action="delete_pod",
     retries=0,
     retry_delay=timedelta(seconds=5),
+    do_xcom_push=True,
     executor_config=kubernetes_pod_launcher_executor_config(),
     dag=dag,
 )

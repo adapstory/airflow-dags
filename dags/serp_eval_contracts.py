@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import logging
 import math
 import os
 import re
@@ -23,12 +24,16 @@ from urllib.parse import ParseResult, parse_qsl, unquote, urlparse
 from urllib.request import ProxyHandler, Request, build_opener, urlopen
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+import rfc8785
+
 from dags.public_docs_crawler import CrawlResponse, crawl_public_docs
 from dags.serp_public_docs_seed_catalog import (
     PUBLIC_DOCS_NIGHTLY_SOURCE_CATALOG_PATH,
     STACK_INVENTORY_SOURCE_PATH,
     p0_public_docs_sources,
 )
+
+_LOG = logging.getLogger(__name__)
 
 MANDATORY_SERP_BENCHMARK_SUITES = (
     "APIBench",
@@ -42,7 +47,7 @@ MANDATORY_SERP_BENCHMARK_SUITES = (
     "rusBEIR",
 )
 _D19_CODE_SANDBOX_SUITES = frozenset({"CodeRAG-Bench", "SWE-bench Verified"})
-SERP_NORMALIZED_GATE_FLOOR = 0.75
+SERP_NORMALIZED_GATE_FLOOR = 0.90
 GATEWAY_CLI_MODULE = "adapstory_serp_mcp_gateway.airflow_eval_cli"
 GATEWAY_CLI_PYTHON = "python"
 PIPELINE_CLI_MODULE = "adapstory_serp_pipeline.orchestration.seed_refresh_cli"
@@ -59,9 +64,11 @@ _EVAL_CONTRACT_VERSION = "2026.07.2"
 _BENCHMARK_SUITE_CONTRACT_VERSION = "2026.07.3"
 _BENCHMARK_EVALUATION_CONTRACT_CODE = "d6-evidence-2026.07.3"
 _METRIC_COMPATIBILITY_CONTRACT_VERSION = "serp-suite-metric-compatibility/v1"
-_CI_EVALUATION_RELEASE_CONTRACT_VERSION = "serp-ci-evaluation-release-evidence/v3"
-_EVALUATION_RELEASE_SCHEMA = "EvaluationRelease/v2"
-_EVALUATION_RELEASE_PROMOTION_SCHEMA = "EvaluationReleasePromotionReceipt/v3"
+_CI_EVALUATION_RELEASE_CONTRACT_VERSION = "serp-ci-evaluation-release-evidence/v5"
+_EVALUATION_RELEASE_SCHEMA = "EvaluationRelease/v3"
+_EVALUATION_RELEASE_PROMOTION_SCHEMA = "EvaluationReleasePromotionReceipt/v5"
+_PAIRED_EVALUATION_REQUEST_SCHEMA = "PairedEvaluationRequest/v5"
+_BENCHMARK_CATALOG_PACK_ACTIVATION_SCHEMA = "BenchmarkCatalogPackActivation/v1"
 _MODEL_PROMOTION_DAG_ID = "serp_model_catalog_promotion"
 _EVALUATION_PROFILE_EVIDENCE_FIELDS = (
     "evaluatorRunnerEvidence",
@@ -78,6 +85,20 @@ _EVALUATION_TREATMENT_EVIDENCE_FIELDS = {
     "retrievalProfile": "retrievalProfileEvidence",
     "rerankerProfile": "rerankerProfileEvidence",
     "modelRoute": "modelRouteEvidence",
+}
+_EVALUATION_RELEASE_AUTHORITIES = {
+    "baseline": {
+        "canaryState": "passed",
+        "modelId": "serp-all-nine-baseline-router@2026.07.2",
+        "provider": "adapstory-model-gateway",
+        "purpose": "serp-benchmark-baseline",
+    },
+    "candidate": {
+        "canaryState": "passed",
+        "modelId": "serp-all-nine-candidate-router@2026.07.3",
+        "provider": "adapstory-model-gateway",
+        "purpose": "serp-benchmark-candidate",
+    },
 }
 _BENCHMARK_METRIC_FAMILIES = ("retrieval", "answer-quality", "citation", "policy")
 _STRICT_PRIMARY_RETRIEVAL_METRICS = frozenset({"MRR@10", "nDCG@10"})
@@ -124,9 +145,14 @@ _FORBIDDEN_INLINE_D19_FIELDS = frozenset(
         "reranker_profile_version",
         "retrieval_profile_version",
         "caseResults",
+        "evaluationObjectiveEvidence",
+        "evaluationObjectiveAttestationEvidence",
+        "evaluation_objective_evidence",
+        "evaluation_objective_attestation_evidence",
         "metric",
         "metric_compatibility_matrix_evidence",
         "metricValue",
+        "objectiveSpecificationEvidence",
         "objective_specification_evidence",
         "packId",
         "packVersionId",
@@ -176,6 +202,16 @@ _PUBLIC_DOCS_DEFAULT_MAX_OPTIONAL_FRONTIER_PER_SEED = 4
 _PUBLIC_DOCS_CRAWLER_DISCOVERY_WORKERS_ENV = "ADAPSTORY_SERP_PUBLIC_DOCS_CRAWLER_WORKERS"
 _PUBLIC_DOCS_DEFAULT_CRAWLER_DISCOVERY_WORKERS = 6
 _PUBLIC_DOCS_MAX_CRAWLER_DISCOVERY_WORKERS = 16
+PUBLIC_DOCS_MAX_SEED_COUNT = 128
+PUBLIC_DOCS_MAX_SEED_EVIDENCE_BYTES = 2_000_000
+PUBLIC_DOCS_MAX_TOTAL_SEED_EVIDENCE_BYTES = 16_000_000
+PUBLIC_DOCS_MAX_COMPACT_PLAN_BYTES = 256_000
+PUBLIC_DOCS_MAX_REFRESH_PLAN_BYTES = 16_000_000
+PUBLIC_DOCS_MAX_XCOM_BYTES = 16_000
+_PUBLIC_DOCS_AIRFLOW_PLAN_HANDLE_SCHEMA = "PublicDocsAirflowPlanHandle/v1"
+_PUBLIC_DOCS_AIRFLOW_PLAN_SNAPSHOT_SCHEMA = "PublicDocsAirflowPlanSnapshot/v1"
+_PUBLIC_DOCS_SEED_EVIDENCE_SCHEMA = "PublicDocsSeedEvidence/v1"
+_PUBLIC_DOCS_TASK_ARTIFACT_HANDLE_SCHEMA = "PublicDocsTaskArtifactHandle/v1"
 _ARTIFACT_ROOT_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_ROOT"
 _PUBLIC_DOCS_SEARCH_SERVE_BASE_URL_ENV = "ADAPSTORY_SERP_SEARCH_SERVE_BASE_URL"
 _PUBLIC_DOCS_SEARCH_SERVE_ACTOR_ID_ENV = "ADAPSTORY_SERP_SEARCH_SERVE_ACTOR_ID"
@@ -192,7 +228,13 @@ _BC21_BASE_URL_ENV = "ADAPSTORY_SERP_BC21_BASE_URL"
 _BC21_SERVICE_ACCOUNT_TOKEN_PATH_ENV = "ADAPSTORY_SERP_SERVICE_ACCOUNT_TOKEN_PATH"
 _NIGHTLY_REGRESSION_RUNTIME_ENV = {
     "actor_id": "ADAPSTORY_SERP_D6_ACTOR_ID",
+    "candidate_release_evidence": "ADAPSTORY_SERP_D6_CANDIDATE_RELEASE_EVIDENCE",
+    "evaluation_objective_evidence": "ADAPSTORY_SERP_D6_EVALUATION_OBJECTIVE_EVIDENCE",
     "pack_version_ids": "ADAPSTORY_SERP_D6_PACK_VERSION_IDS",
+    "paired_evaluation_receipt_evidence": ("ADAPSTORY_SERP_D6_PAIRED_EVALUATION_RECEIPT_EVIDENCE"),
+    "paired_evaluation_verification_evidence": (
+        "ADAPSTORY_SERP_D6_PAIRED_EVALUATION_VERIFICATION_EVIDENCE"
+    ),
     "registry_resource_id": "ADAPSTORY_SERP_D6_REGISTRY_RESOURCE_ID",
     "registry_resource_type": "ADAPSTORY_SERP_D6_REGISTRY_RESOURCE_TYPE",
     "reranker_profile_version": "ADAPSTORY_SERP_D6_RERANKER_PROFILE_VERSION",
@@ -544,8 +586,28 @@ def default_nightly_regression_conf(
         ),
         "artifact_root_path": _required_environment_value(values, _ARTIFACT_ROOT_ENV),
         "bc21_base_url": _required_environment_value(values, _BC21_BASE_URL_ENV),
+        "candidateReleaseEvidence": _required_worm_environment_evidence(
+            values,
+            _NIGHTLY_REGRESSION_RUNTIME_ENV["candidate_release_evidence"],
+            "candidateReleaseEvidence",
+        ),
+        "evaluationObjectiveEvidence": _required_worm_environment_evidence(
+            values,
+            _NIGHTLY_REGRESSION_RUNTIME_ENV["evaluation_objective_evidence"],
+            "evaluationObjectiveEvidence",
+        ),
         "generated_at": _required_datetime_string({"generated_at": generated_at}, "generated_at"),
         "pack_version_ids": pack_version_ids,
+        "pairedEvaluationReceiptEvidence": _required_worm_environment_evidence(
+            values,
+            _NIGHTLY_REGRESSION_RUNTIME_ENV["paired_evaluation_receipt_evidence"],
+            "pairedEvaluationReceiptEvidence",
+        ),
+        "pairedEvaluationVerificationEvidence": _required_worm_environment_evidence(
+            values,
+            _NIGHTLY_REGRESSION_RUNTIME_ENV["paired_evaluation_verification_evidence"],
+            "pairedEvaluationVerificationEvidence",
+        ),
         "registry_resource_id": _required_environment_value(
             values, _NIGHTLY_REGRESSION_RUNTIME_ENV["registry_resource_id"]
         ),
@@ -589,6 +651,24 @@ def _required_environment_value(environment: Mapping[str, str], name: str) -> st
     return value.strip()
 
 
+def _required_worm_environment_evidence(
+    environment: Mapping[str, str],
+    name: str,
+    field_name: str,
+) -> dict[str, str]:
+    raw = _required_environment_value(environment, name)
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{name} must be a JSON object") from exc
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{name} must be a JSON object")
+    try:
+        return _worm_evidence_reference({field_name: value}, field_name)
+    except ValueError as exc:
+        raise ValueError(f"{name} is invalid: {exc}") from exc
+
+
 def build_nightly_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
     payload = _payload(conf)
     _reject_raw_secrets(payload)
@@ -605,43 +685,73 @@ def build_nightly_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
     registry_resource_type = _required_resource_type(payload, "registry_resource_type")
     registry_resource_id = _required_uuid(payload, "registry_resource_id")
     artifact_root_path = _required_artifact_root_path(payload)
+    candidate_release_evidence = _worm_evidence_reference(payload, "candidateReleaseEvidence")
+    evaluation_objective_evidence = _worm_evidence_reference(payload, "evaluationObjectiveEvidence")
+    paired_evaluation_receipt_evidence = _worm_evidence_reference(
+        payload, "pairedEvaluationReceiptEvidence"
+    )
+    paired_evaluation_verification_evidence = _worm_evidence_reference(
+        payload, "pairedEvaluationVerificationEvidence"
+    )
+    admission_evidence = (
+        candidate_release_evidence,
+        evaluation_objective_evidence,
+        paired_evaluation_receipt_evidence,
+        paired_evaluation_verification_evidence,
+    )
+    evidence_identities = {(item["s3Uri"], item["versionId"]) for item in admission_evidence}
+    if len(evidence_identities) != len(admission_evidence):
+        raise ValueError("D6 admission evidence must use four distinct immutable versions")
     operation_id = _operation_id(
         "serp-airflow-nightly-plan",
         tenant_id,
         generated_at,
         ",".join(str(value) for value in pack_version_ids),
         ",".join(selected_suite_ids),
+        *(f"{item['sha256']}@{item['versionId']}" for item in admission_evidence),
         "serp-benchmark-catalog/v1",
+    )
+    artifact_paths = _artifact_paths(
+        artifact_root_path,
+        operation_id,
+        (
+            ("airflow_plan", "airflow-plan.json"),
+            ("suite_plan", "suite-plan.json"),
+            ("nightly_report", "nightly-report.json"),
+            ("benchmark_gate_export", "benchmark-gate-export.json"),
+            ("benchmark_catalog", "benchmark-catalog.json"),
+            (
+                "benchmark_catalog_receipt",
+                "benchmark-catalog-materialization-receipt.json",
+            ),
+            (
+                "nightly_registry_submissions",
+                "nightly-registry-submissions.json",
+            ),
+            ("nightly_registry_receipts", "nightly-registry-receipts.json"),
+        ),
+    )
+    artifact_paths.update(
+        {
+            "evaluation_objective": evaluation_objective_evidence["s3Uri"],
+            "paired_evaluation_receipt": paired_evaluation_receipt_evidence["s3Uri"],
+            "paired_evaluation_verification": paired_evaluation_verification_evidence["s3Uri"],
+        }
     )
     plan_payload = {
         "actor_id": _required_str(payload, "actor_id"),
         "artifact_root_path": artifact_root_path,
-        "artifact_paths": _artifact_paths(
-            artifact_root_path,
-            operation_id,
-            (
-                ("airflow_plan", "airflow-plan.json"),
-                ("suite_plan", "suite-plan.json"),
-                ("nightly_report", "nightly-report.json"),
-                ("benchmark_gate_export", "benchmark-gate-export.json"),
-                ("benchmark_catalog", "benchmark-catalog.json"),
-                (
-                    "benchmark_catalog_receipt",
-                    "benchmark-catalog-materialization-receipt.json",
-                ),
-                (
-                    "nightly_registry_submissions",
-                    "nightly-registry-submissions.json",
-                ),
-                ("nightly_registry_receipts", "nightly-registry-receipts.json"),
-            ),
-        ),
+        "artifact_paths": artifact_paths,
         "bc21_base_url": _required_bc21_base_url(payload),
+        "candidateReleaseEvidence": candidate_release_evidence,
         "dag_id": "serp_nightly_regression_suite",
+        "evaluationObjectiveEvidence": evaluation_objective_evidence,
         "generated_at": generated_at,
         "normalized_gate_floor": SERP_NORMALIZED_GATE_FLOOR,
         "operation_id": operation_id,
         "pack_version_ids": [str(value) for value in pack_version_ids],
+        "pairedEvaluationReceiptEvidence": paired_evaluation_receipt_evidence,
+        "pairedEvaluationVerificationEvidence": paired_evaluation_verification_evidence,
         "registry_resource_id": str(registry_resource_id),
         "registry_resource_type": registry_resource_type,
         "reranker_profile_version": _required_str(payload, "reranker_profile_version"),
@@ -855,7 +965,7 @@ def build_model_catalog_promotion_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
         raise ValueError("model catalog promotion requires an s3:// artifact_root_path")
     for legacy_field in ("baseline_release_evidence", "candidate_release_evidence"):
         if legacy_field in payload:
-            raise ValueError(f"{legacy_field} is forbidden; use evaluation_release_evidence v2")
+            raise ValueError(f"{legacy_field} is forbidden; use evaluation_release_evidence")
     ci_bundle = _normalized_ci_evaluation_release_bundle(
         _required_mapping(payload, "evaluation_release_evidence")
     )
@@ -871,12 +981,21 @@ def build_model_catalog_promotion_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
     metric_matrix_evidence = _worm_evidence_reference(
         ci_bundle, "metricCompatibilityMatrixEvidence"
     )
-    objective_evidence = _worm_evidence_reference(ci_bundle, "objectiveSpecificationEvidence")
+    evaluation_objective_evidence = _worm_evidence_reference(
+        ci_bundle, "evaluationObjectiveEvidence"
+    )
+    evaluation_objective_attestation_evidence = _worm_evidence_reference(
+        ci_bundle, "evaluationObjectiveAttestationEvidence"
+    )
     for field_name, evidence in (
         ("baseline_release_evidence", baseline_release_evidence),
         ("candidate_release_evidence", candidate_release_evidence),
         ("metric_compatibility_matrix_evidence", metric_matrix_evidence),
-        ("objective_specification_evidence", objective_evidence),
+        ("evaluation_objective_evidence", evaluation_objective_evidence),
+        (
+            "evaluation_objective_attestation_evidence",
+            evaluation_objective_attestation_evidence,
+        ),
     ):
         _require_worm_evidence_within_artifact_root(evidence, artifact_root_path, field_name)
     if baseline_release_evidence == candidate_release_evidence:
@@ -888,7 +1007,8 @@ def build_model_catalog_promotion_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
         baseline_release_evidence["sha256"],
         candidate_release_evidence["sha256"],
         metric_matrix_evidence["sha256"],
-        objective_evidence["sha256"],
+        evaluation_objective_evidence["sha256"],
+        evaluation_objective_attestation_evidence["sha256"],
         generated_at,
     )
     return SerpDagPlan(
@@ -910,7 +1030,10 @@ def build_model_catalog_promotion_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
             "generated_at": generated_at,
             "operation_id": operation_id,
             "metric_compatibility_matrix_evidence": metric_matrix_evidence,
-            "objective_specification_evidence": objective_evidence,
+            "evaluation_objective_evidence": evaluation_objective_evidence,
+            "evaluation_objective_attestation_evidence": (
+                evaluation_objective_attestation_evidence
+            ),
             "promotion_id": promotion_id,
             "registry_resource_id": str(registry_resource_id),
             "registry_resource_type": registry_resource_type,
@@ -928,7 +1051,7 @@ def build_model_catalog_promotion_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
 
 
 def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
-    """Create scoreless D19 from immutable v2 governance references only."""
+    """Create scoreless D19 from immutable v4 promotion authority only."""
 
     payload = _payload(conf)
     _reject_raw_secrets(payload)
@@ -964,6 +1087,10 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
                 (
                     "benchmark_catalog_receipt",
                     "benchmark-catalog-materialization-receipt.json",
+                ),
+                (
+                    "benchmark_catalog_pack_activation",
+                    "benchmark-catalog-pack-activation.json",
                 ),
                 ("paired_eval_request", "paired-eval-request.json"),
                 ("paired_eval_receipt", "paired-eval-receipt.json"),
@@ -1074,7 +1201,8 @@ def _normalized_ci_evaluation_release_bundle(payload: Mapping[str, Any]) -> dict
         "contractVersion",
         "kind",
         "metricCompatibilityMatrixEvidence",
-        "objectiveSpecificationEvidence",
+        "evaluationObjectiveEvidence",
+        "evaluationObjectiveAttestationEvidence",
         "operationId",
         "registryResourceId",
         "registryResourceType",
@@ -1104,8 +1232,11 @@ def _normalized_ci_evaluation_release_bundle(payload: Mapping[str, Any]) -> dict
         "metricCompatibilityMatrixEvidence": _worm_evidence_reference(
             payload, "metricCompatibilityMatrixEvidence"
         ),
-        "objectiveSpecificationEvidence": _worm_evidence_reference(
-            payload, "objectiveSpecificationEvidence"
+        "evaluationObjectiveEvidence": _worm_evidence_reference(
+            payload, "evaluationObjectiveEvidence"
+        ),
+        "evaluationObjectiveAttestationEvidence": _worm_evidence_reference(
+            payload, "evaluationObjectiveAttestationEvidence"
         ),
         "registryResourceId": str(_required_uuid(payload, "registryResourceId")),
         "registryResourceType": _required_resource_type(payload, "registryResourceType"),
@@ -1238,15 +1369,31 @@ def load_model_catalog_promotion_snapshot(
     release_client = s3_client or _s3_read_client(
         *(evidence["s3Uri"] for _, evidence in release_evidence)
     )
+    actual_releases: dict[str, Mapping[str, Any]] = {}
     for role, evidence in release_evidence:
         recorded = normalized[role]
         actual = _load_governed_evaluation_release(
             evidence, field_name=f"{role}.evidence", s3_client=release_client
         )
+        actual_releases[role] = actual["release"]
         if _required_str(actual["release"], "releaseDigest") != _required_str(
             recorded, "releaseDigest"
         ):
             raise ValueError(f"D17 {role} digest no longer matches its immutable manifest")
+    _validate_evaluation_release_pair(
+        actual_releases["baselineRelease"], actual_releases["candidateRelease"]
+    )
+    expected_candidate_authority = {
+        **_normalized_evaluation_release_authority(
+            _required_mapping(actual_releases["candidateRelease"], "releaseAuthority"),
+            "candidateRelease.releaseAuthority",
+        ),
+        "evidence": dict(release_evidence[1][1]),
+        "releaseDigest": _required_str(actual_releases["candidateRelease"], "releaseDigest"),
+        "releaseId": _required_str(actual_releases["candidateRelease"], "releaseId"),
+    }
+    if normalized["candidateReleaseAuthority"] != expected_candidate_authority:
+        raise ValueError("D17 candidateReleaseAuthority no longer matches its immutable manifest")
     return {"promotionEvidence": receipt_evidence, "promotion": normalized}
 
 
@@ -1268,7 +1415,7 @@ def load_benchmark_pack_lifecycle_result_snapshot(
     if evidence["artifactPath"] != artifact_paths["benchmark_pack_lifecycle_result"]:
         raise ValueError("D19 lifecycle result artifact path does not match plan")
     client = s3_client or _s3_read_client(evidence["artifactPath"])
-    payload, observed_version_id = _read_compliance_locked_s3_bytes(
+    payload, observed_version_id, _ = _read_compliance_locked_s3_bytes(
         client,
         evidence["artifactPath"],
         field_name="benchmark pack lifecycle result",
@@ -1278,7 +1425,7 @@ def load_benchmark_pack_lifecycle_result_snapshot(
         raise ValueError("D19 lifecycle result VersionId does not match evidence")
     if "sha256:" + sha256(payload).hexdigest() != evidence["artifactSha256"]:
         raise ValueError("D19 lifecycle result SHA-256 does not match evidence")
-    lifecycle_result = _json_object(payload.decode("utf-8"), "lifecycle_result")
+    lifecycle_result = _canonical_json_object_bytes(payload, "lifecycle_result")
     promotion = _validated_d19_promotion_snapshot(plan, promotion_snapshot)
     return _validated_d19_lifecycle_result(plan, promotion, lifecycle_result)
 
@@ -1309,7 +1456,7 @@ def _load_worm_json_evidence(
     field_name: str,
     s3_client: Any,
 ) -> Mapping[str, Any]:
-    payload, observed_version_id = _read_compliance_locked_s3_bytes(
+    payload, observed_version_id, _ = _read_compliance_locked_s3_bytes(
         s3_client,
         evidence["s3Uri"],
         field_name=field_name,
@@ -1319,10 +1466,7 @@ def _load_worm_json_evidence(
         raise ValueError(f"{field_name} VersionId does not match immutable evidence")
     if "sha256:" + sha256(payload).hexdigest() != evidence["sha256"]:
         raise ValueError(f"{field_name} SHA-256 does not match immutable evidence")
-    try:
-        return _json_object(payload.decode("utf-8"), field_name)
-    except UnicodeDecodeError as exc:
-        raise ValueError(f"{field_name} is not UTF-8 JSON") from exc
+    return _canonical_json_object_bytes(payload, field_name)
 
 
 def _normalize_evaluation_release(
@@ -1335,6 +1479,7 @@ def _normalize_evaluation_release(
         "releaseDigest",
         "runtimeEvidence",
         "profileSetEvidence",
+        "releaseAuthority",
         "suiteProfiles",
     }
     if set(payload) != expected:
@@ -1386,12 +1531,17 @@ def _normalize_evaluation_release(
         {"suiteProfiles": _required_object_list(profile_set, "suiteProfiles")}
     ) != _canonical_json({"suiteProfiles": suite_profiles}):
         raise ValueError(f"{field_name} suite profiles do not match profileSetEvidence")
+    release_authority = _normalized_evaluation_release_authority(
+        _required_mapping(payload, "releaseAuthority"),
+        f"{field_name}.releaseAuthority",
+    )
     release_core = {
         "schema": _EVALUATION_RELEASE_SCHEMA,
         "activationStatus": "ready-for-evaluation",
         "releaseId": _required_str(payload, "releaseId"),
         "runtimeEvidence": runtime_evidence,
         "profileSetEvidence": profile_set_evidence,
+        "releaseAuthority": release_authority,
         "suiteProfiles": suite_profiles,
     }
     release_digest = _required_sha256_prefixed(payload, "releaseDigest")
@@ -1505,6 +1655,16 @@ def _validated_evaluation_release_binding(
 def _validate_evaluation_release_pair(
     baseline: Mapping[str, Any], candidate: Mapping[str, Any]
 ) -> None:
+    if (
+        _required_mapping(baseline, "releaseAuthority")
+        != _EVALUATION_RELEASE_AUTHORITIES["baseline"]
+    ):
+        raise ValueError("baseline releaseAuthority is not the governed baseline authority")
+    if (
+        _required_mapping(candidate, "releaseAuthority")
+        != _EVALUATION_RELEASE_AUTHORITIES["candidate"]
+    ):
+        raise ValueError("candidate releaseAuthority is not the governed candidate authority")
     if _required_str(baseline, "releaseId") == _required_str(candidate, "releaseId"):
         raise ValueError("baseline and candidate releaseId must differ")
     if _required_str(baseline, "releaseDigest") == _required_str(candidate, "releaseDigest"):
@@ -1543,33 +1703,13 @@ def _validate_evaluation_release_pair(
             raise ValueError(f"candidate {suite_id} must have genuine treatment component deltas")
 
 
-def _load_immutable_json_evidence(
-    evidence: Mapping[str, str],
-    *,
-    field_name: str,
-    s3_client: Any,
-) -> Mapping[str, Any]:
-    payload, observed_version_id = _read_compliance_locked_s3_bytes(
-        s3_client,
-        evidence["artifactPath"],
-        field_name=field_name,
-        version_id=evidence["artifactVersionId"],
-    )
-    if observed_version_id != evidence["artifactVersionId"]:
-        raise ValueError(f"{field_name} VersionId does not match immutable evidence")
-    if "sha256:" + sha256(payload).hexdigest() != evidence["artifactSha256"]:
-        raise ValueError(f"{field_name} SHA-256 does not match immutable evidence")
-    try:
-        return _json_object(payload.decode("utf-8"), field_name)
-    except UnicodeDecodeError as exc:
-        raise ValueError(f"{field_name} is not UTF-8 JSON") from exc
-
-
 def _model_promotion_receipt_payload(
     plan: Mapping[str, Any],
     baseline: Mapping[str, Any],
     candidate: Mapping[str, Any],
 ) -> dict[str, Any]:
+    candidate_release = _required_mapping(candidate, "release")
+    candidate_evidence = dict(_required_mapping(candidate, "evidence"))
     return {
         "schema": _EVALUATION_RELEASE_PROMOTION_SCHEMA,
         "baselineRelease": {
@@ -1577,16 +1717,26 @@ def _model_promotion_receipt_payload(
             "releaseDigest": _required_str(_required_mapping(baseline, "release"), "releaseDigest"),
         },
         "candidateRelease": {
-            "evidence": dict(_required_mapping(candidate, "evidence")),
-            "releaseDigest": _required_str(
-                _required_mapping(candidate, "release"), "releaseDigest"
+            "evidence": candidate_evidence,
+            "releaseDigest": _required_str(candidate_release, "releaseDigest"),
+        },
+        "candidateReleaseAuthority": {
+            **_normalized_evaluation_release_authority(
+                _required_mapping(candidate_release, "releaseAuthority"),
+                "candidateRelease.releaseAuthority",
             ),
+            "evidence": candidate_evidence,
+            "releaseDigest": _required_str(candidate_release, "releaseDigest"),
+            "releaseId": _required_str(candidate_release, "releaseId"),
         },
         "metricCompatibilityMatrixEvidence": dict(
             _required_mapping(plan, "metric_compatibility_matrix_evidence")
         ),
-        "objectiveSpecificationEvidence": dict(
-            _required_mapping(plan, "objective_specification_evidence")
+        "evaluationObjectiveEvidence": dict(
+            _required_mapping(plan, "evaluation_objective_evidence")
+        ),
+        "evaluationObjectiveAttestationEvidence": dict(
+            _required_mapping(plan, "evaluation_objective_attestation_evidence")
         ),
         "dagId": _MODEL_PROMOTION_DAG_ID,
         "generatedAt": _required_str(plan, "generated_at"),
@@ -1606,8 +1756,10 @@ def _validated_evaluation_release_promotion_receipt(
         "schema",
         "baselineRelease",
         "candidateRelease",
+        "candidateReleaseAuthority",
         "metricCompatibilityMatrixEvidence",
-        "objectiveSpecificationEvidence",
+        "evaluationObjectiveEvidence",
+        "evaluationObjectiveAttestationEvidence",
         "dagId",
         "generatedAt",
         "operationId",
@@ -1642,15 +1794,26 @@ def _validated_evaluation_release_promotion_receipt(
         raise ValueError("D17 promotion release evidence must be distinct")
     if baseline["releaseDigest"] == candidate["releaseDigest"]:
         raise ValueError("D17 promotion release digests must be distinct")
+    candidate_authority = _validated_candidate_release_authority(
+        _required_mapping(receipt, "candidateReleaseAuthority")
+    )
+    if candidate_authority["evidence"] != candidate["evidence"]:
+        raise ValueError("D17 candidateReleaseAuthority evidence does not match candidateRelease")
+    if candidate_authority["releaseDigest"] != candidate["releaseDigest"]:
+        raise ValueError("D17 candidateReleaseAuthority digest does not match candidateRelease")
     return {
         "schema": _EVALUATION_RELEASE_PROMOTION_SCHEMA,
         "baselineRelease": baseline,
         "candidateRelease": candidate,
+        "candidateReleaseAuthority": candidate_authority,
         "metricCompatibilityMatrixEvidence": _worm_evidence_reference(
             receipt, "metricCompatibilityMatrixEvidence"
         ),
-        "objectiveSpecificationEvidence": _worm_evidence_reference(
-            receipt, "objectiveSpecificationEvidence"
+        "evaluationObjectiveEvidence": _worm_evidence_reference(
+            receipt, "evaluationObjectiveEvidence"
+        ),
+        "evaluationObjectiveAttestationEvidence": _worm_evidence_reference(
+            receipt, "evaluationObjectiveAttestationEvidence"
         ),
         "operationId": _required_str(receipt, "operationId"),
         "promotionId": _required_str(receipt, "promotionId"),
@@ -1668,6 +1831,50 @@ def _validated_promoted_release_reference(
     return {
         "evidence": _worm_evidence_reference(binding, "evidence"),
         "releaseDigest": _required_sha256_prefixed(binding, "releaseDigest"),
+    }
+
+
+def _normalized_evaluation_release_authority(
+    authority: Mapping[str, Any], field_name: str
+) -> dict[str, str]:
+    expected_fields = {"canaryState", "modelId", "provider", "purpose"}
+    if set(authority) != expected_fields:
+        raise ValueError(f"{field_name} must define exactly {sorted(expected_fields)}")
+    normalized = {field: _required_str(authority, field) for field in sorted(expected_fields)}
+    if normalized["canaryState"] != "passed":
+        raise ValueError(f"{field_name}.canaryState must be passed")
+    if normalized not in _EVALUATION_RELEASE_AUTHORITIES.values():
+        raise ValueError(f"{field_name} is not a governed release authority")
+    return normalized
+
+
+def _validated_candidate_release_authority(
+    authority: Mapping[str, Any],
+) -> dict[str, Any]:
+    expected_fields = {
+        "canaryState",
+        "evidence",
+        "modelId",
+        "provider",
+        "purpose",
+        "releaseDigest",
+        "releaseId",
+    }
+    if set(authority) != expected_fields:
+        raise ValueError(
+            "candidateReleaseAuthority must define exactly " f"{sorted(expected_fields)}"
+        )
+    normalized_authority = _normalized_evaluation_release_authority(
+        {field: authority[field] for field in ("canaryState", "modelId", "provider", "purpose")},
+        "candidateReleaseAuthority",
+    )
+    if normalized_authority != _EVALUATION_RELEASE_AUTHORITIES["candidate"]:
+        raise ValueError("candidateReleaseAuthority is not the governed candidate authority")
+    return {
+        **normalized_authority,
+        "evidence": _worm_evidence_reference(authority, "evidence"),
+        "releaseDigest": _required_sha256_prefixed(authority, "releaseDigest"),
+        "releaseId": _required_str(authority, "releaseId"),
     }
 
 
@@ -1712,6 +1919,19 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
         "public_docs_seed_refresh_plan_path",
         _required_str(payload, "public_docs_seed_refresh_plan_path"),
     )
+    raw_seed_refresh_plan_evidence = payload.get("public_docs_seed_refresh_plan_evidence")
+    seed_refresh_plan_evidence: dict[str, str] | None = None
+    if raw_seed_refresh_plan_evidence is not None:
+        if not isinstance(raw_seed_refresh_plan_evidence, Mapping):
+            raise ValueError("public_docs_seed_refresh_plan_evidence must be an object")
+        seed_refresh_plan_evidence = _validated_public_docs_exact_evidence_handle(
+            raw_seed_refresh_plan_evidence,
+            "public docs seed refresh plan evidence",
+        )
+        if seed_refresh_plan_evidence["s3Uri"] != seed_refresh_plan_path:
+            raise ValueError("public docs seed refresh plan evidence URI does not match its path")
+    if seed_refresh_plan_path.startswith("s3://") and seed_refresh_plan_evidence is None:
+        raise ValueError("public_docs_seed_refresh_plan_evidence is required for S3 plans")
     seed_refresh_identity = _public_docs_seed_refresh_result_identity(seed_refresh_result_path)
     if seed_refresh_identity["tenant_id"] != str(tenant_id):
         raise ValueError("public_docs_seed_refresh_result identity must match tenant_id")
@@ -1755,6 +1975,7 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
         generated_at,
         previous_active_pack_version_id or "",
         seed_refresh_plan_path,
+        _canonical_json(seed_refresh_plan_evidence) if seed_refresh_plan_evidence else "",
         seed_refresh_result_path,
         approval_idempotency_key,
         evidence_bundle_id,
@@ -1830,6 +2051,11 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
         "policy_version": _required_str(payload, "policy_version"),
         "public_docs_seed_refresh_result_path": seed_refresh_result_path,
         "public_docs_seed_refresh_plan_path": seed_refresh_plan_path,
+        **(
+            {"public_docs_seed_refresh_plan_evidence": seed_refresh_plan_evidence}
+            if seed_refresh_plan_evidence is not None
+            else {}
+        ),
         "public_docs_crawl_state_path": crawl_state_path,
         **(
             {"previous_active_pack_version_id": previous_active_pack_version_id}
@@ -2170,8 +2396,33 @@ def write_airflow_plan_artifact(plan: SerpDagPlan) -> str:
         plan.payload,
         ("airflow_plan",),
     )
-    _write_json_artifact(artifact_paths["airflow_plan"], plan.payload)
+    artifact_payload = (
+        _nightly_gateway_airflow_plan_payload(plan.payload)
+        if plan.payload.get("dag_id") == "serp_nightly_regression_suite"
+        else plan.payload
+    )
+    _write_json_artifact(artifact_paths["airflow_plan"], artifact_payload)
     return plan_json
+
+
+def _nightly_gateway_airflow_plan_payload(plan: Mapping[str, Any]) -> dict[str, Any]:
+    """Project the internal D6 plan onto the gateway's exact admission contract."""
+
+    return {
+        "actor_id": _required_str(plan, "actor_id"),
+        "candidateReleaseEvidence": dict(_required_mapping(plan, "candidateReleaseEvidence")),
+        "dag_id": _required_str(plan, "dag_id"),
+        "generated_at": _required_datetime_string(plan, "generated_at"),
+        "normalized_gate_floor": _required_number(plan, "normalized_gate_floor"),
+        "operation_id": _required_str(plan, "operation_id"),
+        "pack_version_ids": _required_str_list(plan, "pack_version_ids"),
+        "registry_resource_id": _required_str(plan, "registry_resource_id"),
+        "registry_resource_type": _required_resource_type(plan, "registry_resource_type"),
+        "reranker_profile_version": _required_str(plan, "reranker_profile_version"),
+        "retrieval_profile_version": _required_str(plan, "retrieval_profile_version"),
+        "selected_suite_ids": _required_str_list(plan, "selected_suite_ids"),
+        "tenant_id": _required_str(plan, "tenant_id"),
+    }
 
 
 def build_evidence_artifact_paths(
@@ -2328,6 +2579,622 @@ def _verify_compliance_locked_evidence_version(
     return retain_until.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
+def write_public_docs_airflow_plan_snapshot(
+    plan: SerpDagPlan,
+    *,
+    s3_client: Any | None = None,
+) -> dict[str, Any]:
+    """Seal D20 seed evidence separately and return a bounded XCom handle.
+
+    Crawler evidence is deliberately absent from the returned object and from
+    the compact Airflow plan. Each seed is stored as its own exact-version
+    COMPLIANCE object so every downstream task can independently replay and
+    verify it without materializing a multi-megabyte XCom value.
+    """
+
+    payload = plan.payload
+    _reject_raw_secrets(payload)
+    if _required_str(payload, "dag_id") != "serp_web_seed_crawl_refresh":
+        raise ValueError("public docs plan snapshot only supports the D20 DAG")
+    seeds = _required_object_list(payload, "seed_registry")
+    if not seeds:
+        raise ValueError("public docs plan snapshot requires at least one seed")
+    if len(seeds) > PUBLIC_DOCS_MAX_SEED_COUNT:
+        raise ValueError(
+            "public docs seed count exceeds the governed ceiling: "
+            f"{len(seeds)} > {PUBLIC_DOCS_MAX_SEED_COUNT}"
+        )
+    operation_id = _required_str(payload, "operation_id")
+    artifact_root_path = _required_artifact_root_path(payload)
+    if not artifact_root_path.startswith("s3://"):
+        raise ValueError("public docs plan snapshots require an s3:// artifact root")
+    artifact_paths = _required_artifact_paths(payload, ("airflow_plan",))
+    client = s3_client or _s3_client(artifact_paths["airflow_plan"])
+    seed_evidence: list[dict[str, Any]] = []
+    total_seed_bytes = 0
+    seen_seed_ids: set[str] = set()
+    for index, seed in enumerate(seeds):
+        seed_id = _required_str(seed, "seed_id")
+        if seed_id in seen_seed_ids:
+            raise ValueError(f"duplicate public docs seed_id in snapshot: {seed_id}")
+        seen_seed_ids.add(seed_id)
+        _validate_public_docs_seed_evidence_limits(seed)
+        seed_snapshot = {
+            "operationId": operation_id,
+            "schema": _PUBLIC_DOCS_SEED_EVIDENCE_SCHEMA,
+            "seed": dict(seed),
+            "seedId": seed_id,
+        }
+        seed_bytes = _canonical_json(seed_snapshot).encode("utf-8")
+        if len(seed_bytes) > PUBLIC_DOCS_MAX_SEED_EVIDENCE_BYTES:
+            raise ValueError(
+                "public docs seed evidence exceeds the governed byte ceiling: "
+                f"seed_id={seed_id} bytes={len(seed_bytes)} "
+                f"limit={PUBLIC_DOCS_MAX_SEED_EVIDENCE_BYTES}"
+            )
+        total_seed_bytes += len(seed_bytes)
+        if total_seed_bytes > PUBLIC_DOCS_MAX_TOTAL_SEED_EVIDENCE_BYTES:
+            raise ValueError(
+                "public docs aggregate seed evidence exceeds the governed byte ceiling: "
+                f"bytes={total_seed_bytes} limit={PUBLIC_DOCS_MAX_TOTAL_SEED_EVIDENCE_BYTES}"
+            )
+        seed_filename = (
+            "public-docs-seed-evidence/"
+            f"{index:04d}-{sha256(seed_id.encode('utf-8')).hexdigest()[:16]}.json"
+        )
+        seed_path = _artifact_paths(
+            artifact_root_path,
+            operation_id,
+            (("seed", seed_filename),),
+        )["seed"]
+        written = write_immutable_evidence_snapshot(
+            seed_path,
+            artifact_type="public_docs_seed_evidence",
+            operation_id=operation_id,
+            payload=seed_snapshot,
+            s3_client=client,
+        )
+        _LOG.info(
+            "public docs seed WORM snapshot written operation_id=%s seed_ordinal=%d/%d "
+            "seed_id_sha256=%s version_id=%s",
+            operation_id,
+            index + 1,
+            len(seeds),
+            sha256(seed_id.encode("utf-8")).hexdigest(),
+            _required_str(written, "artifactVersionId"),
+        )
+        seed_evidence.append(
+            {
+                "evidence": _public_docs_exact_evidence_handle(written),
+                "summary": _public_docs_seed_evidence_summary(seed),
+            }
+        )
+
+    compact_plan = dict(payload)
+    compact_plan.pop("seed_registry")
+    plan_snapshot = {
+        "plan": compact_plan,
+        "schema": _PUBLIC_DOCS_AIRFLOW_PLAN_SNAPSHOT_SCHEMA,
+        "seedEvidence": seed_evidence,
+    }
+    plan_snapshot_bytes = _canonical_json(plan_snapshot).encode("utf-8")
+    if len(plan_snapshot_bytes) > PUBLIC_DOCS_MAX_COMPACT_PLAN_BYTES:
+        raise ValueError(
+            "public docs compact plan exceeds the governed byte ceiling: "
+            f"bytes={len(plan_snapshot_bytes)} limit={PUBLIC_DOCS_MAX_COMPACT_PLAN_BYTES}"
+        )
+    written_plan = write_immutable_evidence_snapshot(
+        artifact_paths["airflow_plan"],
+        artifact_type="public_docs_airflow_plan_snapshot",
+        operation_id=operation_id,
+        payload=plan_snapshot,
+        s3_client=client,
+    )
+    _LOG.info(
+        "public docs compact plan WORM snapshot written operation_id=%s seed_count=%d "
+        "version_id=%s",
+        operation_id,
+        len(seeds),
+        _required_str(written_plan, "artifactVersionId"),
+    )
+    handle = {
+        "planEvidence": _public_docs_exact_evidence_handle(written_plan),
+        "schema": _PUBLIC_DOCS_AIRFLOW_PLAN_HANDLE_SCHEMA,
+        "summary": {
+            "generatedAt": _required_datetime_string(payload, "generated_at"),
+            "operationId": operation_id,
+            "seedCount": len(seeds),
+            "sourceTypeCounts": dict(_required_mapping(payload, "source_type_counts")),
+        },
+    }
+    handle_size = len(_canonical_json(handle).encode("utf-8"))
+    if handle_size > PUBLIC_DOCS_MAX_XCOM_BYTES:
+        raise ValueError(
+            "public docs XCom handle exceeds the governed byte ceiling: "
+            f"bytes={handle_size} limit={PUBLIC_DOCS_MAX_XCOM_BYTES}"
+        )
+    return handle
+
+
+def load_public_docs_airflow_plan_snapshot(
+    handle: Mapping[str, Any] | str,
+    *,
+    s3_client: Any | None = None,
+) -> dict[str, Any]:
+    """Re-read a D20 plan and every seed by exact VersionId and SHA-256."""
+
+    plan, _snapshot = _load_public_docs_airflow_plan_snapshot_bundle(
+        handle,
+        s3_client=s3_client,
+    )
+    return plan
+
+
+def _load_public_docs_airflow_plan_snapshot_bundle(
+    handle: Mapping[str, Any] | str,
+    *,
+    s3_client: Any | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    normalized_handle = _json_object(handle, "public_docs_plan_handle")
+    if set(normalized_handle) != {"planEvidence", "schema", "summary"}:
+        raise ValueError("public docs plan handle shape is invalid")
+    if _required_str(normalized_handle, "schema") != _PUBLIC_DOCS_AIRFLOW_PLAN_HANDLE_SCHEMA:
+        raise ValueError("public docs plan handle schema is unsupported")
+    if len(_canonical_json(normalized_handle).encode("utf-8")) > PUBLIC_DOCS_MAX_XCOM_BYTES:
+        raise ValueError("public docs plan handle exceeds the governed XCom byte ceiling")
+    plan_evidence = _validated_public_docs_exact_evidence_handle(
+        _required_mapping(normalized_handle, "planEvidence"),
+        "public docs plan evidence",
+    )
+    client = s3_client or _s3_client(plan_evidence["s3Uri"])
+    plan_bytes = _read_public_docs_exact_evidence_bytes(
+        plan_evidence,
+        field_name="public docs plan evidence",
+        s3_client=client,
+        max_bytes=PUBLIC_DOCS_MAX_COMPACT_PLAN_BYTES,
+    )
+    try:
+        raw_snapshot = json.loads(plan_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("public docs plan evidence is not valid JSON") from exc
+    if not isinstance(raw_snapshot, Mapping):
+        raise ValueError("public docs plan evidence must be a JSON object")
+    if set(raw_snapshot) != {"plan", "schema", "seedEvidence"}:
+        raise ValueError("public docs plan evidence shape is invalid")
+    if _required_str(raw_snapshot, "schema") != _PUBLIC_DOCS_AIRFLOW_PLAN_SNAPSHOT_SCHEMA:
+        raise ValueError("public docs plan evidence schema is unsupported")
+    compact_plan = dict(_required_mapping(raw_snapshot, "plan"))
+    if "seed_registry" in compact_plan:
+        raise ValueError("public docs compact plan must not contain inline seed evidence")
+    if _required_str(compact_plan, "dag_id") != "serp_web_seed_crawl_refresh":
+        raise ValueError("public docs compact plan dag_id is unsupported")
+    operation_id = _required_str(compact_plan, "operation_id")
+    artifact_paths = _required_artifact_paths(compact_plan, ("airflow_plan",))
+    if plan_evidence["s3Uri"] != artifact_paths["airflow_plan"]:
+        raise ValueError("public docs plan evidence URI does not match the canonical plan path")
+    seed_evidence = raw_snapshot.get("seedEvidence")
+    if not isinstance(seed_evidence, list) or not seed_evidence:
+        raise ValueError("public docs plan evidence must contain seed handles")
+    if len(seed_evidence) > PUBLIC_DOCS_MAX_SEED_COUNT:
+        raise ValueError("public docs plan evidence seed count exceeds the governed ceiling")
+    if len(seed_evidence) != _required_positive_int(compact_plan, "seed_count"):
+        raise ValueError("public docs plan evidence seed count does not match the plan")
+    seed_prefix = (
+        _required_artifact_root_path(compact_plan).rstrip("/")
+        + "/"
+        + operation_id
+        + "/public-docs-seed-evidence/"
+    )
+    seeds: list[dict[str, Any]] = []
+    normalized_seed_evidence: list[dict[str, Any]] = []
+    total_seed_bytes = 0
+    for raw_entry in seed_evidence:
+        if not isinstance(raw_entry, Mapping) or set(raw_entry) != {"evidence", "summary"}:
+            raise ValueError("public docs seed evidence entry shape is invalid")
+        evidence = _validated_public_docs_exact_evidence_handle(
+            _required_mapping(raw_entry, "evidence"),
+            "public docs seed evidence",
+        )
+        if not evidence["s3Uri"].startswith(seed_prefix):
+            raise ValueError("public docs seed evidence URI escapes the operation prefix")
+        summary = dict(_required_mapping(raw_entry, "summary"))
+        seed_bytes = _read_public_docs_exact_evidence_bytes(
+            evidence,
+            field_name="public docs seed evidence",
+            s3_client=client,
+            max_bytes=PUBLIC_DOCS_MAX_SEED_EVIDENCE_BYTES,
+        )
+        total_seed_bytes += len(seed_bytes)
+        if total_seed_bytes > PUBLIC_DOCS_MAX_TOTAL_SEED_EVIDENCE_BYTES:
+            raise ValueError(
+                "public docs aggregate seed evidence exceeds the governed byte ceiling"
+            )
+        try:
+            raw_seed_snapshot = json.loads(seed_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("public docs seed evidence is not valid JSON") from exc
+        if not isinstance(raw_seed_snapshot, Mapping) or set(raw_seed_snapshot) != {
+            "operationId",
+            "schema",
+            "seed",
+            "seedId",
+        }:
+            raise ValueError("public docs seed evidence shape is invalid")
+        if _required_str(raw_seed_snapshot, "schema") != _PUBLIC_DOCS_SEED_EVIDENCE_SCHEMA:
+            raise ValueError("public docs seed evidence schema is unsupported")
+        if _required_str(raw_seed_snapshot, "operationId") != operation_id:
+            raise ValueError("public docs seed evidence operationId does not match the plan")
+        seed = dict(_required_mapping(raw_seed_snapshot, "seed"))
+        seed_id = _required_str(seed, "seed_id")
+        if _required_str(raw_seed_snapshot, "seedId") != seed_id:
+            raise ValueError("public docs seed evidence seedId does not match its payload")
+        if summary != _public_docs_seed_evidence_summary(seed):
+            raise ValueError("public docs seed evidence summary does not match its payload")
+        _validate_public_docs_seed_evidence_limits(seed)
+        seeds.append(seed)
+        normalized_seed_evidence.append({"evidence": evidence, "summary": summary})
+    if len({_required_str(seed, "seed_id") for seed in seeds}) != len(seeds):
+        raise ValueError("public docs seed evidence contains duplicate seed_id values")
+    expected_registry_sha256 = sha256(
+        _canonical_json({"seed_registry": seeds}).encode("utf-8")
+    ).hexdigest()
+    if _required_str(compact_plan, "seed_registry_sha256") != expected_registry_sha256:
+        raise ValueError("public docs seed registry digest does not match exact WORM evidence")
+    hydrated_plan = {**compact_plan, "seed_registry": seeds}
+    _validate_public_docs_plan_handle_summary(normalized_handle, hydrated_plan)
+    return hydrated_plan, {
+        "planEvidence": plan_evidence,
+        "seedEvidence": normalized_seed_evidence,
+    }
+
+
+def _public_docs_exact_evidence_handle(written: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        "s3Uri": _artifact_path("artifactPath", _required_str(written, "artifactPath")),
+        "sha256": "sha256:" + _required_sha256_hex(written, "artifactSha256"),
+        "versionId": _required_str(written, "artifactVersionId"),
+    }
+
+
+def _validated_public_docs_exact_evidence_handle(
+    handle: Mapping[str, Any],
+    field_name: str,
+) -> dict[str, str]:
+    if set(handle) != {"s3Uri", "sha256", "versionId"}:
+        raise ValueError(f"{field_name} must contain exactly s3Uri, sha256, and versionId")
+    s3_uri = _artifact_path(f"{field_name}.s3Uri", _required_str(handle, "s3Uri"))
+    if not s3_uri.startswith("s3://"):
+        raise ValueError(f"{field_name}.s3Uri must use s3://")
+    return {
+        "s3Uri": s3_uri,
+        "sha256": _required_sha256_prefixed(handle, "sha256"),
+        "versionId": _required_str(handle, "versionId"),
+    }
+
+
+def _read_public_docs_exact_evidence_bytes(
+    evidence: Mapping[str, str],
+    *,
+    field_name: str,
+    s3_client: Any,
+    max_bytes: int,
+) -> bytes:
+    payload, observed_version, _ = _read_compliance_locked_s3_bytes(
+        s3_client,
+        evidence["s3Uri"],
+        field_name=field_name,
+        version_id=evidence["versionId"],
+        max_bytes=max_bytes,
+    )
+    if observed_version != evidence["versionId"]:
+        raise ValueError(f"{field_name} VersionId does not match the requested version")
+    if "sha256:" + sha256(payload).hexdigest() != evidence["sha256"]:
+        raise ValueError(f"{field_name} digest does not match exact WORM evidence")
+    return payload
+
+
+def _public_docs_seed_evidence_summary(seed: Mapping[str, Any]) -> dict[str, Any]:
+    crawl_evidence = _required_mapping(seed, "crawl_policy").get("crawl_evidence")
+    crawl_summary: dict[str, Any] = {"status": "not_applicable"}
+    if crawl_evidence is not None:
+        if not isinstance(crawl_evidence, Mapping):
+            raise ValueError("public docs crawl evidence must be an object")
+        raw_summary = crawl_evidence.get("summary", {})
+        if not isinstance(raw_summary, Mapping):
+            raise ValueError("public docs crawl evidence summary must be an object")
+        crawl_summary = {
+            "counts": {
+                key: _required_non_negative_int(raw_summary, key)
+                for key in ("blocked", "changed", "deleted", "failed", "unchanged")
+            },
+            "status": _required_str(crawl_evidence, "status"),
+        }
+    return {
+        "crawlEvidence": crawl_summary,
+        "seedId": _required_str(seed, "seed_id"),
+        "sourceId": _required_str(seed, "source_id"),
+        "sourceType": _required_str(seed, "source_type"),
+    }
+
+
+def _validate_public_docs_seed_evidence_limits(seed: Mapping[str, Any]) -> None:
+    crawl_policy = _required_mapping(seed, "crawl_policy")
+    max_pages = _required_positive_int(crawl_policy, "max_pages")
+    if max_pages > 500:
+        raise ValueError("public docs crawl max_pages exceeds the governed ceiling")
+    for state_field in ("previous_state",):
+        state = crawl_policy.get(state_field, {})
+        if not isinstance(state, Mapping) or len(state) > max_pages:
+            raise ValueError(f"public docs {state_field} exceeds max_pages")
+    freshness_state = seed.get("freshness_state")
+    if isinstance(freshness_state, Mapping):
+        page_state = freshness_state.get("page_state", {})
+        if not isinstance(page_state, Mapping) or len(page_state) > max_pages:
+            raise ValueError("public docs freshness page_state exceeds max_pages")
+    crawl_evidence = crawl_policy.get("crawl_evidence")
+    if crawl_evidence is None:
+        return
+    if not isinstance(crawl_evidence, Mapping):
+        raise ValueError("public docs crawl evidence must be an object")
+    for field_name in (
+        "blocked_urls",
+        "changed_urls",
+        "deleted_urls",
+        "failed_urls",
+        "unchanged_urls",
+    ):
+        values = crawl_evidence.get(field_name, [])
+        if not isinstance(values, list) or len(values) > max_pages:
+            raise ValueError(f"public docs crawl evidence {field_name} exceeds max_pages")
+    pages = crawl_evidence.get("pages", {})
+    if not isinstance(pages, Mapping) or len(pages) > max_pages * 2:
+        raise ValueError("public docs crawl evidence pages exceeds the governed ceiling")
+    state = crawl_evidence.get("state", {})
+    if not isinstance(state, Mapping) or len(state) > max_pages:
+        raise ValueError("public docs crawl evidence state exceeds max_pages")
+
+
+def _validate_public_docs_plan_handle_summary(
+    handle: Mapping[str, Any],
+    plan: Mapping[str, Any],
+) -> None:
+    summary = _required_mapping(handle, "summary")
+    if set(summary) != {"generatedAt", "operationId", "seedCount", "sourceTypeCounts"}:
+        raise ValueError("public docs plan handle summary shape is invalid")
+    expected = {
+        "generatedAt": _required_datetime_string(plan, "generated_at"),
+        "operationId": _required_str(plan, "operation_id"),
+        "seedCount": len(_required_object_list(plan, "seed_registry")),
+        "sourceTypeCounts": dict(_required_mapping(plan, "source_type_counts")),
+    }
+    if dict(summary) != expected:
+        raise ValueError("public docs plan handle summary does not match exact WORM evidence")
+
+
+def _public_docs_task_artifact_handle(
+    written: Mapping[str, Any],
+    *,
+    summary: Mapping[str, Any],
+) -> dict[str, Any]:
+    handle = {
+        "artifactType": _required_str(written, "artifactType"),
+        "evidence": _public_docs_exact_evidence_handle(written),
+        "schema": _PUBLIC_DOCS_TASK_ARTIFACT_HANDLE_SCHEMA,
+        "summary": dict(summary),
+    }
+    if len(_canonical_json(handle).encode("utf-8")) > PUBLIC_DOCS_MAX_XCOM_BYTES:
+        raise ValueError("public docs task artifact handle exceeds the governed XCom byte ceiling")
+    return handle
+
+
+def _read_public_docs_task_artifact_payload(
+    raw_handle: Mapping[str, Any] | str,
+    *,
+    expected_artifact_type: str,
+    max_bytes: int,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    handle = _json_object(raw_handle, "public_docs_task_artifact_handle")
+    if set(handle) != {"artifactType", "evidence", "schema", "summary"}:
+        raise ValueError("public docs task artifact handle shape is invalid")
+    if _required_str(handle, "schema") != _PUBLIC_DOCS_TASK_ARTIFACT_HANDLE_SCHEMA:
+        raise ValueError("public docs task artifact handle schema is unsupported")
+    if _required_str(handle, "artifactType") != expected_artifact_type:
+        raise ValueError("public docs task artifact type is unsupported")
+    if len(_canonical_json(handle).encode("utf-8")) > PUBLIC_DOCS_MAX_XCOM_BYTES:
+        raise ValueError("public docs task artifact handle exceeds the governed XCom byte ceiling")
+    evidence = _validated_public_docs_exact_evidence_handle(
+        _required_mapping(handle, "evidence"),
+        f"{expected_artifact_type} evidence",
+    )
+    payload_bytes = _read_public_docs_exact_evidence_bytes(
+        evidence,
+        field_name=f"{expected_artifact_type} evidence",
+        s3_client=_s3_client(evidence["s3Uri"]),
+        max_bytes=max_bytes,
+    )
+    try:
+        payload = json.loads(payload_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{expected_artifact_type} evidence is not valid JSON") from exc
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"{expected_artifact_type} evidence must be a JSON object")
+    _reject_raw_secrets(payload)
+    return dict(payload), evidence
+
+
+def _public_docs_compact_seed_registry(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [
+        _public_docs_compact_seed_descriptor(seed)
+        for seed in _required_object_list(plan, "seed_registry")
+    ]
+
+
+def _public_docs_compact_seed_descriptor(seed: Mapping[str, Any]) -> dict[str, Any]:
+    descriptor = dict(seed)
+    crawl_policy = dict(_required_mapping(seed, "crawl_policy"))
+    crawl_policy.pop("crawl_evidence", None)
+    crawl_policy.pop("previous_state", None)
+    descriptor["crawl_policy"] = crawl_policy
+    freshness_state = dict(_required_mapping(seed, "freshness_state"))
+    freshness_state.pop("page_state", None)
+    descriptor["freshness_state"] = freshness_state
+    return descriptor
+
+
+def _compact_public_docs_seed_refresh_payload(
+    payload: Mapping[str, Any],
+    *,
+    plan: Mapping[str, Any],
+    seed_evidence: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    compact = dict(payload)
+    compact_registry = _public_docs_compact_seed_registry(plan)
+    evidence_by_seed_id: dict[str, Mapping[str, Any]] = {}
+    normalized_evidence: list[dict[str, Any]] = []
+    for raw_entry in seed_evidence:
+        entry = dict(raw_entry)
+        summary = _required_mapping(entry, "summary")
+        seed_id = _required_str(summary, "seedId")
+        if seed_id in evidence_by_seed_id:
+            raise ValueError("public docs refresh plan contains duplicate seed evidence")
+        evidence_by_seed_id[seed_id] = entry
+        normalized_evidence.append(entry)
+    if set(evidence_by_seed_id) != {_required_str(seed, "seed_id") for seed in compact_registry}:
+        raise ValueError("public docs refresh plan seed evidence does not match its registry")
+    compact["seed_evidence"] = normalized_evidence
+    compact["seed_registry"] = compact_registry
+    compact_requests: list[dict[str, Any]] = []
+    for raw_request in _required_object_list(payload, "source_fetch_requests"):
+        request = dict(raw_request)
+        source_metadata = dict(_required_mapping(request, "source_metadata"))
+        frontier = _required_mapping(source_metadata, "frontier")
+        parent_seed_id = _required_str(frontier, "parent_seed_id")
+        evidence_entry = evidence_by_seed_id.get(parent_seed_id)
+        if evidence_entry is None:
+            raise ValueError("public docs source request is missing parent seed evidence")
+        crawl_policy = dict(_required_mapping(source_metadata, "crawl_policy"))
+        crawl_policy.pop("crawl_evidence", None)
+        crawl_policy.pop("previous_state", None)
+        source_metadata["crawl_policy"] = crawl_policy
+        source_metadata["crawl_evidence_reference"] = {
+            "evidence": dict(_required_mapping(evidence_entry, "evidence")),
+            "summary": dict(
+                _required_mapping(_required_mapping(evidence_entry, "summary"), "crawlEvidence")
+            ),
+        }
+        request["source_metadata"] = source_metadata
+        compact_requests.append(request)
+    compact["source_fetch_requests"] = compact_requests
+    return compact
+
+
+def _read_public_docs_refresh_plan_for_d5(plan: Mapping[str, Any]) -> dict[str, Any]:
+    refresh_plan_path = _artifact_path(
+        "public_docs_seed_refresh_plan_path",
+        _required_str(plan, "public_docs_seed_refresh_plan_path"),
+    )
+    raw_evidence = plan.get("public_docs_seed_refresh_plan_evidence")
+    if refresh_plan_path.startswith("s3://"):
+        if not isinstance(raw_evidence, Mapping):
+            raise ValueError("public docs S3 refresh plan requires exact WORM evidence")
+        evidence = _validated_public_docs_exact_evidence_handle(
+            raw_evidence,
+            "public docs seed refresh plan evidence",
+        )
+        if evidence["s3Uri"] != refresh_plan_path:
+            raise ValueError("public docs seed refresh plan evidence URI does not match its path")
+        payload_bytes = _read_public_docs_exact_evidence_bytes(
+            evidence,
+            field_name="public docs seed refresh plan evidence",
+            s3_client=_s3_client(refresh_plan_path),
+            max_bytes=PUBLIC_DOCS_MAX_REFRESH_PLAN_BYTES,
+        )
+        try:
+            payload = json.loads(payload_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("public docs seed refresh plan evidence is not valid JSON") from exc
+        if not isinstance(payload, Mapping):
+            raise ValueError("public docs seed refresh plan evidence must be a JSON object")
+        return dict(payload)
+    if raw_evidence is not None:
+        raise ValueError("local public docs refresh plans must not declare S3 WORM evidence")
+    return dict(_read_json_file(refresh_plan_path, "public_docs_seed_refresh_plan"))
+
+
+def _public_docs_seed_registry_from_refresh_plan(
+    refresh_plan: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    compact_registry = _required_object_list(refresh_plan, "seed_registry")
+    raw_seed_evidence = refresh_plan.get("seed_evidence")
+    if raw_seed_evidence is None:
+        return [dict(seed) for seed in compact_registry]
+    if not isinstance(raw_seed_evidence, list) or not raw_seed_evidence:
+        raise ValueError("public docs refresh plan seed_evidence must be a non-empty list")
+    if len(raw_seed_evidence) != len(compact_registry):
+        raise ValueError("public docs refresh plan seed evidence does not match its registry")
+    operation_id = _required_str(refresh_plan, "operation_id")
+    airflow_plan_path = _required_artifact_paths(refresh_plan, ("airflow_plan",))["airflow_plan"]
+    seed_prefix = (
+        _artifact_parent_path(airflow_plan_path).rstrip("/") + "/public-docs-seed-evidence/"
+    )
+    compact_by_seed_id = {_required_str(seed, "seed_id"): dict(seed) for seed in compact_registry}
+    if len(compact_by_seed_id) != len(compact_registry):
+        raise ValueError("public docs refresh plan registry contains duplicate seed_id values")
+    hydrated: list[dict[str, Any]] = []
+    total_seed_bytes = 0
+    for raw_entry in raw_seed_evidence:
+        if not isinstance(raw_entry, Mapping) or set(raw_entry) != {"evidence", "summary"}:
+            raise ValueError("public docs refresh plan seed evidence entry shape is invalid")
+        evidence = _validated_public_docs_exact_evidence_handle(
+            _required_mapping(raw_entry, "evidence"),
+            "public docs refresh seed evidence",
+        )
+        if not evidence["s3Uri"].startswith(seed_prefix):
+            raise ValueError("public docs refresh seed evidence escapes its operation prefix")
+        seed_bytes = _read_public_docs_exact_evidence_bytes(
+            evidence,
+            field_name="public docs refresh seed evidence",
+            s3_client=_s3_client(evidence["s3Uri"]),
+            max_bytes=PUBLIC_DOCS_MAX_SEED_EVIDENCE_BYTES,
+        )
+        total_seed_bytes += len(seed_bytes)
+        if total_seed_bytes > PUBLIC_DOCS_MAX_TOTAL_SEED_EVIDENCE_BYTES:
+            raise ValueError("public docs refresh seed evidence exceeds aggregate byte ceiling")
+        try:
+            seed_snapshot = json.loads(seed_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("public docs refresh seed evidence is not valid JSON") from exc
+        if not isinstance(seed_snapshot, Mapping) or set(seed_snapshot) != {
+            "operationId",
+            "schema",
+            "seed",
+            "seedId",
+        }:
+            raise ValueError("public docs refresh seed evidence shape is invalid")
+        if _required_str(seed_snapshot, "schema") != _PUBLIC_DOCS_SEED_EVIDENCE_SCHEMA:
+            raise ValueError("public docs refresh seed evidence schema is unsupported")
+        if _required_str(seed_snapshot, "operationId") != operation_id:
+            raise ValueError("public docs refresh seed evidence operationId is mismatched")
+        seed = dict(_required_mapping(seed_snapshot, "seed"))
+        seed_id = _required_str(seed, "seed_id")
+        if _required_str(seed_snapshot, "seedId") != seed_id:
+            raise ValueError("public docs refresh seed evidence seedId is mismatched")
+        if dict(_required_mapping(raw_entry, "summary")) != _public_docs_seed_evidence_summary(
+            seed
+        ):
+            raise ValueError("public docs refresh seed evidence summary is mismatched")
+        if compact_by_seed_id.get(seed_id) != _public_docs_compact_seed_descriptor(seed):
+            raise ValueError("public docs compact seed descriptor is mismatched")
+        _validate_public_docs_seed_evidence_limits(seed)
+        hydrated.append(seed)
+    expected_digest = sha256(
+        _canonical_json({"seed_registry": hydrated}).encode("utf-8")
+    ).hexdigest()
+    if _required_str(refresh_plan, "seed_registry_sha256") != expected_digest:
+        raise ValueError("public docs refresh registry digest is mismatched")
+    return hydrated
+
+
 _BENCHMARK_SUBSTRATE_SOURCE_SET_ENV = "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE"
 
 
@@ -2344,7 +3211,7 @@ def _load_execution_substrate_source_set(
         source_set_evidence, "benchmark execution substrate source set"
     )
     source_client = s3_client or _s3_client(source_handle["s3Uri"])
-    source_bytes, _ = _read_compliance_locked_s3_bytes(
+    source_bytes, _, _ = _read_compliance_locked_s3_bytes(
         source_client,
         source_handle["s3Uri"],
         field_name="benchmark execution substrate source set",
@@ -2400,7 +3267,7 @@ def _load_execution_substrate_source_set(
                 f"benchmark execution substrate {expected_suite_id}/{expected_role}",
             )
             role_client = s3_client or _s3_client(handle["s3Uri"])
-            payload, _ = _read_compliance_locked_s3_bytes(
+            payload, _, _ = _read_compliance_locked_s3_bytes(
                 role_client,
                 handle["s3Uri"],
                 field_name=f"benchmark execution substrate {expected_suite_id}/{expected_role}",
@@ -2656,18 +3523,15 @@ def load_materialized_benchmark_catalog_snapshot(
         ("benchmark_catalog", "benchmark_catalog_receipt"),
     )
     client = s3_client or _s3_client(*artifact_paths.values())
-    receipt_bytes, receipt_version_id = _read_compliance_locked_s3_bytes(
+    receipt_bytes, receipt_version_id, receipt_retain_until = _read_compliance_locked_s3_bytes(
         client,
         artifact_paths["benchmark_catalog_receipt"],
         field_name="benchmark_catalog_receipt",
     )
-    try:
-        receipt = _json_object(
-            receipt_bytes.decode("utf-8"),
-            "benchmark_catalog_materialization_receipt",
-        )
-    except UnicodeDecodeError as exc:
-        raise ValueError("benchmark catalog materialization receipt is not UTF-8 JSON") from exc
+    receipt = _canonical_json_object_bytes(
+        receipt_bytes,
+        "benchmark_catalog_materialization_receipt",
+    )
     if _required_str(receipt, "contractVersion") != "serp-benchmark-catalog-materializer/v5":
         raise ValueError("benchmark catalog materialization receipt contract is unsupported")
     if _required_str(receipt, "dagId") != _required_str(plan, "dag_id"):
@@ -2682,20 +3546,19 @@ def load_materialized_benchmark_catalog_snapshot(
     catalog_version_id = _required_str(catalog_snapshot, "artifactVersionId")
     if _required_str(catalog_snapshot, "objectLockMode") != "COMPLIANCE":
         raise ValueError("benchmark catalog receipt must use COMPLIANCE object lock")
-    catalog_bytes, observed_catalog_version_id = _read_compliance_locked_s3_bytes(
-        client,
-        artifact_paths["benchmark_catalog"],
-        field_name="benchmark_catalog",
-        version_id=catalog_version_id,
+    catalog_bytes, observed_catalog_version_id, catalog_retain_until = (
+        _read_compliance_locked_s3_bytes(
+            client,
+            artifact_paths["benchmark_catalog"],
+            field_name="benchmark_catalog",
+            version_id=catalog_version_id,
+        )
     )
     if observed_catalog_version_id != catalog_version_id:
         raise ValueError("benchmark catalog receipt VersionId does not match catalog object")
     if sha256(catalog_bytes).hexdigest() != _required_str(catalog_snapshot, "artifactSha256"):
         raise ValueError("benchmark catalog receipt SHA-256 does not match catalog object")
-    try:
-        catalog = _json_object(catalog_bytes.decode("utf-8"), "benchmark_catalog")
-    except UnicodeDecodeError as exc:
-        raise ValueError("benchmark catalog object is not UTF-8 JSON") from exc
+    catalog = _canonical_json_object_bytes(catalog_bytes, "benchmark_catalog")
     if _required_str(catalog, "catalog_status") != _required_str(catalog_snapshot, "catalogStatus"):
         raise ValueError("benchmark catalog receipt status does not match catalog object")
     if _required_str(catalog, "contract_version") != "serp-benchmark-catalog/v5":
@@ -2739,6 +3602,8 @@ def load_materialized_benchmark_catalog_snapshot(
         "catalogReceiptPath": artifact_paths["benchmark_catalog_receipt"],
         "catalogReceiptSha256": sha256(receipt_bytes).hexdigest(),
         "catalogReceiptVersionId": receipt_version_id,
+        "catalogReceiptRetainUntil": receipt_retain_until,
+        "catalogRetainUntil": catalog_retain_until,
     }
 
 
@@ -3090,7 +3955,8 @@ def _read_compliance_locked_s3_bytes(
     *,
     field_name: str,
     version_id: str | None = None,
-) -> tuple[bytes, str]:
+    max_bytes: int | None = None,
+) -> tuple[bytes, str, str]:
     artifact = _artifact_ref(field_name, artifact_path)
     if artifact.kind != "s3":
         raise ValueError(f"{field_name} must be an s3:// immutable artifact")
@@ -3114,16 +3980,37 @@ def _read_compliance_locked_s3_bytes(
         raise ValueError(f"{field_name} must include a retention timestamp")
     if retain_until.astimezone(UTC) <= datetime.now(UTC):
         raise ValueError(f"{field_name} retention is expired")
+    content_length = head.get("ContentLength")
+    if max_bytes is not None:
+        if isinstance(max_bytes, bool) or max_bytes <= 0:
+            raise ValueError("max_bytes must be a positive integer")
+        if (
+            isinstance(content_length, bool)
+            or not isinstance(content_length, int)
+            or content_length < 0
+        ):
+            raise ValueError(f"{field_name} HeadObject is missing a valid ContentLength")
+        if content_length > max_bytes:
+            raise ValueError(f"{field_name} exceeds the governed byte ceiling")
     response = s3_client.get_object(Bucket=bucket, Key=key, VersionId=observed_version_id)
     if not isinstance(response, Mapping):
         raise ValueError(f"{field_name} GetObject response is invalid")
     body = response.get("Body")
     if body is None or not hasattr(body, "read"):
         raise ValueError(f"{field_name} GetObject response is missing Body")
-    payload = body.read()
+    payload = body.read(max_bytes + 1) if max_bytes is not None else body.read()
     if not isinstance(payload, bytes) or not payload:
         raise ValueError(f"{field_name} object is empty")
-    return payload, observed_version_id
+    if max_bytes is not None:
+        if len(payload) > max_bytes:
+            raise ValueError(f"{field_name} exceeds the governed byte ceiling")
+        if len(payload) != content_length:
+            raise ValueError(f"{field_name} ContentLength does not match its body")
+    return (
+        payload,
+        observed_version_id,
+        retain_until.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+    )
 
 
 def _fetch_https_bytes(url: str) -> bytes:
@@ -3271,6 +4158,78 @@ def post_bc21_json(
     )
 
 
+def write_public_docs_seed_registry_from_snapshot(
+    plan_handle: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    plan, snapshot = _load_public_docs_airflow_plan_snapshot_bundle(plan_handle)
+    artifact_path = _required_artifact_paths(plan, ("public_docs_seed_registry",))[
+        "public_docs_seed_registry"
+    ]
+    payload = {
+        "contract_version": _EVAL_CONTRACT_VERSION,
+        "generated_at": _required_datetime_string(plan, "generated_at"),
+        "operation_id": _required_str(plan, "operation_id"),
+        "pack_id": _required_str(plan, "pack_id"),
+        "pack_version_id": _required_str(plan, "pack_version_id"),
+        "seed_count": len(_required_object_list(plan, "seed_registry")),
+        "seed_evidence": list(snapshot["seedEvidence"]),
+        "seed_registry": _public_docs_compact_seed_registry(plan),
+        "seed_registry_sha256": _required_str(plan, "seed_registry_sha256"),
+        "source_type_counts": dict(_required_mapping(plan, "source_type_counts")),
+        "status": "validated",
+        "tenant_id": _required_str(plan, "tenant_id"),
+    }
+    written = write_immutable_evidence_snapshot(
+        artifact_path,
+        artifact_type="public_docs_seed_registry",
+        operation_id=_required_str(plan, "operation_id"),
+        payload=payload,
+    )
+    return _public_docs_task_artifact_handle(
+        written,
+        summary={
+            "operationId": _required_str(plan, "operation_id"),
+            "seedCount": len(_required_object_list(plan, "seed_registry")),
+            "status": "validated",
+        },
+    )
+
+
+def write_public_docs_seed_refresh_plan_from_snapshot(
+    plan_handle: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    plan, snapshot = _load_public_docs_airflow_plan_snapshot_bundle(plan_handle)
+    refresh_payload = _compact_public_docs_seed_refresh_payload(
+        _public_docs_seed_refresh_payload(plan),
+        plan=plan,
+        seed_evidence=cast(Sequence[Mapping[str, Any]], snapshot["seedEvidence"]),
+    )
+    payload_size = len(_canonical_json(refresh_payload).encode("utf-8"))
+    if payload_size > PUBLIC_DOCS_MAX_REFRESH_PLAN_BYTES:
+        raise ValueError(
+            "public docs refresh plan exceeds the governed byte ceiling: "
+            f"bytes={payload_size} limit={PUBLIC_DOCS_MAX_REFRESH_PLAN_BYTES}"
+        )
+    artifact_path = _required_artifact_paths(plan, ("public_docs_seed_refresh_plan",))[
+        "public_docs_seed_refresh_plan"
+    ]
+    written = write_immutable_evidence_snapshot(
+        artifact_path,
+        artifact_type="public_docs_seed_refresh_plan",
+        operation_id=_required_str(plan, "operation_id"),
+        payload=refresh_payload,
+    )
+    return _public_docs_task_artifact_handle(
+        written,
+        summary={
+            "operationId": _required_str(plan, "operation_id"),
+            "seedCount": int(refresh_payload["seed_count"]),
+            "skippedSeedCount": int(refresh_payload["skipped_seed_count"]),
+            "status": _required_str(refresh_payload, "status"),
+        },
+    )
+
+
 def write_public_docs_seed_registry_artifact(
     plan_json: Mapping[str, Any] | str,
 ) -> dict[str, Any]:
@@ -3322,8 +4281,28 @@ def write_public_docs_seed_refresh_plan_artifact(
     )
 
 
+def write_public_docs_publish_activation_trigger_conf_from_snapshot(
+    plan_handle: Mapping[str, Any] | str,
+    refresh_plan_handle: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    plan = load_public_docs_airflow_plan_snapshot(plan_handle)
+    refresh_payload, refresh_evidence = _read_public_docs_task_artifact_payload(
+        refresh_plan_handle,
+        expected_artifact_type="public_docs_seed_refresh_plan",
+        max_bytes=PUBLIC_DOCS_MAX_REFRESH_PLAN_BYTES,
+    )
+    if _required_str(refresh_payload, "operation_id") != _required_str(plan, "operation_id"):
+        raise ValueError("public docs refresh plan operation_id does not match plan snapshot")
+    return write_public_docs_publish_activation_trigger_conf_artifact(
+        plan,
+        refresh_plan_evidence=refresh_evidence,
+    )
+
+
 def write_public_docs_publish_activation_trigger_conf_artifact(
     plan_json: Mapping[str, Any] | str,
+    *,
+    refresh_plan_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     plan = _json_object(plan_json, "plan_json")
     _reject_raw_secrets(plan)
@@ -3394,7 +4373,7 @@ def write_public_docs_publish_activation_trigger_conf_artifact(
         )
     )
 
-    trigger_conf = {
+    trigger_conf: dict[str, Any] = {
         "activation_idempotency_key": str(uuid5(_PUBLIC_DOCS_NAMESPACE, material + "|activation")),
         "activation_reason_code": "public-docs-d20-indexed",
         "actor_id": _required_str(plan, "actor_id"),
@@ -3423,6 +4402,14 @@ def write_public_docs_publish_activation_trigger_conf_artifact(
         "registry_resource_type": _required_str(plan, "registry_resource_type"),
         "tenant_id": _required_str(plan, "tenant_id"),
     }
+    if refresh_plan_evidence is not None:
+        normalized_refresh_evidence = _validated_public_docs_exact_evidence_handle(
+            refresh_plan_evidence,
+            "public docs seed refresh plan evidence",
+        )
+        if normalized_refresh_evidence["s3Uri"] != artifact_paths["public_docs_seed_refresh_plan"]:
+            raise ValueError("public docs seed refresh plan evidence URI does not match plan")
+        trigger_conf["public_docs_seed_refresh_plan_evidence"] = normalized_refresh_evidence
     if bc21_base_url := plan.get("bc21_base_url"):
         trigger_conf["bc21_base_url"] = _required_bc21_base_url({"bc21_base_url": bc21_base_url})
     if previous_active_pack_version_id := plan.get("previous_active_pack_version_id"):
@@ -3459,6 +4446,13 @@ def write_public_docs_publish_activation_trigger_conf_artifact(
         operation_id=_required_str(plan, "operation_id"),
         payload=payload,
     )
+
+
+def submit_public_docs_bc21_pipeline_state_from_snapshot(
+    plan_handle: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    plan = load_public_docs_airflow_plan_snapshot(plan_handle)
+    return submit_public_docs_bc21_pipeline_state_artifact(plan)
 
 
 def submit_public_docs_bc21_pipeline_state_artifact(
@@ -3701,13 +4695,7 @@ def write_public_docs_retrieval_golden_artifact(
     expected_pack_version_id = _required_str(plan, "pack_version_id")
     if _required_str(receipt, "active_pack_version_id") != expected_pack_version_id:
         raise ValueError("retrieval golden requires the candidate pack to be active")
-    refresh_plan = _read_json_file(
-        _artifact_path(
-            "public_docs_seed_refresh_plan_path",
-            _required_str(plan, "public_docs_seed_refresh_plan_path"),
-        ),
-        "public_docs_seed_refresh_plan",
-    )
+    refresh_plan = _read_public_docs_refresh_plan_for_d5(plan)
     refresh_result = _read_json_file(
         _artifact_path(
             "public_docs_seed_refresh_result_path",
@@ -4013,7 +5001,7 @@ def write_public_docs_crawl_state_artifact(
         "public_docs_seed_refresh_plan_path",
         _required_str(plan, "public_docs_seed_refresh_plan_path"),
     )
-    refresh_plan = _read_json_file(refresh_plan_path, "public_docs_seed_refresh_plan")
+    refresh_plan = _read_public_docs_refresh_plan_for_d5(plan)
     crawl_state_path = _public_docs_crawl_state_path(
         plan,
         _required_artifact_root_path(plan),
@@ -4055,7 +5043,7 @@ def _public_docs_crawl_state_payload(
     coverage_proof: Mapping[str, Any],
     activation_receipt: Mapping[str, Any],
 ) -> dict[str, Any]:
-    registry = _required_object_list(refresh_plan, "seed_registry")
+    registry = _public_docs_seed_registry_from_refresh_plan(refresh_plan)
     coverage_by_seed: dict[str, Mapping[str, Any]] = {}
     for report in _required_object_list(coverage_proof, "seeds"):
         seed_id = _required_str(report, "seed_id")
@@ -4589,13 +5577,38 @@ def write_paired_eval_request_artifact(
         (
             "benchmark_catalog",
             "benchmark_catalog_receipt",
+            "benchmark_catalog_pack_activation",
             "paired_eval_request",
             "paired_eval_receipt",
         ),
     )
     promotion = _validated_d19_promotion_snapshot(plan, promotion_snapshot)
     lifecycle = _validated_d19_lifecycle_result(plan, promotion, lifecycle_result)
-    payload = _paired_eval_request_payload(plan, catalog_snapshot, promotion, lifecycle)
+    catalog_evidence = _paired_eval_catalog_evidence(plan, catalog_snapshot)
+    activation_path = artifact_paths["benchmark_catalog_pack_activation"]
+    activation_payload = _benchmark_catalog_pack_activation_payload(
+        plan,
+        catalog_evidence=catalog_evidence,
+        lifecycle=lifecycle,
+    )
+    activation_snapshot = write_immutable_evidence_snapshot(
+        activation_path,
+        artifact_type="benchmark_catalog_pack_activation",
+        operation_id=_required_str(plan, "operation_id"),
+        payload=activation_payload,
+    )
+    activation_evidence = _written_worm_evidence_reference(
+        activation_snapshot,
+        activation_path,
+        "benchmark catalog pack activation",
+    )
+    payload = _paired_eval_request_payload(
+        plan,
+        catalog_evidence=catalog_evidence,
+        activation_evidence=activation_evidence,
+        promotion=promotion,
+        lifecycle=lifecycle,
+    )
     artifact_path = artifact_paths["paired_eval_request"]
     request_evidence = write_immutable_evidence_snapshot(
         artifact_path,
@@ -4661,9 +5674,21 @@ def build_nightly_benchmark_export_cli_spec(plan_json: str) -> dict[str, Any]:
         dag_id="serp_nightly_regression_suite",
         task_id="build_c1_benchmark_gate_export",
         command="nightly-benchmark-export",
-        input_path_keys=("airflow_plan", "nightly_report"),
+        input_path_keys=(
+            "airflow_plan",
+            "nightly_report",
+            "evaluation_objective",
+            "paired_evaluation_receipt",
+            "paired_evaluation_verification",
+        ),
         output_path_key="benchmark_gate_export",
-        option_names=("--airflow-plan", "--nightly-report"),
+        option_names=(
+            "--airflow-plan",
+            "--nightly-report",
+            "--evaluation-objective",
+            "--paired-evaluation-receipt",
+            "--paired-evaluation-verification",
+        ),
     )
 
 
@@ -4786,6 +5811,45 @@ def governance_notification_pending(plan_json: str) -> dict[str, str]:
         "operation_id": _required_str(plan, "operation_id"),
         "status": "pending_governance_notification",
     }
+
+
+def governance_notification_from_public_docs_snapshot(
+    plan_handle: Mapping[str, Any] | str,
+) -> dict[str, str]:
+    plan = load_public_docs_airflow_plan_snapshot(plan_handle)
+    return governance_notification_pending(_canonical_json(plan))
+
+
+def dispatch_public_docs_seed_refresh_handoff_from_snapshot(
+    plan_handle: Mapping[str, Any] | str,
+    refresh_plan_handle: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    plan, snapshot = _load_public_docs_airflow_plan_snapshot_bundle(plan_handle)
+    refresh_payload, refresh_evidence = _read_public_docs_task_artifact_payload(
+        refresh_plan_handle,
+        expected_artifact_type="public_docs_seed_refresh_plan",
+        max_bytes=PUBLIC_DOCS_MAX_REFRESH_PLAN_BYTES,
+    )
+    if _required_str(refresh_payload, "operation_id") != _required_str(plan, "operation_id"):
+        raise ValueError("public docs refresh plan operation_id does not match plan snapshot")
+    refresh_plan_path = _required_artifact_paths(plan, ("public_docs_seed_refresh_plan",))[
+        "public_docs_seed_refresh_plan"
+    ]
+    if refresh_evidence["s3Uri"] != refresh_plan_path:
+        raise ValueError("public docs refresh plan URI does not match the canonical plan path")
+    spec = dispatch_public_docs_seed_refresh_handoff(_canonical_json(plan))
+    expected_status = _required_str(refresh_payload, "status")
+    expected_cli_status = (
+        "no_due_sources" if expected_status == "no_due_sources" else "ready_for_pipeline_cli_runner"
+    )
+    if _required_str(spec, "status") != expected_cli_status:
+        raise ValueError("public docs refresh plan status does not match exact WORM evidence")
+    if int(spec["seed_count"]) != _required_non_negative_int(refresh_payload, "seed_count"):
+        raise ValueError("public docs refresh plan seed count does not match exact WORM evidence")
+    spec["plan_evidence"] = dict(snapshot["planEvidence"])
+    spec["plan_sha256"] = _required_str(snapshot["planEvidence"], "sha256").removeprefix("sha256:")
+    spec["refresh_plan_evidence"] = refresh_evidence
+    return spec
 
 
 def dispatch_public_docs_seed_refresh_handoff(plan_json: str) -> dict[str, Any]:
@@ -5124,7 +6188,7 @@ def _public_docs_retrieval_golden_cases(
     *,
     refresh_result: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
-    registry_seeds = _required_object_list(refresh_plan, "seed_registry")
+    registry_seeds = _public_docs_seed_registry_from_refresh_plan(refresh_plan)
     components_by_seed_id = {
         _required_str(seed, "seed_id"): _required_str(
             _required_mapping(seed, "inventory_evidence"), "component"
@@ -5494,7 +6558,7 @@ def _public_docs_pack_policy_inputs(
         raise ValueError("public docs policy inputs require indexed source evidence")
     seed_registry = {
         _required_str(seed, "seed_id"): seed
-        for seed in _required_object_list(plan, "seed_registry")
+        for seed in _public_docs_seed_registry_from_refresh_plan(plan)
     }
     indexed_seed_by_id: dict[str, Mapping[str, Any]] = {}
     missing_seed_ids: list[str] = []
@@ -6098,6 +7162,7 @@ def _nightly_suite_plan_payload(plan: Mapping[str, Any]) -> dict[str, Any]:
     reranker_profile_version = _required_str(plan, "reranker_profile_version")
     return {
         "artifact_paths": dict(_required_mapping(plan, "artifact_paths")),
+        "candidateReleaseEvidence": dict(_required_mapping(plan, "candidateReleaseEvidence")),
         "contract_version": _EVAL_CONTRACT_VERSION,
         "generated_at": generated_at,
         "metadata": {
@@ -6710,17 +7775,18 @@ def _validate_benchmark_export_payload(payload: Mapping[str, Any]) -> None:
 
 def _paired_eval_request_payload(
     plan: Mapping[str, Any],
-    catalog_snapshot: Mapping[str, Any],
+    *,
+    catalog_evidence: Mapping[str, Mapping[str, str]],
+    activation_evidence: Mapping[str, str],
     promotion: Mapping[str, Any],
     lifecycle: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Build PairedEvaluationRequest/v2 without inline execution selections."""
+    """Build the canonical request without inline execution selections."""
 
-    catalog_evidence = _paired_eval_catalog_evidence(plan, catalog_snapshot)
     baseline = _required_mapping(promotion, "baselineRelease")
     candidate = _required_mapping(promotion, "candidateRelease")
     return {
-        "schema": "PairedEvaluationRequest/v2",
+        "schema": _PAIRED_EVALUATION_REQUEST_SCHEMA,
         "requestId": _required_str(plan, "operation_id"),
         "evaluationReleasePromotionEvidence": dict(
             _required_mapping(promotion, "promotionEvidence")
@@ -6734,10 +7800,47 @@ def _paired_eval_request_payload(
         "metricCompatibilityMatrixEvidence": dict(
             _required_mapping(promotion, "metricCompatibilityMatrixEvidence")
         ),
-        "objectiveSpecificationEvidence": dict(
-            _required_mapping(promotion, "objectiveSpecificationEvidence")
+        "evaluationObjectiveEvidence": dict(
+            _required_mapping(promotion, "evaluationObjectiveEvidence")
         ),
-        "benchmarkCatalogEvidence": catalog_evidence,
+        "evaluationObjectiveAttestationEvidence": dict(
+            _required_mapping(promotion, "evaluationObjectiveAttestationEvidence")
+        ),
+        "benchmarkCatalogEvidence": {
+            "activation": dict(activation_evidence),
+            "catalog": dict(_required_mapping(catalog_evidence, "catalog")),
+            "receipt": dict(_required_mapping(catalog_evidence, "receipt")),
+        },
+    }
+
+
+def _benchmark_catalog_pack_activation_payload(
+    plan: Mapping[str, Any],
+    *,
+    catalog_evidence: Mapping[str, Mapping[str, str]],
+    lifecycle: Mapping[str, Any],
+) -> dict[str, Any]:
+    suite_bindings = _required_object_list(lifecycle, "packMaterialBindings")
+    if [_required_str(item, "suiteId") for item in suite_bindings] != list(
+        MANDATORY_SERP_BENCHMARK_SUITES
+    ):
+        raise ValueError("benchmark catalog activation must cover the canonical nine")
+    return {
+        "activationStatus": "evaluation-only",
+        "benchmarkCatalogEvidence": {
+            "catalog": dict(_required_mapping(catalog_evidence, "catalog")),
+            "receipt": dict(_required_mapping(catalog_evidence, "receipt")),
+        },
+        "bindingFingerprint": _required_sha256_prefixed(lifecycle, "bindingFingerprint"),
+        "contractVersion": _BENCHMARK_CATALOG_PACK_ACTIVATION_SCHEMA,
+        "evaluationBindingEvidence": dict(
+            _required_mapping(lifecycle, "evaluationBindingEvidence")
+        ),
+        "evaluationBindingId": _required_str(lifecycle, "evaluationBindingId"),
+        "operationId": _required_str(plan, "operation_id"),
+        "productionActivationRequested": False,
+        "suitePackBindings": suite_bindings,
+        "tenantId": _required_str(plan, "tenant_id"),
     }
 
 
@@ -6853,13 +7956,19 @@ def _paired_eval_catalog_evidence(
         raise ValueError("paired evaluator catalog status is unsupported")
     if (catalog_status == "ready") != (not blocking_suite_ids):
         raise ValueError("paired evaluator catalog status does not match blocking suites")
+    catalog_retain_until = _required_datetime_string(catalog_snapshot, "catalogRetainUntil")
+    receipt_retain_until = _required_datetime_string(catalog_snapshot, "catalogReceiptRetainUntil")
     return {
         "catalog": {
+            "objectLockMode": "COMPLIANCE",
+            "retainUntil": catalog_retain_until,
             "s3Uri": catalog_path,
             "sha256": "sha256:" + _required_sha256_hex(catalog_snapshot, "artifactSha256"),
             "versionId": _required_str(catalog_snapshot, "artifactVersionId"),
         },
         "receipt": {
+            "objectLockMode": "COMPLIANCE",
+            "retainUntil": receipt_retain_until,
             "s3Uri": receipt_path,
             "sha256": "sha256:" + _required_sha256_hex(catalog_snapshot, "catalogReceiptSha256"),
             "versionId": _required_str(catalog_snapshot, "catalogReceiptVersionId"),
@@ -6882,6 +7991,13 @@ def _validated_d19_promotion_snapshot(
     candidate = _validated_promoted_release_reference(
         _required_mapping(promotion, "candidateRelease"), "candidateRelease"
     )
+    candidate_authority = _validated_candidate_release_authority(
+        _required_mapping(promotion, "candidateReleaseAuthority")
+    )
+    if candidate_authority["evidence"] != candidate["evidence"]:
+        raise ValueError("D19 candidateReleaseAuthority evidence does not match candidateRelease")
+    if candidate_authority["releaseDigest"] != candidate["releaseDigest"]:
+        raise ValueError("D19 candidateReleaseAuthority digest does not match candidateRelease")
     for field_name, plan_field in (
         ("tenantId", "tenant_id"),
         ("registryResourceId", "registry_resource_id"),
@@ -6892,11 +8008,15 @@ def _validated_d19_promotion_snapshot(
     return {
         "baselineRelease": baseline,
         "candidateRelease": candidate,
+        "candidateReleaseAuthority": candidate_authority,
         "metricCompatibilityMatrixEvidence": _worm_evidence_reference(
             promotion, "metricCompatibilityMatrixEvidence"
         ),
-        "objectiveSpecificationEvidence": _worm_evidence_reference(
-            promotion, "objectiveSpecificationEvidence"
+        "evaluationObjectiveEvidence": _worm_evidence_reference(
+            promotion, "evaluationObjectiveEvidence"
+        ),
+        "evaluationObjectiveAttestationEvidence": _worm_evidence_reference(
+            promotion, "evaluationObjectiveAttestationEvidence"
         ),
         "promotionEvidence": evidence,
         "promotionId": _required_str(promotion, "promotionId"),
@@ -8083,7 +9203,36 @@ def _assert_sequence_equal(
 
 
 def _canonical_json(value: Mapping[str, Any]) -> str:
-    return json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    return rfc8785.dumps(value).decode("utf-8")
+
+
+def _canonical_json_object_bytes(payload: bytes, field_name: str) -> dict[str, Any]:
+    try:
+        decoded = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_nonfinite_json_constant,
+        )
+        if not isinstance(decoded, dict):
+            raise ValueError("root value is not an object")
+        if _canonical_json(decoded).encode("utf-8") != payload:
+            raise ValueError("input bytes are not canonical")
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a canonical RFC 8785 JSON object") from exc
+    return cast(dict[str, Any], decoded)
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object member: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_json_constant(value: str) -> NoReturn:
+    raise ValueError(f"non-finite JSON number: {value}")
 
 
 def _required_object_list(payload: Mapping[str, Any], field_name: str) -> list[Mapping[str, Any]]:

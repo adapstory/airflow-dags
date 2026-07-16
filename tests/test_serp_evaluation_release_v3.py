@@ -8,12 +8,14 @@ from hashlib import sha256
 from typing import Any
 
 import pytest
+import rfc8785
 
 import dags.serp_eval_contracts as serp_eval_contracts
 from dags.serp_eval_contracts import (
     MANDATORY_SERP_BENCHMARK_SUITES,
     build_benchmark_improvement_wave_plan,
     build_model_catalog_promotion_plan,
+    load_benchmark_pack_lifecycle_result_snapshot,
     load_governed_model_releases,
     load_model_catalog_promotion_snapshot,
     write_model_catalog_promotion_receipt,
@@ -26,7 +28,7 @@ BINDING_ID = "018f5e13-2d73-7a77-a052-8d1bcbf96701"
 
 
 def _canonical_bytes(payload: Mapping[str, Any]) -> bytes:
-    return json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return rfc8785.dumps(payload)
 
 
 def _handle(
@@ -170,6 +172,20 @@ def _release_pair(
 
     releases: dict[str, dict[str, Any]] = {}
     release_handles: dict[str, dict[str, str]] = {}
+    release_authorities = {
+        "baseline": {
+            "canaryState": "passed",
+            "modelId": "serp-all-nine-baseline-router@2026.07.2",
+            "provider": "adapstory-model-gateway",
+            "purpose": "serp-benchmark-baseline",
+        },
+        "candidate": {
+            "canaryState": "passed",
+            "modelId": "serp-all-nine-candidate-router@2026.07.3",
+            "provider": "adapstory-model-gateway",
+            "purpose": "serp-benchmark-candidate",
+        },
+    }
     for side in ("baseline", "candidate"):
         suite_profiles = profiles(side)
         profile_set_evidence = component(
@@ -181,11 +197,12 @@ def _release_pair(
             },
         )
         core = {
-            "schema": "EvaluationRelease/v2",
+            "schema": "EvaluationRelease/v3",
             "activationStatus": activation_status,
             "releaseId": f"serp-{side}-release-2026.07.1",
             "runtimeEvidence": runtime_evidence[side],
             "profileSetEvidence": profile_set_evidence,
+            "releaseAuthority": release_authorities[side],
             "suiteProfiles": suite_profiles,
         }
         release = {**core, "releaseDigest": "sha256:" + sha256(_canonical_bytes(core)).hexdigest()}
@@ -197,20 +214,28 @@ def _release_pair(
         {"schema": "MetricCompatibilityMatrix/v1", "suiteMetricFamilies": []},
         objects,
     )
-    objective_evidence = _handle(
-        "paired-evaluation-objective",
+    evaluation_objective_evidence = _handle(
+        "evaluation-objective",
         {
             "metricCells": [],
-            "schema": "PairedEvaluationObjectiveSpecification/v1",
+            "objectiveId": "serp-all-nine-quality",
+            "schema": "EvaluationObjective/v5",
+            "version": "serp-all-nine-quality-444444444444.v5",
         },
+        objects,
+    )
+    evaluation_objective_attestation_evidence = _handle(
+        "evaluation-objective-attestation",
+        {"schema": "ArtifactSignatureAttestationReceipt/v2"},
         objects,
     )
     bundle = {
         "apiVersion": "serp.adapstory.ai/v2alpha1",
-        "contractVersion": "serp-ci-evaluation-release-evidence/v3",
+        "contractVersion": "serp-ci-evaluation-release-evidence/v5",
         "kind": "EvaluationReleaseEvidence",
         "metricCompatibilityMatrixEvidence": metric_matrix_evidence,
-        "objectiveSpecificationEvidence": objective_evidence,
+        "evaluationObjectiveEvidence": evaluation_objective_evidence,
+        "evaluationObjectiveAttestationEvidence": (evaluation_objective_attestation_evidence),
         "operationId": "ci-evaluation-release-161",
         "registryResourceId": RESOURCE_ID,
         "registryResourceType": "workflow",
@@ -259,7 +284,7 @@ def _d19_conf() -> dict[str, object]:
     }
 
 
-def test_d17_consumes_ci_v3_bundle_and_seals_governed_v2_promotion() -> None:
+def test_d17_consumes_ci_v5_bundle_and_seals_governed_v5_promotion() -> None:
     bundle, objects = _release_pair()
     plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
 
@@ -269,8 +294,10 @@ def test_d17_consumes_ci_v3_bundle_and_seals_governed_v2_promotion() -> None:
         plan.payload["metric_compatibility_matrix_evidence"]
         == bundle["metricCompatibilityMatrixEvidence"]
     )
+    assert plan.payload["evaluation_objective_evidence"] == bundle["evaluationObjectiveEvidence"]
     assert (
-        plan.payload["objective_specification_evidence"] == bundle["objectiveSpecificationEvidence"]
+        plan.payload["evaluation_objective_attestation_evidence"]
+        == bundle["evaluationObjectiveAttestationEvidence"]
     )
     assert "evaluation_release_evidence" not in plan.payload
 
@@ -283,7 +310,7 @@ def test_d17_consumes_ci_v3_bundle_and_seals_governed_v2_promotion() -> None:
         plan.to_canonical_json(), releases, snapshot_writer=_snapshot_writer
     )
     payload = receipt["payload"]
-    assert payload["schema"] == "EvaluationReleasePromotionReceipt/v3"
+    assert payload["schema"] == "EvaluationReleasePromotionReceipt/v5"
     assert payload["status"] == "approved-for-evaluation"
     assert payload["baselineRelease"] == {
         "evidence": bundle["baselineReleaseEvidence"],
@@ -293,14 +320,32 @@ def test_d17_consumes_ci_v3_bundle_and_seals_governed_v2_promotion() -> None:
         "evidence": bundle["candidateReleaseEvidence"],
         "releaseDigest": bundle["candidateRelease"]["releaseDigest"],
     }
+    assert payload["candidateReleaseAuthority"] == {
+        **bundle["candidateRelease"]["releaseAuthority"],
+        "evidence": bundle["candidateReleaseEvidence"],
+        "releaseDigest": bundle["candidateRelease"]["releaseDigest"],
+        "releaseId": bundle["candidateRelease"]["releaseId"],
+    }
     assert (
         payload["metricCompatibilityMatrixEvidence"] == bundle["metricCompatibilityMatrixEvidence"]
     )
-    assert payload["objectiveSpecificationEvidence"] == bundle["objectiveSpecificationEvidence"]
+    assert payload["evaluationObjectiveEvidence"] == bundle["evaluationObjectiveEvidence"]
+    assert (
+        payload["evaluationObjectiveAttestationEvidence"]
+        == bundle["evaluationObjectiveAttestationEvidence"]
+    )
     assert receipt["promotionEvidence"]["retainUntil"] == "2027-07-15T00:00:00Z"
     serialized = json.dumps(payload, sort_keys=True)
     for forbidden in ("suiteProfiles", "replay", "ModelRelease/v1"):
         assert forbidden not in serialized
+
+
+def test_d17_rejects_ci_v3_bundle_without_compatibility_fallback() -> None:
+    bundle, _objects = _release_pair()
+    bundle["contractVersion"] = "serp-ci-evaluation-release-evidence/v3"
+
+    with pytest.raises(ValueError, match="contractVersion is unsupported"):
+        build_model_catalog_promotion_plan(_promotion_conf(bundle))
 
 
 def test_d17_rejects_blocked_activation_and_missing_treatment() -> None:
@@ -340,6 +385,20 @@ def test_d17_rejects_component_evidence_tampering() -> None:
         load_governed_model_releases(plan.to_canonical_json(), s3_client=_FakeS3(objects))
 
 
+def test_d17_rejects_noncanonical_release_bytes_even_when_digest_matches() -> None:
+    bundle, objects = _release_pair()
+    release_evidence = bundle["baselineReleaseEvidence"]
+    body = json.dumps(bundle["baselineRelease"], sort_keys=False).encode("utf-8")
+    bucket = "airflow-serp-evidence"
+    key = release_evidence["s3Uri"].removeprefix(f"s3://{bucket}/")
+    objects[(bucket, key, release_evidence["versionId"])] = body
+    release_evidence["sha256"] = "sha256:" + sha256(body).hexdigest()
+    plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
+
+    with pytest.raises(ValueError, match="canonical RFC 8785"):
+        load_governed_model_releases(plan.to_canonical_json(), s3_client=_FakeS3(objects))
+
+
 def test_d17_uses_a_read_only_session_for_the_exact_ci_release_operation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -362,7 +421,7 @@ def test_d17_uses_a_read_only_session_for_the_exact_ci_release_operation(
     ]
 
 
-def test_d19_rereads_the_v2_promotion_and_both_release_manifests() -> None:
+def test_d19_rereads_the_v5_promotion_and_both_release_manifests() -> None:
     bundle, objects = _release_pair()
     d17_plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
     releases = load_governed_model_releases(
@@ -384,7 +443,7 @@ def test_d19_rereads_the_v2_promotion_and_both_release_manifests() -> None:
         d19_plan.to_canonical_json(), s3_client=_FakeS3(objects)
     )
 
-    assert snapshot["promotion"]["schema"] == "EvaluationReleasePromotionReceipt/v3"
+    assert snapshot["promotion"]["schema"] == "EvaluationReleasePromotionReceipt/v5"
     assert (
         snapshot["promotion"]["baselineRelease"]["releaseDigest"]
         == bundle["baselineRelease"]["releaseDigest"]
@@ -393,17 +452,141 @@ def test_d19_rereads_the_v2_promotion_and_both_release_manifests() -> None:
         snapshot["promotion"]["candidateRelease"]["releaseDigest"]
         == bundle["candidateRelease"]["releaseDigest"]
     )
+    assert snapshot["promotion"]["candidateReleaseAuthority"] == {
+        **bundle["candidateRelease"]["releaseAuthority"],
+        "evidence": bundle["candidateReleaseEvidence"],
+        "releaseDigest": bundle["candidateRelease"]["releaseDigest"],
+        "releaseId": bundle["candidateRelease"]["releaseId"],
+    }
     assert (
         snapshot["promotion"]["metricCompatibilityMatrixEvidence"]
         == bundle["metricCompatibilityMatrixEvidence"]
     )
     assert (
-        snapshot["promotion"]["objectiveSpecificationEvidence"]
-        == bundle["objectiveSpecificationEvidence"]
+        snapshot["promotion"]["evaluationObjectiveEvidence"]
+        == bundle["evaluationObjectiveEvidence"]
+    )
+    assert (
+        snapshot["promotion"]["evaluationObjectiveAttestationEvidence"]
+        == bundle["evaluationObjectiveAttestationEvidence"]
     )
 
 
-def test_d19_builds_scoreless_reference_only_paired_request_v2(
+def test_d19_rejects_duplicate_promotion_member_even_when_digest_matches() -> None:
+    bundle, objects = _release_pair()
+    d17_plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
+    releases = load_governed_model_releases(
+        d17_plan.to_canonical_json(), s3_client=_FakeS3(objects)
+    )
+    receipt = write_model_catalog_promotion_receipt(
+        d17_plan.to_canonical_json(), releases, snapshot_writer=_snapshot_writer
+    )
+    canonical_body = _canonical_bytes(receipt["payload"])
+    body = b'{"schema":"EvaluationReleasePromotionReceipt/v5",' + canonical_body[1:]
+    receipt_evidence = dict(receipt["promotionEvidence"])
+    receipt_evidence["sha256"] = "sha256:" + sha256(body).hexdigest()
+    bucket = "airflow-serp-evidence"
+    receipt_key = receipt_evidence["s3Uri"].removeprefix(f"s3://{bucket}/")
+    objects[(bucket, receipt_key, receipt_evidence["versionId"])] = body
+    conf = _d19_conf()
+    conf["evaluation_release_promotion_evidence"] = receipt_evidence
+    d19_plan = build_benchmark_improvement_wave_plan(conf)
+
+    with pytest.raises(ValueError, match="canonical RFC 8785"):
+        load_model_catalog_promotion_snapshot(
+            d19_plan.to_canonical_json(), s3_client=_FakeS3(objects)
+        )
+
+
+def test_d19_rejects_noncanonical_lifecycle_number_even_when_digest_matches() -> None:
+    bundle, objects = _release_pair()
+    d17_plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
+    releases = load_governed_model_releases(
+        d17_plan.to_canonical_json(), s3_client=_FakeS3(objects)
+    )
+    receipt = write_model_catalog_promotion_receipt(
+        d17_plan.to_canonical_json(), releases, snapshot_writer=_snapshot_writer
+    )
+    receipt_evidence = receipt["promotionEvidence"]
+    receipt_body = _canonical_bytes(receipt["payload"])
+    bucket = "airflow-serp-evidence"
+    receipt_key = receipt_evidence["s3Uri"].removeprefix(f"s3://{bucket}/")
+    objects[(bucket, receipt_key, receipt_evidence["versionId"])] = receipt_body
+    conf = _d19_conf()
+    conf["evaluation_release_promotion_evidence"] = receipt_evidence
+    d19_plan = build_benchmark_improvement_wave_plan(conf)
+    promotion_snapshot = load_model_catalog_promotion_snapshot(
+        d19_plan.to_canonical_json(), s3_client=_FakeS3(objects)
+    )
+    promotion = promotion_snapshot["promotion"]
+    lifecycle_result = {
+        "schema": "BC21AllNineBenchmarkPackLifecycleResult/v1",
+        "tenantId": TENANT_ID,
+        "evaluationBindingId": BINDING_ID,
+        "evaluationBindingEvidence": _reference("evaluation-binding", "b"),
+        "bindingFingerprint": "sha256:" + "f" * 64,
+        "expiresAt": "2026-07-15T07:10:00Z",
+        "evaluationReleasePromotionEvidence": promotion_snapshot["promotionEvidence"],
+        "baselineReleaseEvidence": promotion["baselineRelease"]["evidence"],
+        "candidateReleaseEvidence": promotion["candidateRelease"]["evidence"],
+        "baselineReleaseDigest": promotion["baselineRelease"]["releaseDigest"],
+        "candidateReleaseDigest": promotion["candidateRelease"]["releaseDigest"],
+        "packMaterialBindings": [
+            {"suiteId": suite_id} for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+        ],
+        "suiteExecutionBindings": [
+            {"suiteId": suite_id} for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+        ],
+        "indexedReceiptCount": 18,
+        "productionActivationRequested": False,
+    }
+    body = _canonical_bytes(lifecycle_result).replace(
+        b'"indexedReceiptCount":18', b'"indexedReceiptCount":1.8e1'
+    )
+    lifecycle_path = d19_plan.payload["artifact_paths"]["benchmark_pack_lifecycle_result"]
+    lifecycle_version = "lifecycle-version-001"
+    lifecycle_key = lifecycle_path.removeprefix(f"s3://{bucket}/")
+    objects[(bucket, lifecycle_key, lifecycle_version)] = body
+    lifecycle_pointer = {
+        "lifecycleResultEvidence": {
+            "artifactPath": lifecycle_path,
+            "artifactSha256": "sha256:" + sha256(body).hexdigest(),
+            "artifactVersionId": lifecycle_version,
+        }
+    }
+
+    with pytest.raises(ValueError, match="canonical RFC 8785"):
+        load_benchmark_pack_lifecycle_result_snapshot(
+            d19_plan.to_canonical_json(),
+            promotion_snapshot,
+            lifecycle_pointer,
+            s3_client=_FakeS3(objects),
+        )
+
+
+def test_d19_rejects_tampered_candidate_release_authority() -> None:
+    bundle, objects = _release_pair()
+    d17_plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
+    releases = load_governed_model_releases(
+        d17_plan.to_canonical_json(), s3_client=_FakeS3(objects)
+    )
+    receipt = write_model_catalog_promotion_receipt(
+        d17_plan.to_canonical_json(), releases, snapshot_writer=_snapshot_writer
+    )
+    tampered = json.loads(json.dumps(receipt["payload"]))
+    tampered["candidateReleaseAuthority"]["modelId"] = "caller-selected-model"
+    tampered_evidence = _handle("tampered-promotion", tampered, objects)
+    conf = _d19_conf()
+    conf["evaluation_release_promotion_evidence"] = tampered_evidence
+    d19_plan = build_benchmark_improvement_wave_plan(conf)
+
+    with pytest.raises(ValueError, match="governed release authority"):
+        load_model_catalog_promotion_snapshot(
+            d19_plan.to_canonical_json(), s3_client=_FakeS3(objects)
+        )
+
+
+def test_d19_builds_scoreless_reference_only_paired_request_v5(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     plan = build_benchmark_improvement_wave_plan(_d19_conf())
@@ -412,15 +595,27 @@ def test_d19_builds_scoreless_reference_only_paired_request_v2(
     promotion = {
         "promotionEvidence": plan.payload["evaluation_release_promotion_evidence"],
         "promotion": {
-            "schema": "EvaluationReleasePromotionReceipt/v3",
+            "schema": "EvaluationReleasePromotionReceipt/v5",
             "promotionId": "all-nine-eval-2026-07-15",
             "tenantId": TENANT_ID,
             "registryResourceId": RESOURCE_ID,
             "registryResourceType": "workflow",
             "baselineRelease": {"evidence": baseline, "releaseDigest": "sha256:" + "2" * 64},
             "candidateRelease": {"evidence": candidate, "releaseDigest": "sha256:" + "3" * 64},
+            "candidateReleaseAuthority": {
+                "canaryState": "passed",
+                "evidence": candidate,
+                "modelId": "serp-all-nine-candidate-router@2026.07.3",
+                "provider": "adapstory-model-gateway",
+                "purpose": "serp-benchmark-candidate",
+                "releaseDigest": "sha256:" + "3" * 64,
+                "releaseId": "serp-candidate-release-2026.07.1",
+            },
             "metricCompatibilityMatrixEvidence": _reference("metric-matrix", "d"),
-            "objectiveSpecificationEvidence": _reference("objective-spec", "e"),
+            "evaluationObjectiveEvidence": _reference("evaluation-objective", "e"),
+            "evaluationObjectiveAttestationEvidence": _reference(
+                "evaluation-objective-attestation", "c"
+            ),
         },
     }
     monkeypatch.setattr(
@@ -452,7 +647,7 @@ def test_d19_builds_scoreless_reference_only_paired_request_v2(
     )
     request = artifact["payload"]
 
-    assert request["schema"] == "PairedEvaluationRequest/v2"
+    assert request["schema"] == "PairedEvaluationRequest/v5"
     assert (
         request["evaluationReleasePromotionEvidence"]
         == _d19_conf()["evaluation_release_promotion_evidence"]
@@ -466,8 +661,12 @@ def test_d19_builds_scoreless_reference_only_paired_request_v2(
         == promotion["promotion"]["metricCompatibilityMatrixEvidence"]
     )
     assert (
-        request["objectiveSpecificationEvidence"]
-        == promotion["promotion"]["objectiveSpecificationEvidence"]
+        request["evaluationObjectiveEvidence"]
+        == promotion["promotion"]["evaluationObjectiveEvidence"]
+    )
+    assert (
+        request["evaluationObjectiveAttestationEvidence"]
+        == promotion["promotion"]["evaluationObjectiveAttestationEvidence"]
     )
     forbidden = {
         "suiteProfiles",
@@ -505,7 +704,7 @@ def test_d19_rejects_inline_selection_or_scoring_fields(field: str) -> None:
 
 @pytest.mark.parametrize(
     "field",
-    ("metric_compatibility_matrix_evidence", "objective_specification_evidence"),
+    ("metric_compatibility_matrix_evidence", "evaluation_objective_evidence"),
 )
 def test_d19_rejects_caller_supplied_metric_authority(field: str) -> None:
     conf = _d19_conf()
@@ -524,6 +723,8 @@ def _catalog_snapshot(plan: Any) -> dict[str, object]:
         "catalogReceiptPath": plan.payload["artifact_paths"]["benchmark_catalog_receipt"],
         "catalogReceiptSha256": "b" * 64,
         "catalogReceiptVersionId": "catalog-receipt-version-001",
+        "catalogReceiptRetainUntil": "2027-07-15T00:00:00Z",
+        "catalogRetainUntil": "2027-07-15T00:00:00Z",
         "catalogStatus": "ready",
         "objectLockMode": "COMPLIANCE",
         "suiteSummary": [

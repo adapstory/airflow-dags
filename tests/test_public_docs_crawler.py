@@ -313,6 +313,59 @@ def test_crawler_confines_html_and_sitemap_discovery_to_version_seed_path() -> N
     assert sitemap in requested_urls
 
 
+def test_crawler_bounds_policy_denied_evidence_to_max_pages_without_losing_total() -> None:
+    root = "https://kafka.apache.org/43/"
+    sitemap = "https://kafka.apache.org/sitemap.xml"
+    denied_urls = [f"https://kafka.apache.org/{version}/" for version in range(10, 20)]
+    fetcher = FakeFetcher(
+        {
+            "https://kafka.apache.org/robots.txt": CrawlResponse(
+                200,
+                {"content-type": "text/plain"},
+                f"User-agent: *\nAllow: /\nSitemap: {sitemap}\n".encode(),
+            ),
+            sitemap: CrawlResponse(
+                200,
+                {"content-type": "application/xml"},
+                (
+                    "<urlset>"
+                    f"<url><loc>{root}</loc></url>"
+                    + "".join(f"<url><loc>{url}</loc></url>" for url in denied_urls)
+                    + "</urlset>"
+                ).encode(),
+            ),
+            root: CrawlResponse(200, {"content-type": "text/html"}, b"root"),
+        },
+        [],
+    )
+
+    evidence = crawl_public_docs(
+        seed_uri=root,
+        crawl_policy={
+            "allowed_domains": ["kafka.apache.org"],
+            "curated_frontier_urls": [],
+            "deny_patterns": [],
+            "max_depth": 1,
+            "max_pages": 3,
+            "respect_robots_txt": True,
+            "sitemap_discovery": True,
+            "user_agent": "serp-test/1",
+        },
+        previous_state={},
+        fetcher=fetcher,
+    )
+
+    assert evidence["summary"]["blocked"] == len(denied_urls)
+    assert len(evidence["blocked_urls"]) == 3
+    assert len([page for page in evidence["pages"].values() if page["status"] == "blocked"]) == 3
+    assert evidence["evidence_limits"] == {
+        "blocked_observations": len(denied_urls),
+        "blocked_urls_recorded": 3,
+        "blocked_urls_truncated": True,
+        "max_pages": 3,
+    }
+
+
 def test_crawler_allows_an_explicit_curated_frontier_without_opening_sibling_paths() -> None:
     root = "https://docs.example.com/latest/"
     curated = "https://docs.example.com/release-notes/"

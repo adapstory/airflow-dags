@@ -36,6 +36,7 @@ from dags.serp_eval_contracts import (
     write_nightly_suite_plan_artifact,
 )
 from dags.serp_evidence_workload_identity import (
+    evaluation_admission_verifier_executor_config,
     kubernetes_pod_launcher_executor_config,
     minio_web_identity_executor_config,
 )
@@ -52,6 +53,15 @@ NIGHTLY_EVALUATOR_EXECUTOR_CONFIG = minio_web_identity_executor_config(
         "release": "airflow",
         "tier": "airflow",
     },
+)
+NIGHTLY_ADMISSION_VERIFIER_EXECUTOR_CONFIG = evaluation_admission_verifier_executor_config(
+    labels={
+        "adapstory.com/serp-evidence-workload": "true",
+        "adapstory.com/serp-network-profile": "evaluation-admission-verifier",
+        "component": "worker",
+        "release": "airflow",
+        "tier": "airflow",
+    }
 )
 
 
@@ -192,7 +202,7 @@ build_benchmark_export = PythonOperator(
     task_id="build_c1_benchmark_gate_export",
     python_callable=build_c1_benchmark_gate_export,
     op_args=["{{ ti.xcom_pull(task_ids='validate_nightly_regression_plan') }}"],
-    executor_config=NIGHTLY_EVALUATOR_EXECUTOR_CONFIG,
+    executor_config=NIGHTLY_ADMISSION_VERIFIER_EXECUTOR_CONFIG,
     dag=dag,
 )
 

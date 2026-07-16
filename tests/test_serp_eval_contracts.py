@@ -12,7 +12,7 @@ from email.message import Message
 from hashlib import sha256
 from pathlib import Path
 from threading import Barrier
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 from urllib.error import HTTPError
 from urllib.parse import urlparse
 from urllib.request import Request
@@ -405,6 +405,41 @@ def test_public_docs_seed_refresh_passes_committed_page_state_to_live_crawler(
     assert observed_previous_states == [prior_page_state]
 
 
+def test_governed_airflow_json_uses_rfc8785_bytes() -> None:
+    payload = {
+        "literals": [None, True, False],
+        "numbers": [333333333.33333329, 1e30, 4.50, 2e-3, 1e-27],
+        "string": '€$\u000f\nA\'B"\\"/',
+    }
+
+    assert serp_eval_contracts_module._canonical_json(payload) == (
+        '{"literals":[null,true,false],'
+        '"numbers":[333333333.3333333,1e+30,4.5,0.002,1e-27],'
+        '"string":"€$\\u000f\\nA\'B\\"\\\\\\"/"}'
+    )
+
+
+@pytest.mark.parametrize("unsupported", (float("nan"), float("inf"), 2**53))
+def test_governed_airflow_json_rejects_cross_language_ambiguous_numbers(
+    unsupported: object,
+) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        serp_eval_contracts_module._canonical_json({"value": unsupported})
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        b'{"duplicate":1,"duplicate":2}',
+        b'{ "spaced":true}',
+        b'{"unicode":"\\u00e9"}',
+    ),
+)
+def test_governed_airflow_json_parser_rejects_ambiguous_bytes(payload: bytes) -> None:
+    with pytest.raises(ValueError, match="canonical RFC 8785"):
+        serp_eval_contracts_module._canonical_json_object_bytes(payload, "artifact")
+
+
 def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:
     plan = build_nightly_regression_plan(_nightly_conf())
     repeated = build_nightly_regression_plan(json.loads(plan.to_canonical_json()))
@@ -438,6 +473,11 @@ def test_build_nightly_regression_plan_requires_all_mandatory_suites() -> None:
             "/var/opt/adapstory/serp-evals/"
             f"{plan.payload['operation_id']}/benchmark-catalog-materialization-receipt.json"
         ),
+        "evaluation_objective": _nightly_worm_evidence("evaluation-objective")["s3Uri"],
+        "paired_evaluation_receipt": _nightly_worm_evidence("paired-evaluation-receipt")["s3Uri"],
+        "paired_evaluation_verification": _nightly_worm_evidence("paired-evaluation-verification")[
+            "s3Uri"
+        ],
         "suite_plan": (
             f"/var/opt/adapstory/serp-evals/{plan.payload['operation_id']}/suite-plan.json"
         ),
@@ -480,7 +520,19 @@ def test_default_nightly_regression_conf_is_runtime_owned_and_canonical(
         "ADAPSTORY_AIRFLOW_ARTIFACT_ROOT": "s3://airflow-serp-evidence/serp-evals",
         "ADAPSTORY_SERP_BC21_BASE_URL": "http://serp-context-platform.env-dev.svc.cluster.local",
         "ADAPSTORY_SERP_D6_ACTOR_ID": "airflow-serp-eval-runner",
+        "ADAPSTORY_SERP_D6_CANDIDATE_RELEASE_EVIDENCE": json.dumps(
+            _nightly_worm_evidence("candidate-release")
+        ),
+        "ADAPSTORY_SERP_D6_EVALUATION_OBJECTIVE_EVIDENCE": json.dumps(
+            _nightly_worm_evidence("evaluation-objective")
+        ),
         "ADAPSTORY_SERP_D6_PACK_VERSION_IDS": json.dumps([PACK_VERSION_ID]),
+        "ADAPSTORY_SERP_D6_PAIRED_EVALUATION_RECEIPT_EVIDENCE": json.dumps(
+            _nightly_worm_evidence("paired-evaluation-receipt")
+        ),
+        "ADAPSTORY_SERP_D6_PAIRED_EVALUATION_VERIFICATION_EVIDENCE": json.dumps(
+            _nightly_worm_evidence("paired-evaluation-verification")
+        ),
         "ADAPSTORY_SERP_D6_REGISTRY_RESOURCE_ID": REGISTRY_RESOURCE_ID,
         "ADAPSTORY_SERP_D6_REGISTRY_RESOURCE_TYPE": "workflow",
         "ADAPSTORY_SERP_D6_RERANKER_PROFILE_VERSION": "reranker@2026.07.1",
@@ -494,6 +546,7 @@ def test_default_nightly_regression_conf_is_runtime_owned_and_canonical(
     plan = build_nightly_regression_plan(conf)
 
     assert conf["selected_suite_ids"] == list(MANDATORY_SERP_BENCHMARK_SUITES)
+    assert conf["candidateReleaseEvidence"] == _nightly_worm_evidence("candidate-release")
     assert plan.payload["selected_suite_ids"] == list(MANDATORY_SERP_BENCHMARK_SUITES)
 
     monkeypatch.delenv("ADAPSTORY_SERP_D6_PACK_VERSION_IDS")
@@ -853,7 +906,7 @@ def test_load_materialized_catalog_binds_receipt_and_catalog_s3_versions(
             for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
         ],
     }
-    catalog_bytes = json.dumps(catalog_payload, sort_keys=True).encode("utf-8")
+    catalog_bytes = serp_eval_contracts_module._canonical_json(catalog_payload).encode("utf-8")
     receipt_payload = {
         "catalogSnapshot": {
             "artifactPath": catalog_path,
@@ -930,7 +983,11 @@ def test_load_materialized_catalog_binds_receipt_and_catalog_s3_versions(
             assert Bucket == "airflow-serp-evidence"
             if VersionId == "receipt-v1":
                 assert Key == receipt_path.removeprefix("s3://airflow-serp-evidence/")
-                return {"Body": Body(json.dumps(receipt_payload, sort_keys=True).encode("utf-8"))}
+                return {
+                    "Body": Body(
+                        serp_eval_contracts_module._canonical_json(receipt_payload).encode("utf-8")
+                    )
+                }
             assert VersionId == "catalog-v1"
             assert Key == catalog_path.removeprefix("s3://airflow-serp-evidence/")
             return {"Body": Body(catalog_bytes)}
@@ -999,11 +1056,26 @@ def test_write_airflow_plan_artifact_writes_s3_artifact_root(
     plan_json = write_airflow_plan_artifact(plan)
 
     assert json.loads(plan_json) == plan.payload
+    gateway_plan = {
+        "actor_id": plan.payload["actor_id"],
+        "candidateReleaseEvidence": plan.payload["candidateReleaseEvidence"],
+        "dag_id": plan.payload["dag_id"],
+        "generated_at": plan.payload["generated_at"],
+        "normalized_gate_floor": plan.payload["normalized_gate_floor"],
+        "operation_id": plan.payload["operation_id"],
+        "pack_version_ids": plan.payload["pack_version_ids"],
+        "registry_resource_id": plan.payload["registry_resource_id"],
+        "registry_resource_type": plan.payload["registry_resource_type"],
+        "reranker_profile_version": plan.payload["reranker_profile_version"],
+        "retrieval_profile_version": plan.payload["retrieval_profile_version"],
+        "selected_suite_ids": plan.payload["selected_suite_ids"],
+        "tenant_id": plan.payload["tenant_id"],
+    }
     assert put_calls == [
         (
             bucket,
             key,
-            json.dumps(plan.payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+            json.dumps(gateway_plan, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
             "application/json",
         )
     ]
@@ -1045,6 +1117,12 @@ def test_build_nightly_gateway_cli_specs_are_file_based_and_deterministic() -> N
         plan.payload["artifact_paths"]["airflow_plan"],
         "--nightly-report",
         plan.payload["artifact_paths"]["nightly_report"],
+        "--evaluation-objective",
+        plan.payload["artifact_paths"]["evaluation_objective"],
+        "--paired-evaluation-receipt",
+        plan.payload["artifact_paths"]["paired_evaluation_receipt"],
+        "--paired-evaluation-verification",
+        plan.payload["artifact_paths"]["paired_evaluation_verification"],
     ]
     assert (
         benchmark_export["stdout_path"] == plan.payload["artifact_paths"]["benchmark_gate_export"]
@@ -1052,6 +1130,9 @@ def test_build_nightly_gateway_cli_specs_are_file_based_and_deterministic() -> N
     assert benchmark_export["input_paths"] == [
         plan.payload["artifact_paths"]["airflow_plan"],
         plan.payload["artifact_paths"]["nightly_report"],
+        plan.payload["artifact_paths"]["evaluation_objective"],
+        plan.payload["artifact_paths"]["paired_evaluation_receipt"],
+        plan.payload["artifact_paths"]["paired_evaluation_verification"],
     ]
 
     assert submissions["status"] == "ready_for_gateway_cli_runner"
@@ -1956,7 +2037,7 @@ def test_execute_gateway_cli_spec_materializes_s3_inputs_and_uploads_stdout(
     )
 
 
-def test_evaluate_nightly_regression_gate_blocks_below_normalized_floor() -> None:
+def test_evaluate_nightly_regression_gate_enforces_exact_090_boundary() -> None:
     gate = evaluate_nightly_regression_gate(
         {
             "suite_results": [
@@ -1966,7 +2047,7 @@ def test_evaluate_nightly_regression_gate_blocks_below_normalized_floor() -> Non
                         {
                             "metric": "Recall@10",
                             "metric_family": "retrieval",
-                            "normalized_score": 0.81,
+                            "normalized_score": 0.899,
                         }
                     ],
                 },
@@ -1976,7 +2057,7 @@ def test_evaluate_nightly_regression_gate_blocks_below_normalized_floor() -> Non
                         {
                             "metric": "nDCG@10",
                             "metric_family": "retrieval",
-                            "normalized_score": 0.74,
+                            "normalized_score": 0.9,
                         }
                     ],
                 },
@@ -1985,12 +2066,13 @@ def test_evaluate_nightly_regression_gate_blocks_below_normalized_floor() -> Non
     )
 
     assert gate["status"] == "blocked"
+    assert gate["normalized_gate_floor"] == 0.9
     assert gate["blocking_findings"] == [
         {
-            "metric": "nDCG@10",
+            "metric": "Recall@10",
             "metric_family": "retrieval",
-            "normalized_score": 0.74,
-            "suite_id": "APIBench",
+            "normalized_score": 0.899,
+            "suite_id": "RAGBench",
         }
     ]
 
@@ -2126,6 +2208,10 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
             "s3://airflow-serp-evidence/serp-evals/"
             f"{plan.payload['operation_id']}/benchmark-catalog-materialization-receipt.json"
         ),
+        "benchmark_catalog_pack_activation": (
+            "s3://airflow-serp-evidence/serp-evals/"
+            f"{plan.payload['operation_id']}/benchmark-catalog-pack-activation.json"
+        ),
         "benchmark_pack_build_result": (
             "s3://airflow-serp-evidence/serp-evals/"
             f"{plan.payload['operation_id']}/benchmark-pack-build-result.json"
@@ -2253,7 +2339,7 @@ def test_paired_eval_request_derives_canonical_catalog_bindings_as_worm_evidence
     )
     request = request_artifact["payload"]
 
-    assert request["schema"] == "PairedEvaluationRequest/v2"
+    assert request["schema"] == "PairedEvaluationRequest/v5"
     assert request["evaluationBindingId"] == lifecycle_result["evaluationBindingId"]
     assert request["evaluationBindingEvidence"] == lifecycle_result["evaluationBindingEvidence"]
     assert (
@@ -2261,31 +2347,74 @@ def test_paired_eval_request_derives_canonical_catalog_bindings_as_worm_evidence
         == promotion_snapshot["promotion"]["metricCompatibilityMatrixEvidence"]
     )
     assert (
-        request["objectiveSpecificationEvidence"]
-        == promotion_snapshot["promotion"]["objectiveSpecificationEvidence"]
+        request["evaluationObjectiveEvidence"]
+        == promotion_snapshot["promotion"]["evaluationObjectiveEvidence"]
+    )
+    assert (
+        request["evaluationObjectiveAttestationEvidence"]
+        == promotion_snapshot["promotion"]["evaluationObjectiveAttestationEvidence"]
     )
     assert request["benchmarkCatalogEvidence"] == {
         "catalog": {
+            "objectLockMode": "COMPLIANCE",
+            "retainUntil": "2027-07-14T00:00:00Z",
             "s3Uri": plan.payload["artifact_paths"]["benchmark_catalog"],
             "sha256": "sha256:" + "a" * 64,
             "versionId": "catalog-version-001",
         },
+        "activation": {
+            "objectLockMode": "COMPLIANCE",
+            "retainUntil": "2027-07-14T00:00:00Z",
+            "s3Uri": plan.payload["artifact_paths"]["benchmark_catalog_pack_activation"],
+            "sha256": "sha256:" + "a" * 64,
+            "versionId": "paired-request-version-001",
+        },
         "receipt": {
+            "objectLockMode": "COMPLIANCE",
+            "retainUntil": "2027-07-14T00:00:00Z",
             "s3Uri": plan.payload["artifact_paths"]["benchmark_catalog_receipt"],
             "sha256": "sha256:" + "b" * 64,
             "versionId": "catalog-receipt-version-001",
         },
     }
+    activation = snapshots[0]["payload"]
+    assert activation == {
+        "activationStatus": "evaluation-only",
+        "benchmarkCatalogEvidence": {
+            "catalog": request["benchmarkCatalogEvidence"]["catalog"],
+            "receipt": request["benchmarkCatalogEvidence"]["receipt"],
+        },
+        "bindingFingerprint": lifecycle_result["bindingFingerprint"],
+        "contractVersion": "BenchmarkCatalogPackActivation/v1",
+        "evaluationBindingEvidence": lifecycle_result["evaluationBindingEvidence"],
+        "evaluationBindingId": lifecycle_result["evaluationBindingId"],
+        "operationId": plan.payload["operation_id"],
+        "productionActivationRequested": False,
+        "suitePackBindings": lifecycle_result["packMaterialBindings"],
+        "tenantId": plan.payload["tenant_id"],
+    }
     assert "Score" not in json.dumps(request)
-    assert snapshots == [
-        {
-            "artifact_path": plan.payload["artifact_paths"]["paired_eval_request"],
-            "artifact_type": "serp_paired_eval_request",
-            "operation_id": plan.payload["operation_id"],
-            "payload": request,
-        }
+    assert [snapshot["artifact_path"] for snapshot in snapshots] == [
+        plan.payload["artifact_paths"]["benchmark_catalog_pack_activation"],
+        plan.payload["artifact_paths"]["paired_eval_request"],
     ]
+    assert [snapshot["artifact_type"] for snapshot in snapshots] == [
+        "benchmark_catalog_pack_activation",
+        "serp_paired_eval_request",
+    ]
+    assert snapshots[1]["payload"] == request
     assert request_artifact["requestEvidence"]["artifactVersionId"] == "paired-request-version-001"
+
+
+def test_d19_rejects_v3_promotion_without_compatibility_fallback() -> None:
+    plan = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
+    promotion_snapshot = _d19_promotion_snapshot(plan)
+    promotion_snapshot["promotion"]["schema"] = "EvaluationReleasePromotionReceipt/v3"
+
+    with pytest.raises(ValueError, match="promotion schema is unsupported"):
+        serp_eval_contracts_module._validated_d19_promotion_snapshot(
+            plan.payload, promotion_snapshot
+        )
 
 
 def test_build_paired_benchmark_plan_exposes_only_server_owned_evaluation_paths() -> None:
@@ -2294,6 +2423,7 @@ def test_build_paired_benchmark_plan_exposes_only_server_owned_evaluation_paths(
     assert set(plan.payload["artifact_paths"]) == {
         "airflow_plan",
         "benchmark_catalog",
+        "benchmark_catalog_pack_activation",
         "benchmark_catalog_receipt",
         "benchmark_pack_build_result",
         "benchmark_pack_lifecycle_result",
@@ -4686,6 +4816,11 @@ def test_public_docs_publish_activation_plan_accepts_s3_d20_result(
 
     conf = _public_docs_publish_activation_conf(seed_refresh_result_path)
     conf["artifact_root_path"] = "s3://airflow-serp-artifacts/serp-evals"
+    conf["public_docs_seed_refresh_plan_evidence"] = {
+        "s3Uri": conf["public_docs_seed_refresh_plan_path"],
+        "sha256": "sha256:" + "9" * 64,
+        "versionId": "d20-refresh-plan-version-1",
+    }
     plan = build_public_docs_publish_activation_plan(conf)
     plan.payload["artifact_paths"]["public_docs_publish_activation_request"] = request_path
     plan.payload["artifact_paths"]["public_docs_publish_activation_receipt"] = receipt_path
@@ -5385,6 +5520,11 @@ def test_serp_nightly_dag_uses_live_gateway_cli_for_d6_path() -> None:
     assert "execute_gateway_cli_spec" in source
     assert "build_nightly_runner_cli_spec" in source
     assert "build_nightly_benchmark_export_cli_spec" in source
+    assert "NIGHTLY_ADMISSION_VERIFIER_EXECUTOR_CONFIG" in source
+    assert "evaluation_admission_verifier_executor_config" in source
+    export_task = source[source.index("build_benchmark_export = PythonOperator(") :]
+    export_task = export_task[: export_task.index("build_submissions = PythonOperator(")]
+    assert "executor_config=NIGHTLY_ADMISSION_VERIFIER_EXECUTOR_CONFIG" in export_task
     assert "build_nightly_registry_submit_cli_spec" in source
     assert "write_nightly_report_artifact" not in source
     assert "write_nightly_registry_receipts_artifact" not in source
@@ -5422,6 +5562,7 @@ def test_serp_public_docs_dag_runs_default_seed_registry_pipeline_path() -> None
     assert "datetime.now(UTC)" in source
     assert "KubernetesPodOperator" in source
     assert "run_public_docs_seed_refresh_pipeline" in source
+    assert 'cmds=["python", "-m", "dags.serp_public_docs_seed_refresh_remote_runner"]' in source
     assert "airflow-serp-evidence-store" not in source
     assert "minio_web_identity_env_vars" in source
     assert "minio_web_identity_volumes" in source
@@ -5507,8 +5648,8 @@ def test_serp_public_docs_pipeline_task_survives_scheduler_rollout() -> None:
             assert "pipeline_runner_env_vars" in source
             assert "current_airflow_runtime_image" in source
             assert "ADAPSTORY_SERP_EMBEDDING_DIMENSION" in source
-            assert "volumes=PUBLIC_DOCS_ACQUISITION_WEB_IDENTITY_VOLUMES" in source
-            assert "volume_mounts=PUBLIC_DOCS_ACQUISITION_WEB_IDENTITY_VOLUME_MOUNTS" in source
+            assert "volumes=PUBLIC_DOCS_ACQUISITION_RUNTIME_VOLUMES" in source
+            assert "volume_mounts=PUBLIC_DOCS_ACQUISITION_RUNTIME_VOLUME_MOUNTS" in source
             labels = next(keyword.value for keyword in node.keywords if keyword.arg == "labels")
             assert isinstance(labels, ast.Name)
             assert labels.id == "PUBLIC_DOCS_ACQUISITION_WORKLOAD_LABELS"
@@ -5720,30 +5861,74 @@ def test_prepare_public_docs_d5_dispatch_skips_noop_without_triggering_d5(
 
 
 def test_serp_public_docs_dag_overlays_partial_run_conf_on_default_seed_registry(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_airflow_import_stubs(monkeypatch)
     module = importlib.import_module("dags.serp_web_seed_crawl_refresh")
     module = importlib.reload(module)
     monkeypatch.setattr(module, "discover_public_docs_crawler_frontier", lambda *_args: [])
+    monkeypatch.setenv("ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS", "30")
+    storage: dict[tuple[str, str, str], bytes] = {}
+
+    class MissingObjectError(Exception):
+        response: ClassVar[dict[str, dict[str, str]]] = {"Error": {"Code": "NoSuchKey"}}
+
+    class FakeS3Client:
+        def put_object(
+            self,
+            *,
+            Bucket: str,
+            Key: str,
+            Body: bytes,
+            ContentType: str,
+        ) -> dict[str, str]:
+            assert ContentType == "application/json"
+            version_id = f"version-{len(storage) + 1}"
+            storage[(Bucket, Key, version_id)] = Body
+            return {"ETag": sha256(Body).hexdigest(), "VersionId": version_id}
+
+        def head_object(self, *, Bucket: str, Key: str, VersionId: str) -> dict[str, object]:
+            assert (Bucket, Key, VersionId) in storage
+            return {
+                "ContentLength": len(storage[(Bucket, Key, VersionId)]),
+                "ObjectLockMode": "COMPLIANCE",
+                "ObjectLockRetainUntilDate": datetime.now(UTC) + timedelta(days=365),
+                "VersionId": VersionId,
+            }
+
+        def get_object(
+            self, *, Bucket: str, Key: str, VersionId: str | None = None
+        ) -> dict[str, object]:
+            if VersionId is None:
+                raise MissingObjectError()
+            return {"Body": io.BytesIO(storage[(Bucket, Key, VersionId)])}
+
+    client = FakeS3Client()
+    monkeypatch.setattr(serp_eval_contracts_module, "_s3_client", lambda *_paths: client)
 
     class DagRun:
         def __init__(self) -> None:
             self.conf = {
-                "artifact_root_path": str(tmp_path),
+                "artifact_root_path": "s3://airflow-serp-evidence/serp-public-docs",
                 "generated_at": "2026-07-08T21:30:00Z",
             }
 
-    plan_json = module.validate_public_docs_seed_registry(dag_run=DagRun())
-    plan = json.loads(plan_json)
+    plan_handle = module.validate_public_docs_seed_registry(dag_run=DagRun())
+    plan = serp_eval_contracts_module.load_public_docs_airflow_plan_snapshot(
+        plan_handle,
+        s3_client=client,
+    )
 
+    assert set(plan_handle) == {"planEvidence", "schema", "summary"}
     assert plan["generated_at"] == "2026-07-08T21:30:00Z"
     assert plan["seed_count"] == len(P0_PUBLIC_DOCS_SOURCES)
     assert {seed["seed_id"] for seed in plan["seed_registry"]} == {
         str(source["seed_id"]) for source in P0_PUBLIC_DOCS_SOURCES
     }
-    assert all(path.startswith(str(tmp_path)) for path in plan["artifact_paths"].values())
+    assert all(
+        path.startswith("s3://airflow-serp-evidence/serp-public-docs")
+        for path in plan["artifact_paths"].values()
+    )
 
 
 def test_public_docs_pipeline_runner_env_contract_survives_native_template_rendering(
@@ -5755,8 +5940,6 @@ def test_public_docs_pipeline_runner_env_contract_survives_native_template_rende
     numeric_values = {
         "ADAPSTORY_SERP_EMBEDDING_BATCH_SIZE": "16",
         "ADAPSTORY_SERP_EMBEDDING_DIMENSION": "768",
-        "ADAPSTORY_SERP_EMBEDDING_MAX_ATTEMPTS": "3",
-        "ADAPSTORY_SERP_EMBEDDING_RETRY_DELAY_SECONDS": "0.5",
         "ADAPSTORY_SERP_QDRANT_UPSERT_BATCH_SIZE": "64",
     }
     for name, value in numeric_values.items():
@@ -5771,7 +5954,26 @@ def test_public_docs_pipeline_runner_env_contract_survives_native_template_rende
 
     for name, value in numeric_values.items():
         assert values[name] == f'"{value}"'
+    assert values["ADAPSTORY_BC10_GATEWAY_URL"] == "test"
+    assert values["ADAPSTORY_BC10_PUBLIC_DOCS_EMBEDDING_ROUTE_ID"] == "test"
+    assert values["ADAPSTORY_BC10_PUBLIC_DOCS_EMBEDDING_MODEL_VERSION_ID"] == "test"
+    assert values["ADAPSTORY_BC10_PUBLIC_DOCS_EMBEDDING_PROMPT_TEMPLATE_VERSION"] == "test"
+    assert values["ADAPSTORY_BC10_PUBLIC_DOCS_EMBEDDING_BUDGET_POLICY_ID"] == "test"
+    assert values["ADAPSTORY_BC10_TOKEN_PATH"] == ("/var/run/secrets/adapstory/bc10-workload/token")
+    assert "ADAPSTORY_SERP_EMBEDDING_URL" not in values
+    assert "ADAPSTORY_SERP_EMBEDDING_PROVIDER_MODEL" not in values
+    assert "ADAPSTORY_SERP_EMBEDDING_MODEL_ID" not in values
+    assert "ADAPSTORY_SERP_EMBEDDING_MODEL_VERSION" not in values
+    assert "ADAPSTORY_SERP_EMBEDDING_MAX_ATTEMPTS" not in values
+    assert "ADAPSTORY_SERP_EMBEDDING_RETRY_DELAY_SECONDS" not in values
+    assert "ADAPSTORY_SERP_EMBEDDING_TIMEOUT_SECONDS" not in values
     assert values["ADAPSTORY_SERP_SEARCH_SERVE_ACTOR_ID"] == "test"
+    volume_names = {item.kwargs["name"] for item in module.PUBLIC_DOCS_ACQUISITION_RUNTIME_VOLUMES}
+    mount_paths = {
+        item.kwargs["mount_path"] for item in module.PUBLIC_DOCS_ACQUISITION_RUNTIME_VOLUME_MOUNTS
+    }
+    assert "bc10-workload-token" in volume_names
+    assert "/var/run/secrets/adapstory/bc10-workload" in mount_paths
     expected_cli_spec_template = (
         "{{ ti.xcom_pull(task_ids='dispatch_pipeline_seed_refresh_handoff') | tojson | urlencode }}"
     )
@@ -5791,7 +5993,42 @@ def test_native_template_safe_env_value_preserves_every_numeric_literal_as_a_str
     assert module.native_template_safe_env_value(value) == f'"{value}"'
 
 
+def test_bc10_workload_identity_projects_exact_bounded_audience(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    module = importlib.import_module("dags.serp_evidence_workload_identity")
+    module = importlib.reload(module)
+
+    env = module.bc10_workload_env_vars()[0].kwargs
+    assert env == {
+        "name": "ADAPSTORY_BC10_TOKEN_PATH",
+        "value": "/var/run/secrets/adapstory/bc10-workload/token",
+    }
+
+    volume = module.bc10_workload_volumes()[0].kwargs
+    assert volume["name"] == "bc10-workload-token"
+    projection = volume["projected"].kwargs["sources"][0].kwargs["service_account_token"].kwargs
+    assert projection == {
+        "audience": "adapstory-bc10-model-gateway",
+        "expiration_seconds": 900,
+        "path": "token",
+    }
+
+    mount = module.bc10_workload_volume_mounts()[0].kwargs
+    assert mount == {
+        "mount_path": "/var/run/secrets/adapstory/bc10-workload",
+        "name": "bc10-workload-token",
+        "read_only": True,
+    }
+
+
 def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The workload-identity helper can be imported earlier by a real-kubernetes
+    # contract test. Remove that cached module for this test scope so the DAG
+    # under test resolves every Kubernetes model from the stubs below.
+    monkeypatch.delitem(sys.modules, "dags.serp_evidence_workload_identity", raising=False)
+
     class FakeAirflowSkipException(Exception):
         pass
 
@@ -5855,20 +6092,18 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
             self.kwargs = kwargs
 
     for name in (
+        "ADAPSTORY_BC10_GATEWAY_URL",
+        "ADAPSTORY_BC10_PUBLIC_DOCS_EMBEDDING_BUDGET_POLICY_ID",
+        "ADAPSTORY_BC10_PUBLIC_DOCS_EMBEDDING_MODEL_VERSION_ID",
+        "ADAPSTORY_BC10_PUBLIC_DOCS_EMBEDDING_PROMPT_TEMPLATE_VERSION",
+        "ADAPSTORY_BC10_PUBLIC_DOCS_EMBEDDING_ROUTE_ID",
         "ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS",
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT",
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_PATH_STYLE",
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION",
         "ADAPSTORY_SERP_EMBEDDING_BATCH_SIZE",
         "ADAPSTORY_SERP_EMBEDDING_DIMENSION",
-        "ADAPSTORY_SERP_EMBEDDING_MAX_ATTEMPTS",
-        "ADAPSTORY_SERP_EMBEDDING_MODEL_ID",
-        "ADAPSTORY_SERP_EMBEDDING_MODEL_VERSION",
         "ADAPSTORY_SERP_EMBEDDING_PROFILE_VERSION",
-        "ADAPSTORY_SERP_EMBEDDING_PROVIDER_MODEL",
-        "ADAPSTORY_SERP_EMBEDDING_RETRY_DELAY_SECONDS",
-        "ADAPSTORY_SERP_EMBEDDING_TIMEOUT_SECONDS",
-        "ADAPSTORY_SERP_EMBEDDING_URL",
         "ADAPSTORY_SERP_NEO4J_HTTP_URL",
         "ADAPSTORY_SERP_NEO4J_MUTATION_BATCH_SIZE",
         "ADAPSTORY_SERP_NEO4J_TIMEOUT_SECONDS",
@@ -5937,6 +6172,7 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     models.V1Capabilities = FakeKubernetesModel
     models.V1ConfigMapKeySelector = FakeKubernetesModel
     models.V1ConfigMapProjection = FakeKubernetesModel
+    models.V1ConfigMapVolumeSource = FakeKubernetesModel
     models.V1EnvVar = FakeKubernetesModel
     models.V1EnvVarSource = FakeKubernetesModel
     models.V1Container = FakeKubernetesModel
@@ -6041,10 +6277,6 @@ def test_serp_improvement_dag_passes_exact_s3_values_to_the_evaluator_pod(
         "ADAPSTORY_SERP_MCP_GATEWAY_BASE_URL",
         "http://prod-serp-mcp-gateway-svc.env-prod.svc.cluster.local:8000",
     )
-    monkeypatch.setenv(
-        "ADAPSTORY_OLLAMA_BASE_URL",
-        "http://ollama.ollama.svc.cluster.local:11434",
-    )
     module = importlib.import_module("dags.serp_benchmark_improvement_wave")
     module = importlib.reload(module)
 
@@ -6100,7 +6332,6 @@ def test_d19_builds_and_registers_server_owned_exact_nine_before_request(
         "ADAPSTORY_SERP_MCP_GATEWAY_BASE_URL": (
             "http://prod-serp-mcp-gateway-svc.env-prod.svc.cluster.local:8000"
         ),
-        "ADAPSTORY_OLLAMA_BASE_URL": "http://ollama.ollama.svc.cluster.local:11434",
     }.items():
         monkeypatch.setenv(name, value)
     module = importlib.import_module("dags.serp_benchmark_improvement_wave")
@@ -6134,13 +6365,19 @@ def test_d19_builds_and_registers_server_owned_exact_nine_before_request(
     assert builder_env["ADAPSTORY_SERP_BC21_BASE_URL"] == (
         "http://context-platform:8080/api/bc-21/serp/v1"
     )
-    assert builder_env["ADAPSTORY_OLLAMA_BASE_URL"] == (
-        "http://ollama.ollama.svc.cluster.local:11434"
+    assert builder_env["ADAPSTORY_BC10_GATEWAY_URL"] == "test"
+    assert builder_env["ADAPSTORY_BC10_TOKEN_PATH"] == (
+        "/var/run/secrets/adapstory/bc10-workload/token"
     )
+    assert "ADAPSTORY_OLLAMA_BASE_URL" not in builder_env
     assert "ADAPSTORY_SERP_MCP_GATEWAY_BASE_URL" not in builder_env
     assert not any(
         "QDRANT" in name or "OPENSEARCH" in name or "NEO4J" in name for name in builder_env
     )
+    builder_volume_names = {item.kwargs["name"] for item in module.D19_BUILDER_VOLUMES}
+    builder_mount_paths = {item.kwargs["mount_path"] for item in module.D19_BUILDER_VOLUME_MOUNTS}
+    assert "bc10-workload-token" in builder_volume_names
+    assert "/var/run/secrets/adapstory/bc10-workload" in builder_mount_paths
 
     aggregator_env = {
         item.kwargs["name"]: item.kwargs.get("value") for item in module.d19_aggregator_env_vars()
@@ -6178,7 +6415,6 @@ def test_d19_runs_exact_ninety_server_owned_official_harness_work_items(
         "ADAPSTORY_SERP_MCP_GATEWAY_BASE_URL": (
             "http://prod-serp-mcp-gateway-svc.env-prod.svc.cluster.local:8000"
         ),
-        "ADAPSTORY_OLLAMA_BASE_URL": ("http://ollama.ollama.svc.cluster.local:11434"),
     }.items():
         monkeypatch.setenv(name, value)
     module = importlib.import_module("dags.serp_benchmark_improvement_wave")
@@ -6235,7 +6471,6 @@ def test_d19_routes_code_suites_through_credential_isolated_sandbox_chains(
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION": "us-east-1",
         "ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST": "sha256:" + "d" * 64,
         "ADAPSTORY_SERP_BC21_BASE_URL": "http://context-platform:8080/api/bc-21/serp/v1",
-        "ADAPSTORY_OLLAMA_BASE_URL": "http://ollama.ollama.svc.cluster.local:11434",
     }.items():
         monkeypatch.setenv(name, value)
     module = importlib.import_module("dags.serp_benchmark_improvement_wave")
@@ -6313,6 +6548,7 @@ def test_d19_routes_code_suites_through_credential_isolated_sandbox_chains(
         assert kwargs["mapped_kwargs"].operator is module.D19_CODE_SANDBOX_FANOUT_TASKS[identity]
         assert not any(
             "OLLAMA" in env.kwargs.get("name", "")
+            or "BC10" in env.kwargs.get("name", "")
             or "BC21" in env.kwargs.get("name", "")
             or "MCP" in env.kwargs.get("name", "")
             for env in kwargs["env_vars"]
@@ -6331,10 +6567,12 @@ def test_d19_routes_code_suites_through_credential_isolated_sandbox_chains(
         seal_arguments = module.D19_CODE_SANDBOX_SEAL_TASKS[identity].kwargs["arguments"]
         assert "--sandbox-result-set-plan" in seal_arguments
         assert "--sandbox-result" not in seal_arguments
-        assert (
-            module.D19_CODE_SANDBOX_PREPARE_TASKS[identity].kwargs["service_account_name"]
-            == "airflow-serp-benchmark-aggregator"
-        )
+        prepare = module.D19_CODE_SANDBOX_PREPARE_TASKS[identity].kwargs
+        assert prepare["service_account_name"] == "airflow-serp-benchmark-model-runner"
+        assert prepare["labels"]["adapstory.com/serp-network-profile"] == ("benchmark-model-runner")
+        prepare_env = {item.kwargs["name"] for item in prepare["env_vars"]}
+        assert {"ADAPSTORY_BC10_GATEWAY_URL", "ADAPSTORY_BC10_TOKEN_PATH"} <= prepare_env
+        assert "ADAPSTORY_OLLAMA_BASE_URL" not in prepare_env
         assert (
             module.D19_CODE_SANDBOX_SEAL_TASKS[identity].kwargs["service_account_name"]
             == "airflow-serp-benchmark-aggregator"
@@ -6356,7 +6594,6 @@ def test_d19_maps_ds1000_from_one_sealed_suite_specific_sandbox_work_item(
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION": "us-east-1",
         "ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST": "sha256:" + "d" * 64,
         "ADAPSTORY_SERP_BC21_BASE_URL": "http://context-platform:8080/api/bc-21/serp/v1",
-        "ADAPSTORY_OLLAMA_BASE_URL": "http://ollama.ollama.svc.cluster.local:11434",
     }.items():
         monkeypatch.setenv(name, value)
     module = importlib.import_module("dags.serp_benchmark_improvement_wave")
@@ -6438,7 +6675,6 @@ def test_d19_maps_swe_bench_by_exact_instance_image_repo_and_revision(
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION": "us-east-1",
         "ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST": "sha256:" + "d" * 64,
         "ADAPSTORY_SERP_BC21_BASE_URL": "http://context-platform:8080/api/bc-21/serp/v1",
-        "ADAPSTORY_OLLAMA_BASE_URL": "http://ollama.ollama.svc.cluster.local:11434",
     }.items():
         monkeypatch.setenv(name, value)
     module = importlib.import_module("dags.serp_benchmark_improvement_wave")
@@ -6542,7 +6778,6 @@ def test_d19_sandbox_fanout_fails_closed_without_exact_inventory(
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION": "us-east-1",
         "ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST": "sha256:" + "d" * 64,
         "ADAPSTORY_SERP_BC21_BASE_URL": "http://context-platform:8080/api/bc-21/serp/v1",
-        "ADAPSTORY_OLLAMA_BASE_URL": "http://ollama.ollama.svc.cluster.local:11434",
     }.items():
         monkeypatch.setenv(name, value)
     module = importlib.import_module("dags.serp_benchmark_improvement_wave")
@@ -6596,7 +6831,6 @@ def test_d19_aggregates_every_mapped_swe_result_into_one_worm_seal_plan(
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION": "us-east-1",
         "ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST": "sha256:" + "d" * 64,
         "ADAPSTORY_SERP_BC21_BASE_URL": "http://context-platform:8080/api/bc-21/serp/v1",
-        "ADAPSTORY_OLLAMA_BASE_URL": "http://ollama.ollama.svc.cluster.local:11434",
     }.items():
         monkeypatch.setenv(name, value)
     module = importlib.import_module("dags.serp_benchmark_improvement_wave")
@@ -6712,7 +6946,7 @@ def test_d19_aggregates_every_mapped_swe_result_into_one_worm_seal_plan(
     ]
 
 
-def test_d19_model_runner_has_only_minio_and_ollama_runtime_env(
+def test_d19_model_runner_has_only_minio_and_bc10_runtime_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_airflow_import_stubs(monkeypatch)
@@ -6724,7 +6958,7 @@ def test_d19_model_runner_has_only_minio_and_ollama_runtime_env(
         "ADAPSTORY_SERP_MCP_GATEWAY_BASE_URL": (
             "http://prod-serp-mcp-gateway-svc.env-prod.svc.cluster.local:8000"
         ),
-        "ADAPSTORY_OLLAMA_BASE_URL": ("http://ollama.ollama.svc.cluster.local:11434"),
+        "ADAPSTORY_BC10_GATEWAY_URL": ("http://serp-ai-orchestration.serp.svc.cluster.local:8080"),
     }.items():
         monkeypatch.setenv(name, value)
     module = importlib.import_module("dags.serp_benchmark_improvement_wave")
@@ -6734,11 +6968,30 @@ def test_d19_model_runner_has_only_minio_and_ollama_runtime_env(
         item.kwargs["name"]: item.kwargs.get("value") for item in module.d19_model_runner_env_vars()
     }
     assert values["ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST"] == "sha256:" + "d" * 64
-    assert values["ADAPSTORY_OLLAMA_BASE_URL"] == ("http://ollama.ollama.svc.cluster.local:11434")
+    assert values["ADAPSTORY_BC10_GATEWAY_URL"] == (
+        "http://serp-ai-orchestration.serp.svc.cluster.local:8080"
+    )
+    assert values["ADAPSTORY_BC10_TOKEN_PATH"] == ("/var/run/secrets/adapstory/bc10-workload/token")
+    assert "ADAPSTORY_OLLAMA_BASE_URL" not in values
     assert "ADAPSTORY_SERP_MCP_GATEWAY_BASE_URL" not in values
     assert "ADAPSTORY_SERP_SERVICE_ACCOUNT_TOKEN_PATH" not in values
     assert "ADAPSTORY_SERP_BC21_BASE_URL" not in values
     assert not any("QDRANT" in name or "OPENSEARCH" in name or "NEO4J" in name for name in values)
+
+    volume_names = {item.kwargs["name"] for item in module.D19_MODEL_RUNNER_VOLUMES}
+    mount_paths = {item.kwargs["mount_path"] for item in module.D19_MODEL_RUNNER_VOLUME_MOUNTS}
+    assert "bc10-workload-token" in volume_names
+    assert "/var/run/secrets/adapstory/bc10-workload" in mount_paths
+
+
+def test_airflow_model_callers_have_no_direct_provider_runtime_contract() -> None:
+    for filename in (
+        "serp_benchmark_improvement_wave.py",
+        "serp_web_seed_crawl_refresh.py",
+    ):
+        source = (REPO_ROOT / "dags" / filename).read_text(encoding="utf-8")
+        assert "ADAPSTORY_OLLAMA_BASE_URL" not in source
+        assert "ADAPSTORY_SERP_EMBEDDING_URL" not in source
 
 
 def test_d19_assembly_plan_seals_exact_canonical_ninety_without_scores(
@@ -6753,7 +7006,6 @@ def test_d19_assembly_plan_seals_exact_canonical_ninety_without_scores(
         "ADAPSTORY_SERP_MCP_GATEWAY_BASE_URL": (
             "http://prod-serp-mcp-gateway-svc.env-prod.svc.cluster.local:8000"
         ),
-        "ADAPSTORY_OLLAMA_BASE_URL": ("http://ollama.ollama.svc.cluster.local:11434"),
     }.items():
         monkeypatch.setenv(name, value)
     module = importlib.import_module("dags.serp_benchmark_improvement_wave")
@@ -6946,14 +7198,30 @@ def _nightly_conf() -> dict[str, object]:
         "actor_id": "airflow-serp-eval-runner",
         "artifact_root_path": "/var/opt/adapstory/serp-evals",
         "bc21_base_url": "http://serp-context-platform.env-dev.svc.cluster.local",
+        "candidateReleaseEvidence": _nightly_worm_evidence("candidate-release"),
+        "evaluationObjectiveEvidence": _nightly_worm_evidence("evaluation-objective"),
         "generated_at": "2026-07-05T21:00:00Z",
         "pack_version_ids": [PACK_VERSION_ID],
+        "pairedEvaluationReceiptEvidence": _nightly_worm_evidence("paired-evaluation-receipt"),
+        "pairedEvaluationVerificationEvidence": _nightly_worm_evidence(
+            "paired-evaluation-verification"
+        ),
         "registry_resource_id": REGISTRY_RESOURCE_ID,
         "registry_resource_type": "workflow",
         "reranker_profile_version": "reranker@2026.07.1",
         "retrieval_profile_version": "hybrid@2026.07.1",
         "selected_suite_ids": list(MANDATORY_SERP_BENCHMARK_SUITES),
         "tenant_id": TENANT_ID,
+    }
+
+
+def _nightly_worm_evidence(label: str) -> dict[str, str]:
+    return {
+        "objectLockMode": "COMPLIANCE",
+        "retainUntil": "2033-07-05T21:00:00Z",
+        "s3Uri": f"s3://airflow-serp-evidence/serp-evals/governed/{label}.json",
+        "sha256": "sha256:" + sha256(label.encode("utf-8")).hexdigest(),
+        "versionId": f"version-{label}",
     }
 
 
@@ -7322,6 +7590,8 @@ def _d19_catalog_snapshot(plan: Any) -> dict[str, object]:
         "catalogReceiptPath": plan.payload["artifact_paths"]["benchmark_catalog_receipt"],
         "catalogReceiptSha256": "b" * 64,
         "catalogReceiptVersionId": "catalog-receipt-version-001",
+        "catalogReceiptRetainUntil": "2027-07-14T00:00:00Z",
+        "catalogRetainUntil": "2027-07-14T00:00:00Z",
         "catalogStatus": "ready",
         "objectLockMode": "COMPLIANCE",
         "suiteSummary": [
@@ -7340,7 +7610,7 @@ def _d19_promotion_snapshot(plan: Any) -> dict[str, Any]:
     return {
         "promotionEvidence": plan.payload["evaluation_release_promotion_evidence"],
         "promotion": {
-            "schema": "EvaluationReleasePromotionReceipt/v3",
+            "schema": "EvaluationReleasePromotionReceipt/v5",
             "baselineRelease": {
                 "evidence": _d19_worm_evidence("model-releases/baseline", "d"),
                 "releaseDigest": "sha256:" + "1" * 64,
@@ -7349,8 +7619,20 @@ def _d19_promotion_snapshot(plan: Any) -> dict[str, Any]:
                 "evidence": _d19_worm_evidence("model-releases/candidate", "e"),
                 "releaseDigest": "sha256:" + "2" * 64,
             },
+            "candidateReleaseAuthority": {
+                "canaryState": "passed",
+                "evidence": _d19_worm_evidence("model-releases/candidate", "e"),
+                "modelId": "serp-all-nine-candidate-router@2026.07.3",
+                "provider": "adapstory-model-gateway",
+                "purpose": "serp-benchmark-candidate",
+                "releaseDigest": "sha256:" + "2" * 64,
+                "releaseId": "serp-candidate-release-2026.07.1",
+            },
             "metricCompatibilityMatrixEvidence": _d19_worm_evidence("metric-matrix", "3"),
-            "objectiveSpecificationEvidence": _d19_worm_evidence("objective-spec", "4"),
+            "evaluationObjectiveEvidence": _d19_worm_evidence("evaluation-objective", "4"),
+            "evaluationObjectiveAttestationEvidence": _d19_worm_evidence(
+                "evaluation-objective-attestation", "5"
+            ),
             "promotionId": "public-docs-reranker-eval-001",
             "registryResourceId": REGISTRY_RESOURCE_ID,
             "registryResourceType": "workflow",

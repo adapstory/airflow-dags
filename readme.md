@@ -91,15 +91,19 @@ SERP eval DAG contracts:
   submissions for the same rollup. Its plan state is
   `ready_for_po_capacity_approval`; it is not a 1M production approval.
 - `serp_model_catalog_promotion` is the D17 model-governance authority. Its
-  `dag_run.conf` accepts only tenant/resource identity, promotion id, generated
-  timestamp, evidence root, and two immutable baseline/candidate release
-  pointers (`artifactPath`, `artifactSha256`, `artifactVersionId`). It does not
-  accept model ids, profile strings, scores, or approval booleans from the
-  caller. The DAG re-reads both manifests with exact `VersionId` plus
-  `COMPLIANCE` retention, validates that their tenant/resource/component and
-  fixed evaluator replay boundary match, requires a real treatment delta in the
-  governed model, retrieval profile, or reranker profile, then seals a WORM
-  promotion receipt. Runtime-image-only candidate releases fail closed.
+  `dag_run.conf` accepts tenant/resource identity, promotion id, actor,
+  generated timestamp, evidence root, and one canonical
+  `serp-ci-evaluation-release-evidence/v5` bundle. It does not accept model ids,
+  profile strings, scores, approval booleans, or separate caller-selected
+  release pointers. The DAG re-reads both `EvaluationRelease/v3` manifests by
+  exact `VersionId` and SHA-256 under `COMPLIANCE` retention, validates their
+  tenant/resource/component and fixed evaluator boundaries, requires a real
+  treatment delta in the governed model, retrieval profile, or reranker
+  profile, and binds the immutable metric matrix and
+  `evaluationObjectiveEvidence`. It then seals the only accepted
+  `EvaluationReleasePromotionReceipt/v5`, including the exact passed
+  `candidateReleaseAuthority`. Runtime-image-only candidate releases
+  fail closed.
   Release manifest production belongs to the signed CI/release path: the
   `airflow-runtime` Jenkins build seals the active baseline and newly signed
   candidate under a build-scoped MinIO COMPLIANCE prefix using its projected
@@ -109,14 +113,16 @@ SERP eval DAG contracts:
   media types); D17 rejects a missing or mismatched receipt. A missing
   candidate release is a real block, never a reason to invent a candidate.
 - `serp_benchmark_improvement_wave` is the D19 fail-closed improvement
-  contract DAG. Its `dag_run.conf` provides tenant id, improvement spec id,
-  registry resource identity, approved actor id, generated timestamp, rollback
-  policy ref, positive max benchmark run budget, every mandatory suite id, and
-  the exact D17 WORM `model_promotion_evidence` pointer. It rejects every
+  contract DAG. Its `dag_run.conf` provides tenant/resource identity, approved
+  actor, generated timestamp, evidence root, and the exact D17 WORM
+  `evaluation_release_promotion_evidence` pointer. It rejects every
   caller-supplied baseline/candidate/replay/model-governance selection and every
   `candidate_evaluation` score/result payload. The D19 scheduler re-reads that
-  D17 receipt and both referenced release manifests before it derives the
-  scoreless paired request.
+  exact `EvaluationReleasePromotionReceipt/v5` and both referenced release
+  manifests before it derives the reference-only `PairedEvaluationRequest/v5`.
+  That request binds the promotion, releases, BC21 evaluation binding, metric
+  matrix, `evaluationObjectiveEvidence`, and exact catalog evidence; no older
+  request, promotion, or objective alias is accepted.
   The DAG derives `airflow-plan.json`, `improvement-spec.json`, a restricted
   acquisition-pod materialized v5 `benchmark-catalog.json` and receipt. Every
   ready suite has the exact role-keyed execution-substrate inventory retained
@@ -177,12 +183,29 @@ SERP eval DAG contracts:
   D20 evidence records the exact pages selected for fetch/parse/chunk/embed/
   index. Optional `freshness_state` is accepted per seed; seeds without a
   previous `last_success_at` are due, and indexed seeds are refreshed only after
-  `refresh_policy.max_age_hours`. The DAG derives `airflow-plan.json`,
+  `refresh_policy.max_age_hours`. Production D20 requires an S3 artifact root.
+  The validation task writes one COMPLIANCE-locked object per seed, then a
+  compact immutable `airflow-plan.json`; XCom contains only its exact S3 URI,
+  SHA-256, VersionId, and a bounded summary. Every downstream Airflow task
+  re-reads the exact plan VersionId and every exact seed VersionId and rejects
+  digest, version, operation, summary, or registry drift. The compact refresh
+  plan contains policy descriptors, exact per-seed evidence handles, and
+  bounded crawl summaries rather than inline page/state maps. The governed
+  ceilings are 128 seeds, 500 pages per crawl policy, 2 MB per seed evidence,
+  16 MB aggregate seed evidence, 256 KB compact plan, and 16 KB XCom handle.
+  Policy-denied URL evidence is capped at `max_pages` while its complete
+  observation count and truncation state remain auditable. The DAG also derives
   `public-docs-seed-registry.json`, `public-docs-seed-refresh-plan.json`, and
   after successful indexed D20 evidence,
   `public-docs-publish-activation-trigger-conf.json` with the exact D5
-  `public_docs_seed_refresh_result_path` and canonical tenant/pack/version
-  identity. The trigger-conf deliberately carries no approval/seal/benchmark
+  `public_docs_seed_refresh_result_path`, exact refresh-plan WORM evidence, and
+  canonical tenant/pack/version identity. D5 requires that exact VersionId for
+  S3 plans and hydrates crawl state from the per-seed WORM objects. Before the
+  Kubernetes pipeline runner starts, the Airflow bootstrap re-reads that exact
+  refresh-plan VersionId, verifies COMPLIANCE retention, ContentLength, and
+  SHA-256, then materializes only those verified bytes into the pod-local input;
+  it never follows the mutable latest object version. The
+  trigger-conf deliberately carries no approval/seal/benchmark
   secrets; it marks the governance inputs that D5 must still receive before
   publish activation can run. The refresh plan contains due
   `source_fetch_requests` plus skipped-seed evidence. If no seed is due, the
@@ -197,6 +220,9 @@ SERP eval DAG contracts:
   task/operation identity, exit code, stderr SHA-256, and a bounded redacted
   stderr excerpt. This keeps the exact failure observable from the artifact
   store without exposing raw credentials, and prevents BC-21/D5 progression.
+  Remote task logging atomically mirrors the complete local log and retains the
+  local copy on upload failure, so an OOM or worker loss cannot turn a failed
+  upload into silent log truncation or duplicate append fragments.
   The packaged CLI executes the current fetch/parse/chunk/embed/index path
   through the SERP pipeline ports and writes deterministic batch evidence.
   `index_mode=live` requires `embedding_mode=live-gateway`; evidence-only
@@ -236,7 +262,8 @@ SERP eval DAG contracts:
 - `serp_publish_signed_pack` is the D5 public-docs publish activation handoff
   DAG. Its `dag_run.conf` must provide tenant id, pack id/version, registry
   resource identity, approved actor id, generated timestamp,
-  `public_docs_seed_refresh_result_path`, `approval_run_id`,
+  `public_docs_seed_refresh_result_path`, `public_docs_seed_refresh_plan_path`,
+  exact `public_docs_seed_refresh_plan_evidence` for S3 plans, `approval_run_id`,
   `evidence_bundle_id`, `evidence_seal_hash`,
   `activation_idempotency_key`, `activation_reason_code`,
   `benchmark_gate_export_sha256`, and `bc21_base_url`. The DAG writes

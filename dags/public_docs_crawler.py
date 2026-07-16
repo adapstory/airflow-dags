@@ -92,12 +92,19 @@ def crawl_public_docs(
         return _blocked_evidence("ROBOTS_DENIED", seed_uri)
 
     sitemap_urls = _sitemap_urls(seed_uri, robot_parser)
-    sitemap_pages, authoritative_discovery, sitemap_blocked_pages = _discover_sitemap_pages(
+    (
+        sitemap_pages,
+        authoritative_discovery,
+        sitemap_blocked_pages,
+        sitemap_blocked_observations,
+    ) = _discover_sitemap_pages(
         sitemap_urls=sitemap_urls,
         robot_parser=robot_parser,
         policy=policy,
         fetcher=fetcher,
     )
+    max_pages = int(policy["max_pages"])
+    max_depth = int(policy["max_depth"])
     queue: deque[tuple[str, int]] = deque(
         (url, 0 if url == seed_uri else 1) for url in [seed_uri, *sitemap_pages]
     )
@@ -111,10 +118,19 @@ def crawl_public_docs(
     deleted_urls: list[str] = []
     failed_urls: list[str] = []
     blocked_urls: list[str] = list(sitemap_blocked_pages)
+    blocked_urls_recorded = set(blocked_urls)
+    blocked_observations = sitemap_blocked_observations
     crawled_urls: set[str] = set()
-    max_pages = int(policy["max_pages"])
-    max_depth = int(policy["max_depth"])
     discovery_complete = True
+
+    def record_blocked_url(url: str, reason: str) -> None:
+        nonlocal blocked_observations
+        blocked_observations += 1
+        if url in blocked_urls_recorded or len(blocked_urls_recorded) >= max_pages:
+            return
+        blocked_urls_recorded.add(url)
+        blocked_urls.append(url)
+        pages[url] = _page_report(url, "blocked", reason)
 
     while queue:
         url, depth = queue.popleft()
@@ -125,8 +141,7 @@ def crawl_public_docs(
             break
         crawled_urls.add(url)
         if not robot_parser.can_fetch(str(policy["user_agent"]), url):
-            blocked_urls.append(url)
-            pages[url] = _page_report(url, "blocked", "ROBOTS_DENIED")
+            record_blocked_url(url, "ROBOTS_DENIED")
             continue
         prior = previous_state.get(url)
         request_headers = {"User-Agent": str(policy["user_agent"])}
@@ -156,7 +171,7 @@ def crawl_public_docs(
 
         if response.status_code == 200 and status in {"changed", "new"} and depth < max_depth:
             if _is_html(response.headers, response.body):
-                for link in _extract_links(url, response.body):
+                for link in _extract_links(url, response.body, max_links=max_pages):
                     if link in queued:
                         continue
                     if not _is_crawl_document_url(link):
@@ -167,8 +182,7 @@ def crawl_public_docs(
                         queue.append((link, depth + 1))
                         queued.add(link)
                     elif _is_same_domain(link, policy):
-                        pages.setdefault(link, _page_report(link, "blocked", "CRAWL_POLICY_DENIED"))
-                        blocked_urls.append(link)
+                        record_blocked_url(link, "CRAWL_POLICY_DENIED")
 
     if authoritative_discovery and discovery_complete:
         for url, prior in previous_state.items():
@@ -220,7 +234,13 @@ def crawl_public_docs(
             "unchanged": len(set(unchanged_urls)),
             "deleted": len(set(deleted_urls)),
             "failed": len(set(failed_urls)),
-            "blocked": len(set(blocked_urls)),
+            "blocked": blocked_observations,
+        },
+        "evidence_limits": {
+            "blocked_observations": blocked_observations,
+            "blocked_urls_recorded": len(blocked_urls_recorded),
+            "blocked_urls_truncated": blocked_observations > len(blocked_urls_recorded),
+            "max_pages": max_pages,
         },
     }
     if quarantined:
@@ -286,9 +306,11 @@ def _discover_sitemap_pages(
     robot_parser: RobotFileParser,
     policy: Mapping[str, Any],
     fetcher: Fetcher,
-) -> tuple[list[str], bool, list[str]]:
+) -> tuple[list[str], bool, list[str], int]:
     pages: list[str] = []
     blocked_pages: list[str] = []
+    blocked_page_set: set[str] = set()
+    blocked_observations = 0
     queue: deque[tuple[str, int]] = deque((url, 0) for url in sitemap_urls)
     seen: set[str] = set()
     authoritative = False
@@ -329,11 +351,17 @@ def _discover_sitemap_pages(
                     if len(pages) >= int(policy["max_pages"]):
                         break
                 elif _is_same_domain(candidate, policy):
-                    blocked_pages.append(candidate)
+                    blocked_observations += 1
+                    if candidate not in blocked_page_set and len(blocked_page_set) < int(
+                        policy["max_pages"]
+                    ):
+                        blocked_page_set.add(candidate)
+                        blocked_pages.append(candidate)
     return (
         list(dict.fromkeys(pages)),
         authoritative,
-        list(dict.fromkeys(blocked_pages)),
+        blocked_pages,
+        blocked_observations,
     )
 
 
@@ -356,19 +384,22 @@ def _classify_response(
     return "failed", f"HTTP_{response.status_code}"
 
 
-def _extract_links(base_url: str, body: bytes) -> list[str]:
-    parser = _LinkParser()
+def _extract_links(base_url: str, body: bytes, *, max_links: int) -> list[str]:
+    parser = _LinkParser(max_links=max_links)
     parser.feed(body.decode("utf-8", errors="replace"))
     return list(dict.fromkeys(_canonical_url(urljoin(base_url, href)) for href in parser.links))
 
 
 class _LinkParser(HTMLParser):
-    def __init__(self) -> None:
+    def __init__(self, *, max_links: int) -> None:
         super().__init__(convert_charrefs=True)
+        self.max_links = max_links
         self.links: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag.lower() not in {"a", "area"}:
+            return
+        if len(self.links) >= self.max_links:
             return
         for key, value in attrs:
             if (
@@ -377,6 +408,7 @@ class _LinkParser(HTMLParser):
                 and not value.startswith(("#", "mailto:", "javascript:"))
             ):
                 self.links.append(value)
+                return
 
 
 def _add_conditional_headers(headers: dict[str, str], prior: Mapping[str, Any] | None) -> None:

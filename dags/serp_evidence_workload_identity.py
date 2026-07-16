@@ -23,6 +23,27 @@ BC21_WORKLOAD_TOKEN_FILE = "/var/run/secrets/adapstory/bc21-workload/token"
 BC21_WORKLOAD_TOKEN_VOLUME_NAME = "bc21-workload-token"
 BC21_WORKLOAD_TOKEN_AUDIENCE = "https://kubernetes.default.svc.cluster.local"
 BC21_WORKLOAD_TOKEN_EXPIRATION_SECONDS = 900
+BC10_WORKLOAD_TOKEN_FILE = "/var/run/secrets/adapstory/bc10-workload/token"
+BC10_WORKLOAD_TOKEN_VOLUME_NAME = "bc10-workload-token"
+BC10_WORKLOAD_TOKEN_AUDIENCE = "adapstory-bc10-model-gateway"
+BC10_WORKLOAD_TOKEN_EXPIRATION_SECONDS = 900
+VAULT_KUBERNETES_TOKEN_FILE = "/var/run/secrets/adapstory/vault-kubernetes/token"
+VAULT_KUBERNETES_TOKEN_VOLUME_NAME = "vault-kubernetes-token"
+VAULT_KUBERNETES_TOKEN_AUDIENCE = "vault"
+# Kubernetes bounds projected ServiceAccount tokens to a minimum of 600 seconds;
+# Vault independently caps the resulting Transit token at 300 seconds.
+VAULT_KUBERNETES_TOKEN_EXPIRATION_SECONDS = 600
+VAULT_INTERNAL_CA_CONFIG_MAP = "vault-internal-ca"
+VAULT_INTERNAL_CA_VOLUME_NAME = "vault-internal-ca"
+VAULT_INTERNAL_CA_FILE = "/var/run/secrets/adapstory/vault-ca/ca.crt"
+VAULT_ADDR = "https://vault.vault.svc.cluster.local:8200"
+EVALUATION_ADMISSION_VERIFIER_SERVICE_ACCOUNT = "serp-evaluation-admission-verifier"
+EVALUATION_ADMISSION_VERIFIER_VAULT_AUTH_ROLE = "serp-evaluation-runtime-verifier-role"
+_EVALUATION_SIGNER_VAULT_AUTH_ROLES = frozenset(
+    {
+        "serp-evaluation-runtime-attestor-role",
+    }
+)
 EVIDENCE_BUCKET = "airflow-serp-evidence"
 EVIDENCE_PREFIX = "serp-evals/"
 TASK_LOG_BUCKET = "airflow-serp-artifacts"
@@ -159,6 +180,118 @@ def bc21_workload_volume_mounts() -> list[k8s.V1VolumeMount]:
     ]
 
 
+def bc10_workload_env_vars() -> list[k8s.V1EnvVar]:
+    """Point model clients at one bounded BC-10 workload token."""
+
+    return [
+        k8s.V1EnvVar(
+            name="ADAPSTORY_BC10_TOKEN_PATH",
+            value=BC10_WORKLOAD_TOKEN_FILE,
+        )
+    ]
+
+
+def bc10_workload_volumes() -> list[k8s.V1Volume]:
+    """Project the exact BC-10 audience without ambient API credentials."""
+
+    return [
+        k8s.V1Volume(
+            name=BC10_WORKLOAD_TOKEN_VOLUME_NAME,
+            projected=k8s.V1ProjectedVolumeSource(
+                sources=[
+                    k8s.V1VolumeProjection(
+                        service_account_token=k8s.V1ServiceAccountTokenProjection(
+                            audience=BC10_WORKLOAD_TOKEN_AUDIENCE,
+                            expiration_seconds=BC10_WORKLOAD_TOKEN_EXPIRATION_SECONDS,
+                            path="token",
+                        )
+                    )
+                ]
+            ),
+        )
+    ]
+
+
+def bc10_workload_volume_mounts() -> list[k8s.V1VolumeMount]:
+    """Mount the BC-10 token read-only at its explicit client path."""
+
+    return [
+        k8s.V1VolumeMount(
+            name=BC10_WORKLOAD_TOKEN_VOLUME_NAME,
+            mount_path=BC10_WORKLOAD_TOKEN_FILE.rsplit("/", 1)[0],
+            read_only=True,
+        )
+    ]
+
+
+def vault_transit_env_vars(*, auth_role: str) -> list[k8s.V1EnvVar]:
+    """Bind a signer task to one exact Transit role and internal CA."""
+
+    if auth_role not in _EVALUATION_SIGNER_VAULT_AUTH_ROLES:
+        raise ValueError("evaluation Vault role is unsupported")
+    return _vault_transit_env_vars(auth_role=auth_role)
+
+
+def _vault_transit_env_vars(*, auth_role: str) -> list[k8s.V1EnvVar]:
+    """Build the shared Vault transport env after the caller fixes role authority."""
+
+    return [
+        k8s.V1EnvVar(name="ADAPSTORY_VAULT_ADDR", value=VAULT_ADDR),
+        k8s.V1EnvVar(
+            name="ADAPSTORY_VAULT_KUBERNETES_AUTH_ROLE",
+            value=auth_role,
+        ),
+        k8s.V1EnvVar(
+            name="ADAPSTORY_VAULT_KUBERNETES_TOKEN_FILE",
+            value=VAULT_KUBERNETES_TOKEN_FILE,
+        ),
+        k8s.V1EnvVar(name="SSL_CERT_FILE", value=VAULT_INTERNAL_CA_FILE),
+    ]
+
+
+def vault_transit_volumes() -> list[k8s.V1Volume]:
+    """Project a short-lived Vault JWT and the public pinned trust anchor."""
+
+    return [
+        k8s.V1Volume(
+            name=VAULT_KUBERNETES_TOKEN_VOLUME_NAME,
+            projected=k8s.V1ProjectedVolumeSource(
+                sources=[
+                    k8s.V1VolumeProjection(
+                        service_account_token=k8s.V1ServiceAccountTokenProjection(
+                            audience=VAULT_KUBERNETES_TOKEN_AUDIENCE,
+                            expiration_seconds=VAULT_KUBERNETES_TOKEN_EXPIRATION_SECONDS,
+                            path="token",
+                        )
+                    )
+                ]
+            ),
+        ),
+        k8s.V1Volume(
+            name=VAULT_INTERNAL_CA_VOLUME_NAME,
+            config_map=k8s.V1ConfigMapVolumeSource(
+                name=VAULT_INTERNAL_CA_CONFIG_MAP,
+                items=[k8s.V1KeyToPath(key="ca.crt", path="ca.crt")],
+            ),
+        ),
+    ]
+
+
+def vault_transit_volume_mounts() -> list[k8s.V1VolumeMount]:
+    return [
+        k8s.V1VolumeMount(
+            name=VAULT_KUBERNETES_TOKEN_VOLUME_NAME,
+            mount_path=VAULT_KUBERNETES_TOKEN_FILE.rsplit("/", 1)[0],
+            read_only=True,
+        ),
+        k8s.V1VolumeMount(
+            name=VAULT_INTERNAL_CA_VOLUME_NAME,
+            mount_path=VAULT_INTERNAL_CA_FILE.rsplit("/", 1)[0],
+            read_only=True,
+        ),
+    ]
+
+
 def hardened_runtime_pod_security_context() -> k8s.V1PodSecurityContext:
     """Pin the restricted pod identity and syscall profile for evidence tasks."""
 
@@ -243,6 +376,60 @@ def bc21_authorized_minio_executor_config(
         env_vars=[*minio_web_identity_env_vars(()), *bc21_workload_env_vars()],
         volume_mounts=[*minio_web_identity_volume_mounts(), *bc21_workload_volume_mounts()],
         volumes=[*minio_web_identity_volumes(), *bc21_workload_volumes()],
+    )
+
+
+def vault_transit_minio_executor_config(
+    *,
+    service_account_name: str,
+    labels: Mapping[str, str],
+    auth_role: str,
+) -> dict[str, Any]:
+    """Build a no-ambient-token MinIO + Vault Transit executor identity."""
+
+    return _evidence_executor_config(
+        service_account_name=service_account_name,
+        labels=labels,
+        env_vars=[
+            *minio_web_identity_env_vars(()),
+            *vault_transit_env_vars(auth_role=auth_role),
+        ],
+        volume_mounts=[
+            *minio_web_identity_volume_mounts(),
+            *vault_transit_volume_mounts(),
+        ],
+        volumes=[*minio_web_identity_volumes(), *vault_transit_volumes()],
+    )
+
+
+def evaluation_admission_verifier_executor_config(*, labels: Mapping[str, str]) -> dict[str, Any]:
+    """Build the fixed read/verify-only identity for the D6 admission task.
+
+    The S3 endpoint and region are deployment-owned base-pod environment values.
+    This override contributes only the two projected-token paths and the fixed
+    Vault verifier role, so callers cannot turn a signer identity into a verifier
+    (or vice versa) by choosing a role or ServiceAccount dynamically.
+    """
+
+    return _evidence_executor_config(
+        service_account_name=EVALUATION_ADMISSION_VERIFIER_SERVICE_ACCOUNT,
+        labels=labels,
+        env_vars=[
+            k8s.V1EnvVar(
+                name="ADAPSTORY_EVALUATION_EVIDENCE_S3_WEB_IDENTITY_TOKEN_FILE",
+                value=MINIO_WEB_IDENTITY_TOKEN_FILE,
+            ),
+            k8s.V1EnvVar(
+                name="ADAPSTORY_EVALUATION_EVIDENCE_S3_STS_DURATION_SECONDS",
+                value=native_template_safe_env_value(str(MINIO_WEB_IDENTITY_EXPIRATION_SECONDS)),
+            ),
+            *_vault_transit_env_vars(auth_role=EVALUATION_ADMISSION_VERIFIER_VAULT_AUTH_ROLE),
+        ],
+        volume_mounts=[
+            *minio_web_identity_volume_mounts(),
+            *vault_transit_volume_mounts(),
+        ],
+        volumes=[*minio_web_identity_volumes(), *vault_transit_volumes()],
     )
 
 
