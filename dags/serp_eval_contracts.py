@@ -2121,9 +2121,7 @@ def _benchmark_substrate_source_set_evidence(
         raise ValueError(f"{field_name} must define exactly {sorted(expected)}")
     s3_uri = _required_str(evidence, "s3Uri")
     if not re.fullmatch(_BENCHMARK_SUBSTRATE_SOURCE_SET_URI_PATTERN, s3_uri):
-        raise ValueError(
-            f"{field_name}.s3Uri must be a ci-benchmark-substrates source-set object"
-        )
+        raise ValueError(f"{field_name}.s3Uri must be a ci-benchmark-substrates source-set object")
     if _required_str(evidence, "objectLockMode") != "COMPLIANCE":
         raise ValueError(f"{field_name} must declare COMPLIANCE object lock")
     return {
@@ -6952,9 +6950,8 @@ def _normalized_observed_normalized_score_cells_evidence(
         raise ValueError("observed normalized score-cell receipt status does not match")
     if _worm_evidence_reference(payload, "receiptEvidence") != dict(expected_receipt_evidence):
         raise ValueError("observed normalized score-cell receipt evidence does not match")
-    if (
-        _worm_evidence_reference(payload, "receiptAttestationEvidence")
-        != dict(expected_receipt_attestation_evidence)
+    if _worm_evidence_reference(payload, "receiptAttestationEvidence") != dict(
+        expected_receipt_attestation_evidence
     ):
         raise ValueError("observed normalized score-cell attestation evidence does not match")
     raw_cells = _required_object_list(payload, "cells")
@@ -6983,9 +6980,7 @@ def _normalized_observed_normalized_score_cells_evidence(
         raise ValueError("rejected observed normalized score cells require rejection reasons")
     expected_summary = {
         "cellCount": len(cells),
-        "minimumBaselineNormalizedMean": min(
-            cell["baseline"]["normalizedMean"] for cell in cells
-        ),
+        "minimumBaselineNormalizedMean": min(cell["baseline"]["normalizedMean"] for cell in cells),
         "minimumCandidateNormalizedLcb95": min(
             cell["candidate"]["normalizedLcb95"] for cell in cells
         ),

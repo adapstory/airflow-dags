@@ -807,8 +807,9 @@ def test_scheduled_d6_receipt_proves_three_prior_accepts_and_one_unique_child() 
     assert len(payload["priorAcceptedEvaluations"]) == 3
     assert payload["triggeredEvaluation"]["airflowRun"] == fixture["child_run"]
     assert payload["currentRunObservation"] == fixture["current_observation"]
-    assert payload["triggeredEvaluation"]["observedNormalizedScoreCellsEvidence"] == (
-        fixture["triggered_verification"]["observedNormalizedScoreCellsEvidence"]
+    assert (
+        payload["triggeredEvaluation"]["observedNormalizedScoreCellsEvidence"]
+        == (fixture["triggered_verification"]["observedNormalizedScoreCellsEvidence"])
     )
 
 
@@ -816,9 +817,7 @@ def test_scheduled_d6_receipt_rejects_score_cells_not_matching_the_signed_receip
     fixture = _scheduled_d6_receipt_fixture()
     score_handle = fixture["triggered_verification"]["observedNormalizedScoreCellsEvidence"]
     score_cells = fixture["objects"][(score_handle["s3Uri"], score_handle["versionId"])]
-    score_cells["cells"][0]["candidate"].update(
-        {"meanScore": 0.864, "normalizedMean": 0.96}
-    )
+    score_cells["cells"][0]["candidate"].update({"meanScore": 0.864, "normalizedMean": 0.96})
 
     with pytest.raises(
         ValueError,
@@ -2529,9 +2528,10 @@ def test_d19_persists_observed_normalized_score_cells_and_identity_bound_verific
         "sha256",
         "versionId",
     }
-    assert score_cells_evidence["s3Uri"] == plan.payload["artifact_paths"][
-        "paired_evaluation_score_cells"
-    ]
+    assert (
+        score_cells_evidence["s3Uri"]
+        == plan.payload["artifact_paths"]["paired_evaluation_score_cells"]
+    )
 
     verification_payload = json.loads(
         s3_client.objects[(verification_evidence["s3Uri"], verification_evidence["versionId"])]

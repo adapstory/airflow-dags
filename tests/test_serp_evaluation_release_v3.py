@@ -146,10 +146,10 @@ def _release_pair(
 
     def runtime_receipt(side: str, digest: str, build: int) -> dict[str, Any]:
         receipt: dict[str, Any] = {
-                "digest": "sha256:" + digest * 64,
-                "jenkinsBuildUrl": f"https://jenkins.adapstory.com/job/infra-build/{build}/",
-                "result": "SUCCESS",
-                "sourceRevision": digest * 40,
+            "digest": "sha256:" + digest * 64,
+            "jenkinsBuildUrl": f"https://jenkins.adapstory.com/job/infra-build/{build}/",
+            "result": "SUCCESS",
+            "sourceRevision": digest * 40,
         }
         if include_runtime_source_set:
             receipt["benchmarkSubstrateSourceSetEvidence"] = source_set_evidence[side]
