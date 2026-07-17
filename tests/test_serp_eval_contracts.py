@@ -8212,7 +8212,8 @@ def _d6_d17_promotion_receipt(
         "promotionId": "serp-model-promotion-2026-07-12",
         "registryResourceId": plan.payload["registry_resource_id"],
         "registryResourceType": plan.payload["registry_resource_type"],
-        "schema": "EvaluationReleasePromotionReceipt/v5",
+        "schema": "EvaluationReleasePromotionReceipt/v6",
+        "evaluationReleaseContractVersion": "serp-ci-evaluation-release-evidence/v6",
         "status": "approved-for-evaluation",
         "tenantId": plan.payload["tenant_id"],
     }
@@ -8723,7 +8724,8 @@ def _d19_promotion_snapshot(plan: Any) -> dict[str, Any]:
     return {
         "promotionEvidence": plan.payload["evaluation_release_promotion_evidence"],
         "promotion": {
-            "schema": "EvaluationReleasePromotionReceipt/v5",
+            "schema": "EvaluationReleasePromotionReceipt/v6",
+            "evaluationReleaseContractVersion": "serp-ci-evaluation-release-evidence/v6",
             "baselineRelease": {
                 "evidence": _d19_worm_evidence("model-releases/baseline", "d"),
                 "releaseDigest": "sha256:" + "1" * 64,

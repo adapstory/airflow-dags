@@ -49,11 +49,40 @@ def _handle(
     }
 
 
+def _benchmark_substrate_source_set_handle(
+    substrate_id: int,
+    payload: Mapping[str, Any],
+    objects: dict[tuple[str, str, str], bytes],
+    *,
+    canonical_uri: bool = True,
+    extra_handle_fields: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    body = _canonical_bytes(payload)
+    if canonical_uri:
+        key = f"serp-evals/ci-benchmark-substrates-{substrate_id}/source-set.json"
+    else:
+        key = f"serp-evals/substrates-{substrate_id}/source-set.json"
+    version_id = f"substrate-source-set-{substrate_id}"
+    objects[("airflow-serp-evidence", key, version_id)] = body
+    return {
+        "objectLockMode": "COMPLIANCE",
+        "s3Uri": f"s3://airflow-serp-evidence/{key}",
+        "sha256": "sha256:" + sha256(body).hexdigest(),
+        "versionId": version_id,
+        **dict(extra_handle_fields or {}),
+    }
+
+
 def _release_pair(
     *,
     activation_status: str = "ready-for-evaluation",
     legacy_treatment: bool = False,
     same_treatment: bool = False,
+    include_runtime_source_set: bool = True,
+    runtime_source_set_schema: str = "BenchmarkExecutionSubstrateSourceSet/v2",
+    different_runtime_source_set_handles: bool = False,
+    canonical_runtime_source_set_uri: bool = True,
+    runtime_source_set_extra_handle_fields: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, Any], dict[tuple[str, str, str], bytes]]:
     objects: dict[tuple[str, str, str], bytes] = {}
     component_cache: dict[bytes, dict[str, str]] = {}
@@ -67,16 +96,67 @@ def _release_pair(
         component_cache[body] = evidence
         return evidence
 
-    runtime_evidence = {
-        side: component(
-            f"runtime-{side}",
+    source_set_payload = {
+        "schema": runtime_source_set_schema,
+        "suites": [
             {
+                "roles": [
+                    {
+                        "evidence": {
+                            "objectLockMode": "COMPLIANCE",
+                            "s3Uri": (
+                                "s3://airflow-serp-evidence/serp-evals/"
+                                f"ci-benchmark-substrates-1/"
+                                f"{suite_id.lower().replace(' ', '-')}/fixture.json"
+                            ),
+                            "sha256": "sha256:" + "b" * 64,
+                            "versionId": f"fixture-role-{suite_id}",
+                        },
+                        "role": "fixture",
+                    }
+                ],
+                "suiteId": suite_id,
+            }
+            for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+        ],
+        "supplyAttestationsEvidence": {
+            "objectLockMode": "COMPLIANCE",
+            "s3Uri": "s3://airflow-serp-evidence/serp-evals/ci-benchmark-substrates-1/"
+            "supply-attestations.json",
+            "sha256": "sha256:" + "a" * 64,
+            "versionId": "substrate-supply-attestations-1",
+        },
+    }
+    source_set_evidence = {
+        "baseline": _benchmark_substrate_source_set_handle(
+            1,
+            source_set_payload,
+            objects,
+            canonical_uri=canonical_runtime_source_set_uri,
+            extra_handle_fields=runtime_source_set_extra_handle_fields,
+        ),
+        "candidate": _benchmark_substrate_source_set_handle(
+            2 if different_runtime_source_set_handles else 1,
+            source_set_payload,
+            objects,
+            canonical_uri=canonical_runtime_source_set_uri,
+            extra_handle_fields=runtime_source_set_extra_handle_fields,
+        ),
+    }
+
+    def runtime_receipt(side: str, digest: str, build: int) -> dict[str, Any]:
+        receipt: dict[str, Any] = {
                 "digest": "sha256:" + digest * 64,
                 "jenkinsBuildUrl": f"https://jenkins.adapstory.com/job/infra-build/{build}/",
                 "result": "SUCCESS",
                 "sourceRevision": digest * 40,
-            },
-        )
+        }
+        if include_runtime_source_set:
+            receipt["benchmarkSubstrateSourceSetEvidence"] = source_set_evidence[side]
+        return receipt
+
+    runtime_evidence = {
+        side: component(f"runtime-{side}", runtime_receipt(side, digest, build))
         for side, digest, build in (("baseline", "b", 160), ("candidate", "c", 161))
     }
 
@@ -231,7 +311,7 @@ def _release_pair(
     )
     bundle = {
         "apiVersion": "serp.adapstory.ai/v2alpha1",
-        "contractVersion": "serp-ci-evaluation-release-evidence/v5",
+        "contractVersion": "serp-ci-evaluation-release-evidence/v6",
         "kind": "EvaluationReleaseEvidence",
         "metricCompatibilityMatrixEvidence": metric_matrix_evidence,
         "evaluationObjectiveEvidence": evaluation_objective_evidence,
@@ -284,7 +364,7 @@ def _d19_conf() -> dict[str, object]:
     }
 
 
-def test_d17_consumes_ci_v5_bundle_and_seals_governed_v5_promotion() -> None:
+def test_d17_consumes_ci_v6_bundle_and_seals_governed_v6_promotion() -> None:
     bundle, objects = _release_pair()
     plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
 
@@ -300,6 +380,9 @@ def test_d17_consumes_ci_v5_bundle_and_seals_governed_v5_promotion() -> None:
         == bundle["evaluationObjectiveAttestationEvidence"]
     )
     assert "evaluation_release_evidence" not in plan.payload
+    assert plan.payload["ci_evaluation_release_contract_version"] == (
+        "serp-ci-evaluation-release-evidence/v6"
+    )
 
     releases = load_governed_model_releases(plan.to_canonical_json(), s3_client=_FakeS3(objects))
     assert [
@@ -310,7 +393,8 @@ def test_d17_consumes_ci_v5_bundle_and_seals_governed_v5_promotion() -> None:
         plan.to_canonical_json(), releases, snapshot_writer=_snapshot_writer
     )
     payload = receipt["payload"]
-    assert payload["schema"] == "EvaluationReleasePromotionReceipt/v5"
+    assert payload["schema"] == "EvaluationReleasePromotionReceipt/v6"
+    assert payload["evaluationReleaseContractVersion"] == "serp-ci-evaluation-release-evidence/v6"
     assert payload["status"] == "approved-for-evaluation"
     assert payload["baselineRelease"] == {
         "evidence": bundle["baselineReleaseEvidence"],
@@ -340,12 +424,86 @@ def test_d17_consumes_ci_v5_bundle_and_seals_governed_v5_promotion() -> None:
         assert forbidden not in serialized
 
 
-def test_d17_rejects_ci_v3_bundle_without_compatibility_fallback() -> None:
+def test_d17_rejects_ci_v5_bundle_without_compatibility_fallback() -> None:
     bundle, _objects = _release_pair()
-    bundle["contractVersion"] = "serp-ci-evaluation-release-evidence/v3"
+    bundle["contractVersion"] = "serp-ci-evaluation-release-evidence/v5"
 
     with pytest.raises(ValueError, match="contractVersion is unsupported"):
         build_model_catalog_promotion_plan(_promotion_conf(bundle))
+
+
+def test_d17_rejects_runtime_receipt_without_benchmark_substrate_source_set_evidence() -> None:
+    bundle, objects = _release_pair(include_runtime_source_set=False)
+    plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
+
+    with pytest.raises(ValueError, match="benchmarkSubstrateSourceSetEvidence"):
+        load_governed_model_releases(plan.to_canonical_json(), s3_client=_FakeS3(objects))
+
+
+def test_d17_receipt_writer_requires_loaded_benchmark_substrate_source_set_evidence() -> None:
+    bundle, objects = _release_pair()
+    plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
+    releases = load_governed_model_releases(plan.to_canonical_json(), s3_client=_FakeS3(objects))
+    releases["baselineRelease"]["release"].pop("benchmarkSubstrateSourceSetEvidence")
+
+    with pytest.raises(ValueError, match="benchmarkSubstrateSourceSetEvidence"):
+        write_model_catalog_promotion_receipt(
+            plan.to_canonical_json(), releases, snapshot_writer=_snapshot_writer
+        )
+
+
+def test_d17_rejects_runtime_source_set_outside_ci_benchmark_substrates_prefix() -> None:
+    bundle, objects = _release_pair(canonical_runtime_source_set_uri=False)
+    plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
+
+    with pytest.raises(ValueError, match="ci-benchmark-substrates"):
+        load_governed_model_releases(plan.to_canonical_json(), s3_client=_FakeS3(objects))
+
+
+def test_d17_rejects_runtime_source_set_with_unsupported_schema() -> None:
+    bundle, objects = _release_pair(
+        runtime_source_set_schema="BenchmarkExecutionSubstrateSourceSet/v1"
+    )
+    plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
+
+    with pytest.raises(
+        ValueError, match="benchmarkSubstrateSourceSetEvidence schema is unsupported"
+    ):
+        load_governed_model_releases(plan.to_canonical_json(), s3_client=_FakeS3(objects))
+
+
+def test_d17_rejects_tampered_runtime_source_set_bytes() -> None:
+    bundle, objects = _release_pair()
+    runtime_evidence = bundle["baselineRelease"]["runtimeEvidence"]
+    runtime_key = runtime_evidence["s3Uri"].removeprefix("s3://airflow-serp-evidence/")
+    runtime = json.loads(
+        objects[("airflow-serp-evidence", runtime_key, runtime_evidence["versionId"])]
+    )
+    source_set_evidence = runtime["benchmarkSubstrateSourceSetEvidence"]
+    source_set_key = source_set_evidence["s3Uri"].removeprefix("s3://airflow-serp-evidence/")
+    objects[("airflow-serp-evidence", source_set_key, source_set_evidence["versionId"])] = b"{}"
+    plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
+
+    with pytest.raises(ValueError, match="benchmarkSubstrateSourceSetEvidence.*SHA-256"):
+        load_governed_model_releases(plan.to_canonical_json(), s3_client=_FakeS3(objects))
+
+
+def test_d17_rejects_runtime_source_set_handle_with_extra_fields() -> None:
+    bundle, objects = _release_pair(
+        runtime_source_set_extra_handle_fields={"retainUntil": "2027-07-15T00:00:00Z"}
+    )
+    plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
+
+    with pytest.raises(ValueError, match="benchmarkSubstrateSourceSetEvidence must define exactly"):
+        load_governed_model_releases(plan.to_canonical_json(), s3_client=_FakeS3(objects))
+
+
+def test_d17_rejects_pair_with_different_runtime_source_set_handles() -> None:
+    bundle, objects = _release_pair(different_runtime_source_set_handles=True)
+    plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
+
+    with pytest.raises(ValueError, match="same benchmark substrate source set"):
+        load_governed_model_releases(plan.to_canonical_json(), s3_client=_FakeS3(objects))
 
 
 def test_d17_rejects_blocked_activation_and_missing_treatment() -> None:
@@ -421,7 +579,7 @@ def test_d17_uses_a_read_only_session_for_the_exact_ci_release_operation(
     ]
 
 
-def test_d19_rereads_the_v5_promotion_and_both_release_manifests() -> None:
+def test_d19_rereads_the_v6_promotion_and_both_release_manifests() -> None:
     bundle, objects = _release_pair()
     d17_plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
     releases = load_governed_model_releases(
@@ -443,7 +601,10 @@ def test_d19_rereads_the_v5_promotion_and_both_release_manifests() -> None:
         d19_plan.to_canonical_json(), s3_client=_FakeS3(objects)
     )
 
-    assert snapshot["promotion"]["schema"] == "EvaluationReleasePromotionReceipt/v5"
+    assert snapshot["promotion"]["schema"] == "EvaluationReleasePromotionReceipt/v6"
+    assert snapshot["promotion"]["evaluationReleaseContractVersion"] == (
+        "serp-ci-evaluation-release-evidence/v6"
+    )
     assert (
         snapshot["promotion"]["baselineRelease"]["releaseDigest"]
         == bundle["baselineRelease"]["releaseDigest"]
@@ -472,6 +633,28 @@ def test_d19_rereads_the_v5_promotion_and_both_release_manifests() -> None:
     )
 
 
+def test_d19_rejects_v5_promotion_receipt_without_compatibility_fallback() -> None:
+    bundle, objects = _release_pair()
+    d17_plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
+    releases = load_governed_model_releases(
+        d17_plan.to_canonical_json(), s3_client=_FakeS3(objects)
+    )
+    receipt = write_model_catalog_promotion_receipt(
+        d17_plan.to_canonical_json(), releases, snapshot_writer=_snapshot_writer
+    )
+    legacy_receipt = dict(receipt["payload"])
+    legacy_receipt["schema"] = "EvaluationReleasePromotionReceipt/v5"
+    legacy_evidence = _handle("legacy-v5-promotion", legacy_receipt, objects)
+    conf = _d19_conf()
+    conf["evaluation_release_promotion_evidence"] = legacy_evidence
+    d19_plan = build_benchmark_improvement_wave_plan(conf)
+
+    with pytest.raises(ValueError, match="D17 promotion receipt schema is unsupported"):
+        load_model_catalog_promotion_snapshot(
+            d19_plan.to_canonical_json(), s3_client=_FakeS3(objects)
+        )
+
+
 def test_d19_rejects_duplicate_promotion_member_even_when_digest_matches() -> None:
     bundle, objects = _release_pair()
     d17_plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
@@ -482,7 +665,7 @@ def test_d19_rejects_duplicate_promotion_member_even_when_digest_matches() -> No
         d17_plan.to_canonical_json(), releases, snapshot_writer=_snapshot_writer
     )
     canonical_body = _canonical_bytes(receipt["payload"])
-    body = b'{"schema":"EvaluationReleasePromotionReceipt/v5",' + canonical_body[1:]
+    body = b'{"schema":"EvaluationReleasePromotionReceipt/v6",' + canonical_body[1:]
     receipt_evidence = dict(receipt["promotionEvidence"])
     receipt_evidence["sha256"] = "sha256:" + sha256(body).hexdigest()
     bucket = "airflow-serp-evidence"
@@ -595,7 +778,8 @@ def test_d19_builds_scoreless_reference_only_paired_request_v5(
     promotion = {
         "promotionEvidence": plan.payload["evaluation_release_promotion_evidence"],
         "promotion": {
-            "schema": "EvaluationReleasePromotionReceipt/v5",
+            "schema": "EvaluationReleasePromotionReceipt/v6",
+            "evaluationReleaseContractVersion": "serp-ci-evaluation-release-evidence/v6",
             "promotionId": "all-nine-eval-2026-07-15",
             "tenantId": TENANT_ID,
             "registryResourceId": RESOURCE_ID,
