@@ -694,6 +694,16 @@ def _verification_pointer(index: int) -> dict[str, Any]:
     airflow_run.pop("state")
     return {
         "airflowRun": airflow_run,
+        "observedNormalizedScoreCellsEvidence": {
+            "objectLockMode": "COMPLIANCE",
+            "retainUntil": "2033-07-17T00:00:00Z",
+            "s3Uri": (
+                "s3://airflow-serp-evidence/serp-evals/score-cells/"
+                f"manual__d19-{index}.json"
+            ),
+            "sha256": "sha256:" + f"{(index + 7) % 10}" * 64,
+            "versionId": f"score-cells-version-d19-{index}",
+        },
         "pairedEvaluationVerificationEvidence": {
             "objectLockMode": "COMPLIANCE",
             "retainUntil": "2033-07-17T00:00:00Z",

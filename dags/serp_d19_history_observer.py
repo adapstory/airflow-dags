@@ -365,6 +365,15 @@ class AirflowD19HistoryClient:
         ]
         if len(set(evidence_identities)) != len(evidence_identities):
             raise ValueError("accepted D19 WORM verification handles must be unique")
+        score_evidence_identities = [
+            (
+                pointer["observedNormalizedScoreCellsEvidence"]["s3Uri"],
+                pointer["observedNormalizedScoreCellsEvidence"]["versionId"],
+            )
+            for pointer in pointers
+        ]
+        if len(set(score_evidence_identities)) != len(score_evidence_identities):
+            raise ValueError("accepted D19 WORM score-cell handles must be unique")
         return pointers
 
     def _accepted_run_verification_pointer(
@@ -489,6 +498,7 @@ def _normalized_verification_pointer(
 ) -> dict[str, Any]:
     if set(value) != {
         "airflowRun",
+        "observedNormalizedScoreCellsEvidence",
         "pairedEvaluationVerificationEvidence",
         "receiptStatus",
         "requestId",
@@ -522,8 +532,12 @@ def _normalized_verification_pointer(
     evidence = value.get("pairedEvaluationVerificationEvidence")
     if not isinstance(evidence, Mapping):
         raise ValueError("D19 verification pointer WORM evidence is required")
+    score_evidence = value.get("observedNormalizedScoreCellsEvidence")
+    if not isinstance(score_evidence, Mapping):
+        raise ValueError("D19 observed score-cell WORM evidence is required")
     return {
         "airflowRun": normalized_run,
+        "observedNormalizedScoreCellsEvidence": _normalized_worm_evidence(score_evidence),
         "pairedEvaluationVerificationEvidence": _normalized_worm_evidence(evidence),
         "receiptStatus": "accepted",
         "requestId": request_id,

@@ -133,8 +133,14 @@ SERP eval DAG contracts:
   `paired-eval-receipt.json`, and a separate `paired-eval-control.json` under a
   deterministic operation directory. The packaged pipeline evaluator is the
   sole result authority; its immutable receipt cannot share or be overwritten
-  by the Airflow stdout control artifact. Unavailable adapters, missing pinned
-  provenance, missing rights, or incomplete all-nine coverage are `blocked`.
+  by the Airflow stdout control artifact. Airflow projects exactly the
+  executor-observed nine baseline/candidate normalized cells into the linked
+  COMPLIANCE-locked `D19ObservedNormalizedScoreCells/v1` artifact and records
+  its WORM handle in `PairedEvaluationVerificationEvidence/v2`; a rejected
+  evaluation therefore retains its measured cells and reasons rather than a
+  synthetic score or a scoreless placeholder. Unavailable adapters, missing
+  pinned provenance, missing rights, or incomplete all-nine coverage are
+  `blocked`.
   CodeRAG and SWE-bench use sealed `SandboxWorkItemSet/v1` fan-out. The selected
   digest-pinned image runs only its suite-specific staged standalone runner as
   the second init container, with no Airflow/Pipeline import, credentials,

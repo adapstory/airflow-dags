@@ -787,7 +787,7 @@ def test_scheduled_d6_receipt_proves_three_prior_accepts_and_one_unique_child() 
     )
     assert len(written_payloads) == 1
     payload = written_payloads[0]
-    assert payload["schema"] == "ScheduledD6RegressionReceipt/v1"
+    assert payload["schema"] == "ScheduledD6RegressionReceipt/v2"
     assert payload["status"] == "accepted"
     assert payload["acceptedStreakLength"] == 4
     current_receipt = fixture["objects"][fixture["current_receipt_key"]]
@@ -807,6 +807,31 @@ def test_scheduled_d6_receipt_proves_three_prior_accepts_and_one_unique_child() 
     assert len(payload["priorAcceptedEvaluations"]) == 3
     assert payload["triggeredEvaluation"]["airflowRun"] == fixture["child_run"]
     assert payload["currentRunObservation"] == fixture["current_observation"]
+    assert payload["triggeredEvaluation"]["observedNormalizedScoreCellsEvidence"] == (
+        fixture["triggered_verification"]["observedNormalizedScoreCellsEvidence"]
+    )
+
+
+def test_scheduled_d6_receipt_rejects_score_cells_not_matching_the_signed_receipt() -> None:
+    fixture = _scheduled_d6_receipt_fixture()
+    score_handle = fixture["triggered_verification"]["observedNormalizedScoreCellsEvidence"]
+    score_cells = fixture["objects"][(score_handle["s3Uri"], score_handle["versionId"])]
+    score_cells["cells"][0]["candidate"].update(
+        {"meanScore": 0.864, "normalizedMean": 0.96}
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="observed normalized score-cell evidence does not match its signed receipt",
+    ):
+        write_scheduled_d6_regression_receipt(
+            fixture["plan"].to_canonical_json(),
+            fixture["history_result"],
+            fixture["triggered_verification"],
+            fixture["current_observation"],
+            evidence_reader=fixture["reader"],
+            clock=lambda: datetime(2026, 7, 17, 4, 0, tzinfo=UTC),
+        )
 
 
 def test_scheduled_d6_self_advances_the_exact_streak_on_the_next_daily_run() -> None:
@@ -2387,6 +2412,10 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
             "s3://airflow-serp-evidence/serp-evals/"
             f"{plan.payload['operation_id']}/paired-eval-receipt.json"
         ),
+        "paired_evaluation_score_cells": (
+            "s3://airflow-serp-evidence/serp-evals/"
+            f"{plan.payload['operation_id']}/paired-evaluation-observed-normalized-score-cells.json"
+        ),
         "paired_evaluation_verification_evidence": (
             "s3://airflow-serp-evidence/serp-evals/"
             f"{plan.payload['operation_id']}/paired-evaluation-verification-evidence.json"
@@ -2461,7 +2490,7 @@ def test_build_benchmark_improvement_wave_plan_rejects_caller_supplied_candidate
         build_benchmark_improvement_wave_plan(conf)
 
 
-def test_d19_persists_identity_bound_v9_verification_as_exact_five_field_worm(
+def test_d19_persists_observed_normalized_score_cells_and_identity_bound_verification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS", "365")
@@ -2492,6 +2521,17 @@ def test_d19_persists_identity_bound_v9_verification_as_exact_five_field_worm(
     assert verification_evidence["versionId"] == "verification-version-001"
     assert persisted["requestId"] == plan.payload["operation_id"]
     assert persisted["receiptStatus"] == "accepted"
+    score_cells_evidence = persisted["observedNormalizedScoreCellsEvidence"]
+    assert set(score_cells_evidence) == {
+        "objectLockMode",
+        "retainUntil",
+        "s3Uri",
+        "sha256",
+        "versionId",
+    }
+    assert score_cells_evidence["s3Uri"] == plan.payload["artifact_paths"][
+        "paired_evaluation_score_cells"
+    ]
 
     verification_payload = json.loads(
         s3_client.objects[(verification_evidence["s3Uri"], verification_evidence["versionId"])]
@@ -2505,11 +2545,58 @@ def test_d19_persists_identity_bound_v9_verification_as_exact_five_field_worm(
         "operationId": plan.payload["operation_id"],
         "receiptPointer": expected_pointer,
         "requestId": plan.payload["operation_id"],
-        "schema": "PairedEvaluationVerificationEvidence/v1",
+        "schema": "PairedEvaluationVerificationEvidence/v2",
+        "observedNormalizedScoreCellsEvidence": score_cells_evidence,
     }
     assert verification_payload["receiptPointer"]["receiptEvidence"] == (
         _d19_receipt_subject(evaluator_result)
     )
+    score_cells_payload = json.loads(
+        s3_client.objects[(score_cells_evidence["s3Uri"], score_cells_evidence["versionId"])]
+    )
+    assert score_cells_payload["schema"] == "D19ObservedNormalizedScoreCells/v1"
+    assert score_cells_payload["operationId"] == plan.payload["operation_id"]
+    assert score_cells_payload["receiptEvidence"] == _d19_receipt_subject(evaluator_result)
+    assert [cell["suiteId"] for cell in score_cells_payload["cells"]] == list(
+        MANDATORY_SERP_BENCHMARK_SUITES
+    )
+    assert score_cells_payload["cells"][0]["baseline"] == {
+        "meanScore": 0.81,
+        "normalizedMean": 0.9,
+    }
+    assert score_cells_payload["cells"][0]["candidate"] == {
+        "meanScore": 0.855,
+        "normalizedLcb95": 0.925,
+        "normalizedMean": 0.95,
+    }
+
+
+def test_d19_materializes_observed_score_cells_for_a_rejected_evaluation() -> None:
+    operation_id = "serp-airflow-benchmark-improvement-wave-rejected"
+    paired = _d19_observed_paired_evaluation(operation_id)
+    paired.update(
+        {
+            "rejectionReasons": ["candidate-below-baseline-mean:APIBench:observed-metric-1"],
+            "status": "rejected",
+        }
+    )
+    receipt_evidence = _d19_worm_evidence("receipts/rejected", "7")
+    attestation_evidence = _d19_worm_evidence("receipts/rejected.attestation", "8")
+
+    payload = serp_eval_contracts_module._observed_normalized_score_cells_payload(
+        {"pairedEvaluation": paired},
+        operation_id=operation_id,
+        receipt_evidence=receipt_evidence,
+        receipt_attestation_evidence=attestation_evidence,
+        receipt_status="rejected",
+    )
+
+    assert payload["receiptStatus"] == "rejected"
+    assert payload["summary"]["status"] == "rejected"
+    assert payload["summary"]["rejectionReasons"] == [
+        "candidate-below-baseline-mean:APIBench:observed-metric-1"
+    ]
+    assert len(payload["cells"]) == len(MANDATORY_SERP_BENCHMARK_SUITES)
 
 
 @pytest.mark.parametrize("tamper", ("receipt-digest", "verification-subject"))
@@ -2670,6 +2757,7 @@ def test_build_paired_benchmark_plan_exposes_only_server_owned_evaluation_paths(
         "benchmark_pack_build_result",
         "benchmark_pack_lifecycle_result",
         "paired_evaluation_assembly_plan",
+        "paired_evaluation_score_cells",
         "paired_evaluation_verification_evidence",
         "paired_execution_manifest",
         "paired_eval_request",
@@ -7634,6 +7722,9 @@ def _scheduled_d6_prior_pointer(
 ) -> dict[str, Any]:
     return {
         "airflowRun": {key: run[key] for key in ("dagId", "logicalDate", "runId", "runType")},
+        "observedNormalizedScoreCellsEvidence": _d19_worm_evidence(
+            f"score-cells/prior-{index}", format((index + 9) % 16, "x")
+        ),
         "pairedEvaluationVerificationEvidence": _d19_worm_evidence(
             f"verification/prior-{index}", str(index)
         ),
@@ -7868,6 +7959,7 @@ def _scheduled_d6_receipt_fixture(
         start=1,
     ):
         verification_handle = verification_pointer["pairedEvaluationVerificationEvidence"]
+        score_cells_handle = verification_pointer["observedNormalizedScoreCellsEvidence"]
         verification_key = (verification_handle["s3Uri"], verification_handle["versionId"])
         if verification_key in objects:
             prior_receipt_handles.append(
@@ -7886,6 +7978,7 @@ def _scheduled_d6_receipt_fixture(
             request_id=request_id,
             receipt_handle=receipt_handle,
             receipt_attestation_handle=attestation_handle,
+            score_cells_handle=score_cells_handle,
             request_uuid_suffix=int(str(request_id)[-12:]),
         )
         objects[(receipt_handle["s3Uri"], receipt_handle["versionId"])] = _d6_v9_receipt(
@@ -7897,6 +7990,15 @@ def _scheduled_d6_receipt_fixture(
         objects[(attestation_handle["s3Uri"], attestation_handle["versionId"])] = {
             "schema": "ArtifactSignatureAttestationReceipt/v2"
         }
+        objects[(score_cells_handle["s3Uri"], score_cells_handle["versionId"])] = (
+            serp_eval_contracts_module._observed_normalized_score_cells_payload(
+                objects[(receipt_handle["s3Uri"], receipt_handle["versionId"])],
+                operation_id=request_id,
+                receipt_evidence=receipt_handle,
+                receipt_attestation_evidence=attestation_handle,
+                receipt_status="accepted",
+            )
+        )
         prior_receipt_handles.append(receipt_handle)
 
     child_run = {
@@ -7917,6 +8019,10 @@ def _scheduled_d6_receipt_fixture(
         f"receipts/current-{current_request_index}.attestation",
         format((current_request_index + 8) % 16, "x"),
     )
+    current_score_cells_handle = _d19_worm_evidence(
+        f"score-cells/current-{current_request_index}",
+        format((current_request_index + 12) % 16, "x"),
+    )
     current_request_id = _d6_request_id(current_request_index)
     objects[(current_verification_handle["s3Uri"], current_verification_handle["versionId"])] = (
         _d6_paired_verification_evidence(
@@ -7924,6 +8030,7 @@ def _scheduled_d6_receipt_fixture(
             request_id=current_request_id,
             receipt_handle=current_receipt_handle,
             receipt_attestation_handle=current_attestation_handle,
+            score_cells_handle=current_score_cells_handle,
             request_uuid_suffix=current_request_index,
         )
     )
@@ -7938,6 +8045,15 @@ def _scheduled_d6_receipt_fixture(
     objects[(current_attestation_handle["s3Uri"], current_attestation_handle["versionId"])] = {
         "schema": "ArtifactSignatureAttestationReceipt/v2"
     }
+    objects[(current_score_cells_handle["s3Uri"], current_score_cells_handle["versionId"])] = (
+        serp_eval_contracts_module._observed_normalized_score_cells_payload(
+            objects[(current_receipt_handle["s3Uri"], current_receipt_handle["versionId"])],
+            operation_id=current_request_id,
+            receipt_evidence=current_receipt_handle,
+            receipt_attestation_evidence=current_attestation_handle,
+            receipt_status="accepted",
+        )
+    )
 
     def reader(evidence: Mapping[str, str], _field_name: str) -> dict[str, Any]:
         key = (evidence["s3Uri"], evidence["versionId"])
@@ -7985,6 +8101,7 @@ def _scheduled_d6_receipt_fixture(
         "reader": reader,
         "triggered_verification": {
             "airflowRun": child_run,
+            "observedNormalizedScoreCellsEvidence": current_score_cells_handle,
             "pairedEvaluationVerificationEvidence": current_verification_handle,
             "receiptStatus": "accepted",
             "requestId": current_request_id,
@@ -7998,12 +8115,14 @@ def _d6_paired_verification_evidence(
     request_id: str,
     receipt_handle: Mapping[str, str],
     receipt_attestation_handle: Mapping[str, str],
+    score_cells_handle: Mapping[str, str],
     request_uuid_suffix: int,
 ) -> dict[str, Any]:
     request_uuid = f"00000000-0000-4000-8000-{request_uuid_suffix:012d}"
     transit_uuid = f"10000000-0000-4000-8000-{request_uuid_suffix:012d}"
     return {
         "airflowRun": dict(airflow_run),
+        "observedNormalizedScoreCellsEvidence": dict(score_cells_handle),
         "operationId": request_id,
         "receiptPointer": {
             "receiptAttestationEvidence": dict(receipt_attestation_handle),
@@ -8025,7 +8144,7 @@ def _d6_paired_verification_evidence(
             },
         },
         "requestId": request_id,
-        "schema": "PairedEvaluationVerificationEvidence/v1",
+        "schema": "PairedEvaluationVerificationEvidence/v2",
     }
 
 
@@ -8049,11 +8168,7 @@ def _d6_v9_receipt(
         "evaluationObjectiveEvidence": dict(objective),
         "evaluationReleasePromotionEvidence": dict(promotion),
         "metricCompatibilityMatrixEvidence": _d19_worm_evidence("metric-matrix", "5"),
-        "pairedEvaluation": {
-            "contractVersion": "serp-paired-evaluation/v5",
-            "operationId": request_id,
-            "status": "accepted",
-        },
+        "pairedEvaluation": _d19_observed_paired_evaluation(request_id),
         "requestEvidence": _d19_worm_evidence(f"requests/{request_id}", "6"),
         "requestId": request_id,
         "status": "accepted",
@@ -8244,6 +8359,7 @@ def _d19_evaluator_result(
             ),
         },
         "contractVersion": "serp-paired-eval-receipt/v9",
+        "pairedEvaluation": _d19_observed_paired_evaluation(plan.payload["operation_id"]),
         "requestId": plan.payload["operation_id"],
         "status": "accepted",
     }
@@ -8312,6 +8428,51 @@ def _d19_evaluator_result(
             (attestation_path, attestation_evidence["versionId"]): attestation_bytes,
         },
     )
+
+
+def _d19_observed_paired_evaluation(operation_id: str) -> dict[str, Any]:
+    cells: list[dict[str, Any]] = []
+    for index, suite_id in enumerate(MANDATORY_SERP_BENCHMARK_SUITES, start=1):
+        cells.append(
+            {
+                "aggregation": "mean",
+                "baselineNormalizedMean": 0.9,
+                "candidateNormalizedLcb95": 0.925,
+                "candidateNormalizedMean": 0.95,
+                "maximumScore": 1.0,
+                "meanBaselineScore": 0.81,
+                "meanCandidateScore": 0.855,
+                "metricFamily": "answer-quality",
+                "metricId": f"observed-metric-{index}",
+                "pairedCaseReceiptEvidence": [
+                    {
+                        "baseline": _d19_worm_evidence(
+                            f"case-receipts/{suite_id}/baseline/{repetition}",
+                            format((index + repetition) % 16, "x"),
+                        ),
+                        "candidate": _d19_worm_evidence(
+                            f"case-receipts/{suite_id}/candidate/{repetition}",
+                            format((index + repetition + 8) % 16, "x"),
+                        ),
+                        "repetition": repetition,
+                    }
+                    for repetition in range(1, 6)
+                ],
+                "pairedNormalizedDeltaLcb95": 0.025,
+                "referenceAuthority": "official",
+                "referenceEvidence": _d19_worm_evidence(
+                    f"metric-references/{suite_id}", format(index % 16, "x")
+                ),
+                "referenceScore": 0.9,
+                "suiteId": suite_id,
+            }
+        )
+    return {
+        "contractVersion": "serp-paired-evaluation/v5",
+        "metricCells": cells,
+        "operationId": operation_id,
+        "status": "accepted",
+    }
 
 
 def _d19_verification_descriptor(

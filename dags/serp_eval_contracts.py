@@ -65,7 +65,8 @@ _EVALUATION_RELEASE_SCHEMA = "EvaluationRelease/v3"
 _EVALUATION_RELEASE_PROMOTION_SCHEMA = "EvaluationReleasePromotionReceipt/v5"
 _PAIRED_EVALUATION_REQUEST_SCHEMA = "PairedEvaluationRequest/v5"
 _PAIRED_EVALUATION_RECEIPT_CONTRACT_VERSION = "serp-paired-eval-receipt/v9"
-_PAIRED_EVALUATION_VERIFICATION_EVIDENCE_SCHEMA = "PairedEvaluationVerificationEvidence/v1"
+_PAIRED_EVALUATION_VERIFICATION_EVIDENCE_SCHEMA = "PairedEvaluationVerificationEvidence/v2"
+_D19_OBSERVED_NORMALIZED_SCORE_CELLS_SCHEMA = "D19ObservedNormalizedScoreCells/v1"
 _PAIRED_EVALUATION_FINAL_RECEIPT_PURPOSE = "serp-paired-evaluation-final-receipt"
 _D19_RUN_HISTORY_OBSERVATION_PURPOSE = "serp-d19-run-history-observation"
 _PAIRED_EVALUATION_ATTESTATION_PURPOSES = {
@@ -85,7 +86,7 @@ _MODEL_PROMOTION_DAG_ID = "serp_model_catalog_promotion"
 _D19_DAG_ID = "serp_benchmark_improvement_wave"
 _D19_VERIFICATION_EVIDENCE_MAX_BYTES = 16_000_000
 _SCHEDULED_D6_DAG_ID = "serp_nightly_regression_suite"
-_SCHEDULED_D6_RECEIPT_SCHEMA = "ScheduledD6RegressionReceipt/v1"
+_SCHEDULED_D6_RECEIPT_SCHEMA = "ScheduledD6RegressionReceipt/v2"
 _D19_RUN_HISTORY_OBSERVATION_SCHEMA = "D19RunHistoryObservation/v1"
 _D19_RUN_HISTORY_OBSERVER_SERVICE_ACCOUNT = "airflow-serp-d19-history-observer"
 _D19_RUN_HISTORY_OBSERVER_NAMESPACE = "airflow"
@@ -893,6 +894,7 @@ def _normalized_d19_history_accepted_verifications(
         pointer = cast(Mapping[str, Any], raw_pointer)
         if set(pointer) != {
             "airflowRun",
+            "observedNormalizedScoreCellsEvidence",
             "pairedEvaluationVerificationEvidence",
             "receiptStatus",
             "requestId",
@@ -910,14 +912,24 @@ def _normalized_d19_history_accepted_verifications(
             pointer,
             "pairedEvaluationVerificationEvidence",
         )
+        score_cells_evidence = _worm_evidence_reference(
+            pointer,
+            "observedNormalizedScoreCellsEvidence",
+        )
         _require_worm_evidence_within_artifact_root(
             evidence,
             artifact_root_path,
             f"acceptedRunVerifications[{index}]",
         )
+        _require_worm_evidence_within_artifact_root(
+            score_cells_evidence,
+            artifact_root_path,
+            f"acceptedRunVerifications[{index}].observedNormalizedScoreCellsEvidence",
+        )
         normalized.append(
             {
                 "airflowRun": airflow_run,
+                "observedNormalizedScoreCellsEvidence": score_cells_evidence,
                 "pairedEvaluationVerificationEvidence": evidence,
                 "receiptStatus": "accepted",
                 "requestId": str(_required_uuid(pointer, "requestId")),
@@ -935,6 +947,15 @@ def _normalized_d19_history_accepted_verifications(
     ]
     if len(set(evidence_identities)) != len(evidence_identities):
         raise ValueError("D19 history verification WORM handles must be unique")
+    score_evidence_identities = [
+        (
+            item["observedNormalizedScoreCellsEvidence"]["s3Uri"],
+            item["observedNormalizedScoreCellsEvidence"]["versionId"],
+        )
+        for item in normalized
+    ]
+    if len(set(score_evidence_identities)) != len(score_evidence_identities):
+        raise ValueError("D19 history score-cell WORM handles must be unique")
     return normalized
 
 
@@ -1140,6 +1161,10 @@ def write_scheduled_d6_regression_receipt(
         if (
             verification["airflowRun"] != pointer["airflowRun"]
             or verification["requestId"] != pointer["requestId"]
+            or (
+                verification["observedNormalizedScoreCellsEvidence"]
+                != pointer["observedNormalizedScoreCellsEvidence"]
+            )
             or pointer["receiptStatus"] != "accepted"
         ):
             raise ValueError("D19 history pointer does not match its WORM verification evidence")
@@ -1157,6 +1182,7 @@ def write_scheduled_d6_regression_receipt(
     _reject_raw_secrets(triggered)
     if set(triggered) != {
         "airflowRun",
+        "observedNormalizedScoreCellsEvidence",
         "pairedEvaluationVerificationEvidence",
         "receiptStatus",
         "requestId",
@@ -1174,6 +1200,10 @@ def write_scheduled_d6_regression_receipt(
         _normalized_d19_airflow_run(_required_mapping(triggered, "airflowRun"))
         != current_verification["airflowRun"]
         or _required_str(triggered, "requestId") != current_verification["requestId"]
+        or (
+            _worm_evidence_reference(triggered, "observedNormalizedScoreCellsEvidence")
+            != current_verification["observedNormalizedScoreCellsEvidence"]
+        )
         or _required_str(triggered, "receiptStatus") != "accepted"
     ):
         raise ValueError("triggered D19 verification result does not match its WORM evidence")
@@ -1221,6 +1251,15 @@ def write_scheduled_d6_regression_receipt(
     ]
     if len(set(receipt_identities)) != len(receipt_identities):
         raise ValueError("scheduled D6 receipt S3 identities must be unique")
+    score_cell_identities = [
+        (
+            item["observedNormalizedScoreCellsEvidence"]["s3Uri"],
+            item["observedNormalizedScoreCellsEvidence"]["versionId"],
+        )
+        for item in all_verifications
+    ]
+    if len(set(score_cell_identities)) != len(score_cell_identities):
+        raise ValueError("scheduled D6 score-cell S3 identities must be unique")
     authorities = [record["authority"] for record in receipt_records]
     if any(authority != authorities[0] for authority in authorities[1:]):
         raise ValueError("scheduled D6 evaluation authority must remain identical")
@@ -1240,6 +1279,42 @@ def write_scheduled_d6_regression_receipt(
     if observed_promotion_authority != expected_promotion_authority:
         raise ValueError("scheduled D6 evaluation authority does not match the D17 promotion")
 
+    score_records = [
+        _normalized_observed_normalized_score_cells_evidence(
+            read_json(
+                verification["observedNormalizedScoreCellsEvidence"],
+                f"observed normalized score cells {index}",
+            ),
+            expected_operation_id=verification["requestId"],
+            expected_receipt_evidence=verification["receiptPointer"]["receiptEvidence"],
+            expected_receipt_attestation_evidence=verification["receiptPointer"][
+                "receiptAttestationEvidence"
+            ],
+            expected_receipt_status="accepted",
+        )
+        for index, verification in enumerate(all_verifications, start=1)
+    ]
+    for index, (verification, score_record) in enumerate(
+        zip(all_verifications, score_records, strict=True),
+        start=1,
+    ):
+        expected_score_record = _observed_normalized_score_cells_payload(
+            read_json(
+                verification["receiptPointer"]["receiptEvidence"],
+                f"paired evaluation receipt score source {index}",
+            ),
+            operation_id=verification["requestId"],
+            receipt_evidence=verification["receiptPointer"]["receiptEvidence"],
+            receipt_attestation_evidence=verification["receiptPointer"][
+                "receiptAttestationEvidence"
+            ],
+            receipt_status="accepted",
+        )
+        if score_record != expected_score_record:
+            raise ValueError(
+                "observed normalized score-cell evidence does not match its signed receipt"
+            )
+
     now = _aware_datetime(clock or (lambda: datetime.now(UTC)), "scheduled D6 receipt clock")
     observed_at = _datetime_value(current_observation["observedAt"], "observedAt")
     fence_expires = _datetime_value(plan_fence["expiresAt"], "fence expiresAt")
@@ -1248,12 +1323,17 @@ def write_scheduled_d6_regression_receipt(
     entries = [
         {
             "airflowRun": verification["airflowRun"],
+            "observedNormalizedScoreCellsEvidence": verification[
+                "observedNormalizedScoreCellsEvidence"
+            ],
             "receiptEvidence": verification["receiptPointer"]["receiptEvidence"],
             "requestId": verification["requestId"],
             "verificationEvidence": verification["verificationEvidence"],
         }
         for verification in all_verifications
     ]
+    if any(record["summary"]["status"] != "accepted" for record in score_records):
+        raise ValueError("scheduled D6 requires accepted observed normalized score cells")
     payload = {
         "acceptedStreakLength": 4,
         "authority": authorities[0],
@@ -1430,7 +1510,14 @@ def _normalized_paired_evaluation_verification_evidence(
     *,
     evidence_handle: Mapping[str, str],
 ) -> dict[str, Any]:
-    if set(payload) != {"airflowRun", "operationId", "receiptPointer", "requestId", "schema"}:
+    if set(payload) != {
+        "airflowRun",
+        "observedNormalizedScoreCellsEvidence",
+        "operationId",
+        "receiptPointer",
+        "requestId",
+        "schema",
+    }:
         raise ValueError("paired evaluation verification evidence fields are unsupported")
     if _required_str(payload, "schema") != _PAIRED_EVALUATION_VERIFICATION_EVIDENCE_SCHEMA:
         raise ValueError("paired evaluation verification evidence schema is unsupported")
@@ -1449,6 +1536,10 @@ def _normalized_paired_evaluation_verification_evidence(
         raise ValueError("scheduled D6 requires accepted paired evaluation receipts")
     receipt_evidence = _worm_evidence_reference(pointer, "receiptEvidence")
     attestation_evidence = _worm_evidence_reference(pointer, "receiptAttestationEvidence")
+    score_cells_evidence = _worm_evidence_reference(
+        payload,
+        "observedNormalizedScoreCellsEvidence",
+    )
     receipt_verification, _ = _paired_evaluation_verification_descriptor(
         _required_mapping(pointer, "receiptVerification"),
         field_name="scheduled D6 receiptVerification",
@@ -1458,6 +1549,7 @@ def _normalized_paired_evaluation_verification_evidence(
     )
     return {
         "airflowRun": _normalized_d19_airflow_run(_required_mapping(payload, "airflowRun")),
+        "observedNormalizedScoreCellsEvidence": score_cells_evidence,
         "operationId": operation_id,
         "receiptPointer": {
             "receiptAttestationEvidence": attestation_evidence,
@@ -1909,6 +2001,10 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
                 ),
                 ("paired_eval_request", "paired-eval-request.json"),
                 ("paired_eval_receipt", "paired-eval-receipt.json"),
+                (
+                    "paired_evaluation_score_cells",
+                    "paired-evaluation-observed-normalized-score-cells.json",
+                ),
                 (
                     "paired_evaluation_verification_evidence",
                     "paired-evaluation-verification-evidence.json",
@@ -6333,7 +6429,7 @@ def write_paired_evaluation_verification_evidence(
     *,
     s3_client: Any | None = None,
 ) -> dict[str, Any]:
-    """Seal the identity-bound D19 v9 verification handoff consumed by D6."""
+    """Seal D19 verification with exact executor-observed score cells."""
 
     plan = _json_object(plan_json, "plan_json")
     _reject_raw_secrets(plan)
@@ -6341,7 +6437,11 @@ def write_paired_evaluation_verification_evidence(
         raise ValueError("plan dag_id does not match paired-evaluation verification writer")
     artifact_paths = _required_artifact_paths(
         plan,
-        ("paired_eval_receipt", "paired_evaluation_verification_evidence"),
+        (
+            "paired_eval_receipt",
+            "paired_evaluation_score_cells",
+            "paired_evaluation_verification_evidence",
+        ),
     )
     result = _json_object(evaluator_result, "evaluator_result")
     if set(result) != {
@@ -6365,6 +6465,7 @@ def write_paired_evaluation_verification_evidence(
     client = s3_client or _s3_client(
         receipt_evidence["s3Uri"],
         receipt_attestation_evidence["s3Uri"],
+        artifact_paths["paired_evaluation_score_cells"],
         artifact_paths["paired_evaluation_verification_evidence"],
     )
     receipt_bytes = _read_exact_worm_evidence_bytes(
@@ -6380,6 +6481,13 @@ def write_paired_evaluation_verification_evidence(
         raise ValueError("paired evaluation receipt requestId does not match operationId")
     if _required_str(receipt, "status") != receipt_status:
         raise ValueError("paired evaluation receipt status does not match evaluator result")
+    observed_score_cells = _observed_normalized_score_cells_payload(
+        receipt,
+        operation_id=operation_id,
+        receipt_evidence=receipt_evidence,
+        receipt_attestation_evidence=receipt_attestation_evidence,
+        receipt_status=receipt_status,
+    )
 
     receipt_verification, final_request_ids = _paired_evaluation_verification_descriptor(
         _required_mapping(result, "receiptVerification"),
@@ -6414,8 +6522,32 @@ def write_paired_evaluation_verification_evidence(
         "receiptStatus": receipt_status,
         "receiptVerification": receipt_verification,
     }
+    score_cells_path = artifact_paths["paired_evaluation_score_cells"]
+    score_cells_written = write_immutable_evidence_snapshot(
+        score_cells_path,
+        artifact_type="d19_observed_normalized_score_cells",
+        operation_id=operation_id,
+        payload=observed_score_cells,
+        s3_client=client,
+    )
+    score_cells_evidence = _written_worm_evidence_reference(
+        score_cells_written,
+        score_cells_path,
+        "D19 observed normalized score cells",
+    )
+    persisted_score_cells = _canonical_json_object_bytes(
+        _read_exact_worm_evidence_bytes(
+            score_cells_evidence,
+            field_name="D19 observed normalized score cells",
+            s3_client=client,
+        ),
+        "D19 observed normalized score cells",
+    )
+    if dict(persisted_score_cells) != observed_score_cells:
+        raise ValueError("D19 observed normalized score cells readback does not match")
     payload = {
         "airflowRun": normalized_airflow_run,
+        "observedNormalizedScoreCellsEvidence": score_cells_evidence,
         "operationId": operation_id,
         "receiptPointer": receipt_pointer,
         "requestId": operation_id,
@@ -6447,6 +6579,7 @@ def write_paired_evaluation_verification_evidence(
         raise ValueError("paired evaluation verification evidence readback does not match")
     return {
         "airflowRun": normalized_airflow_run,
+        "observedNormalizedScoreCellsEvidence": score_cells_evidence,
         "pairedEvaluationVerificationEvidence": verification_evidence,
         "receiptStatus": receipt_status,
         "requestId": operation_id,
@@ -6490,6 +6623,385 @@ def _paired_evaluation_receipt_worm_evidence(
         },
         "receiptEvidence",
     )
+
+
+def _observed_normalized_score_cells_payload(
+    receipt: Mapping[str, Any],
+    *,
+    operation_id: str,
+    receipt_evidence: Mapping[str, str],
+    receipt_attestation_evidence: Mapping[str, str],
+    receipt_status: str,
+) -> dict[str, Any]:
+    """Project signed executor observations into one WORM score-cell artifact.
+
+    The projection deliberately performs no scoring.  It only validates the
+    executor's calculated values against their observed raw means and immutable
+    reference scores, then gives baseline and candidate their own canonical
+    cells so downstream consumers cannot silently lose either treatment.
+    """
+
+    paired = _required_mapping(receipt, "pairedEvaluation")
+    if _required_str(paired, "contractVersion") != "serp-paired-evaluation/v5":
+        raise ValueError("paired evaluation score source contract is unsupported")
+    if _required_str(paired, "operationId") != operation_id:
+        raise ValueError("paired evaluation score source operationId does not match")
+    if _required_str(paired, "status") != receipt_status:
+        raise ValueError("paired evaluation score source status does not match receipt")
+    raw_cells = _required_object_list(paired, "metricCells")
+    if len(raw_cells) != len(MANDATORY_SERP_BENCHMARK_SUITES):
+        raise ValueError("paired evaluation must contain exactly nine observed score cells")
+
+    cells = [
+        _normalized_observed_normalized_score_cell(raw, expected_suite_id=suite_id)
+        for raw, suite_id in zip(raw_cells, MANDATORY_SERP_BENCHMARK_SUITES, strict=True)
+    ]
+    rejection_reasons = _paired_evaluation_rejection_reasons(
+        paired,
+        receipt_status=receipt_status,
+    )
+    return {
+        "cells": cells,
+        "operationId": operation_id,
+        "receiptAttestationEvidence": dict(receipt_attestation_evidence),
+        "receiptEvidence": dict(receipt_evidence),
+        "receiptStatus": receipt_status,
+        "schema": _D19_OBSERVED_NORMALIZED_SCORE_CELLS_SCHEMA,
+        "summary": {
+            "cellCount": len(cells),
+            "minimumBaselineNormalizedMean": min(
+                cell["baseline"]["normalizedMean"] for cell in cells
+            ),
+            "minimumCandidateNormalizedLcb95": min(
+                cell["candidate"]["normalizedLcb95"] for cell in cells
+            ),
+            "minimumCandidateNormalizedMean": min(
+                cell["candidate"]["normalizedMean"] for cell in cells
+            ),
+            "minimumPairedNormalizedDeltaLcb95": min(
+                cell["paired"]["normalizedDeltaLcb95"] for cell in cells
+            ),
+            "rejectionReasons": rejection_reasons,
+            "status": receipt_status,
+        },
+    }
+
+
+def _normalized_observed_normalized_score_cell(
+    raw: Mapping[str, Any],
+    *,
+    expected_suite_id: str,
+) -> dict[str, Any]:
+    expected_fields = {
+        "aggregation",
+        "baselineNormalizedMean",
+        "candidateNormalizedLcb95",
+        "candidateNormalizedMean",
+        "maximumScore",
+        "meanBaselineScore",
+        "meanCandidateScore",
+        "metricFamily",
+        "metricId",
+        "pairedCaseReceiptEvidence",
+        "pairedNormalizedDeltaLcb95",
+        "referenceAuthority",
+        "referenceEvidence",
+        "referenceScore",
+        "suiteId",
+    }
+    if set(raw) != expected_fields:
+        raise ValueError("paired evaluation observed score cell fields are unsupported")
+    suite_id = _required_str(raw, "suiteId")
+    if suite_id != expected_suite_id:
+        raise ValueError("paired evaluation observed score cells must use canonical suite order")
+    maximum_score = _required_number(raw, "maximumScore")
+    reference_score = _required_number(raw, "referenceScore")
+    if maximum_score <= 0.0 or reference_score <= 0.0 or reference_score > maximum_score:
+        raise ValueError("paired evaluation observed score reference bounds are unsupported")
+    mean_baseline_score = _required_number(raw, "meanBaselineScore")
+    mean_candidate_score = _required_number(raw, "meanCandidateScore")
+    if (
+        mean_baseline_score < 0.0
+        or mean_baseline_score > maximum_score
+        or mean_candidate_score < 0.0
+        or mean_candidate_score > maximum_score
+    ):
+        raise ValueError("paired evaluation observed raw score is outside its metric bounds")
+    baseline_normalized_mean = _required_number(raw, "baselineNormalizedMean")
+    candidate_normalized_mean = _required_number(raw, "candidateNormalizedMean")
+    candidate_normalized_lcb95 = _required_number(raw, "candidateNormalizedLcb95")
+    paired_normalized_delta_lcb95 = _required_number(raw, "pairedNormalizedDeltaLcb95")
+    if not math.isclose(
+        baseline_normalized_mean,
+        mean_baseline_score / reference_score,
+        rel_tol=1e-12,
+        abs_tol=1e-12,
+    ):
+        raise ValueError("baseline normalized mean is not derived from the observed score")
+    if not math.isclose(
+        candidate_normalized_mean,
+        mean_candidate_score / reference_score,
+        rel_tol=1e-12,
+        abs_tol=1e-12,
+    ):
+        raise ValueError("candidate normalized mean is not derived from the observed score")
+    reference_authority = _required_str(raw, "referenceAuthority")
+    if reference_authority not in {"official", "validated-internal"}:
+        raise ValueError("paired evaluation observed score reference authority is unsupported")
+    return {
+        "aggregation": _required_str(raw, "aggregation"),
+        "baseline": {
+            "meanScore": mean_baseline_score,
+            "normalizedMean": baseline_normalized_mean,
+        },
+        "candidate": {
+            "meanScore": mean_candidate_score,
+            "normalizedLcb95": candidate_normalized_lcb95,
+            "normalizedMean": candidate_normalized_mean,
+        },
+        "metricFamily": _required_str(raw, "metricFamily"),
+        "metricId": _required_str(raw, "metricId"),
+        "maximumScore": maximum_score,
+        "paired": {
+            "normalizedDeltaLcb95": paired_normalized_delta_lcb95,
+        },
+        "pairedCaseReceiptEvidence": _normalized_paired_case_receipt_evidence(raw),
+        "reference": {
+            "authority": reference_authority,
+            "evidence": _worm_evidence_reference(raw, "referenceEvidence"),
+            "score": reference_score,
+        },
+        "suiteId": suite_id,
+    }
+
+
+def _normalized_paired_case_receipt_evidence(raw: Mapping[str, Any]) -> list[dict[str, Any]]:
+    values = _required_object_list(raw, "pairedCaseReceiptEvidence")
+    if len(values) != _STRICT_PAIRED_RUN_COUNT:
+        raise ValueError("paired evaluation observed score cells require five paired receipts")
+    normalized: list[dict[str, Any]] = []
+    identities: set[tuple[str, str]] = set()
+    for repetition, value in enumerate(values, start=1):
+        if set(value) != {"baseline", "candidate", "repetition"}:
+            raise ValueError("paired evaluation case receipt evidence fields are unsupported")
+        if _required_positive_int(value, "repetition") != repetition:
+            raise ValueError("paired evaluation case receipt repetitions are unsupported")
+        baseline = _worm_evidence_reference(value, "baseline")
+        candidate = _worm_evidence_reference(value, "candidate")
+        for evidence in (baseline, candidate):
+            identity = (evidence["s3Uri"], evidence["versionId"])
+            if identity in identities:
+                raise ValueError("paired evaluation case receipt evidence must be unique")
+            identities.add(identity)
+        normalized.append(
+            {
+                "baseline": baseline,
+                "candidate": candidate,
+                "repetition": repetition,
+            }
+        )
+    return normalized
+
+
+def _paired_evaluation_rejection_reasons(
+    paired: Mapping[str, Any],
+    *,
+    receipt_status: str,
+) -> list[str]:
+    raw_reasons = paired.get("rejectionReasons")
+    if receipt_status == "accepted":
+        if raw_reasons is not None:
+            raise ValueError("accepted paired evaluation must not contain rejection reasons")
+        return []
+    if raw_reasons is None:
+        raise ValueError("rejected paired evaluation requires rejection reasons")
+    reasons = _required_str_list_allow_empty(paired, "rejectionReasons")
+    if not reasons or len(set(reasons)) != len(reasons):
+        raise ValueError("paired evaluation rejection reasons are unsupported")
+    return reasons
+
+
+def _normalized_observed_normalized_score_cells_evidence(
+    payload: Mapping[str, Any],
+    *,
+    expected_operation_id: str,
+    expected_receipt_evidence: Mapping[str, str],
+    expected_receipt_attestation_evidence: Mapping[str, str],
+    expected_receipt_status: str,
+) -> dict[str, Any]:
+    """Validate the WORM projection before a downstream release consumes it."""
+
+    expected_fields = {
+        "cells",
+        "operationId",
+        "receiptAttestationEvidence",
+        "receiptEvidence",
+        "receiptStatus",
+        "schema",
+        "summary",
+    }
+    if set(payload) != expected_fields:
+        raise ValueError("observed normalized score-cell evidence fields are unsupported")
+    if _required_str(payload, "schema") != _D19_OBSERVED_NORMALIZED_SCORE_CELLS_SCHEMA:
+        raise ValueError("observed normalized score-cell evidence schema is unsupported")
+    if _required_str(payload, "operationId") != expected_operation_id:
+        raise ValueError("observed normalized score-cell operationId does not match")
+    if _required_str(payload, "receiptStatus") != expected_receipt_status:
+        raise ValueError("observed normalized score-cell receipt status does not match")
+    if _worm_evidence_reference(payload, "receiptEvidence") != dict(expected_receipt_evidence):
+        raise ValueError("observed normalized score-cell receipt evidence does not match")
+    if (
+        _worm_evidence_reference(payload, "receiptAttestationEvidence")
+        != dict(expected_receipt_attestation_evidence)
+    ):
+        raise ValueError("observed normalized score-cell attestation evidence does not match")
+    raw_cells = _required_object_list(payload, "cells")
+    if len(raw_cells) != len(MANDATORY_SERP_BENCHMARK_SUITES):
+        raise ValueError("observed normalized score-cell evidence must contain nine cells")
+    cells = [
+        _normalized_observed_score_cell_evidence(raw, expected_suite_id=suite_id)
+        for raw, suite_id in zip(raw_cells, MANDATORY_SERP_BENCHMARK_SUITES, strict=True)
+    ]
+    summary = _required_mapping(payload, "summary")
+    expected_summary_fields = {
+        "cellCount",
+        "minimumBaselineNormalizedMean",
+        "minimumCandidateNormalizedLcb95",
+        "minimumCandidateNormalizedMean",
+        "minimumPairedNormalizedDeltaLcb95",
+        "rejectionReasons",
+        "status",
+    }
+    if set(summary) != expected_summary_fields:
+        raise ValueError("observed normalized score-cell summary fields are unsupported")
+    reasons = _required_str_list_allow_empty(summary, "rejectionReasons")
+    if expected_receipt_status == "accepted" and reasons:
+        raise ValueError("accepted observed normalized score cells cannot contain rejections")
+    if expected_receipt_status == "rejected" and not reasons:
+        raise ValueError("rejected observed normalized score cells require rejection reasons")
+    expected_summary = {
+        "cellCount": len(cells),
+        "minimumBaselineNormalizedMean": min(
+            cell["baseline"]["normalizedMean"] for cell in cells
+        ),
+        "minimumCandidateNormalizedLcb95": min(
+            cell["candidate"]["normalizedLcb95"] for cell in cells
+        ),
+        "minimumCandidateNormalizedMean": min(
+            cell["candidate"]["normalizedMean"] for cell in cells
+        ),
+        "minimumPairedNormalizedDeltaLcb95": min(
+            cell["paired"]["normalizedDeltaLcb95"] for cell in cells
+        ),
+        "rejectionReasons": reasons,
+        "status": expected_receipt_status,
+    }
+    if dict(summary) != expected_summary:
+        raise ValueError("observed normalized score-cell summary does not match its cells")
+    return {
+        "cells": cells,
+        "operationId": expected_operation_id,
+        "receiptAttestationEvidence": dict(expected_receipt_attestation_evidence),
+        "receiptEvidence": dict(expected_receipt_evidence),
+        "receiptStatus": expected_receipt_status,
+        "schema": _D19_OBSERVED_NORMALIZED_SCORE_CELLS_SCHEMA,
+        "summary": expected_summary,
+    }
+
+
+def _normalized_observed_score_cell_evidence(
+    raw: Mapping[str, Any],
+    *,
+    expected_suite_id: str,
+) -> dict[str, Any]:
+    expected_fields = {
+        "aggregation",
+        "baseline",
+        "candidate",
+        "metricFamily",
+        "metricId",
+        "maximumScore",
+        "paired",
+        "pairedCaseReceiptEvidence",
+        "reference",
+        "suiteId",
+    }
+    if set(raw) != expected_fields:
+        raise ValueError("observed normalized score-cell fields are unsupported")
+    suite_id = _required_str(raw, "suiteId")
+    if suite_id != expected_suite_id:
+        raise ValueError("observed normalized score-cell suite order is unsupported")
+    maximum_score = _required_number(raw, "maximumScore")
+    if maximum_score <= 0.0:
+        raise ValueError("observed normalized score-cell maximumScore is unsupported")
+    baseline = _required_mapping(raw, "baseline")
+    candidate = _required_mapping(raw, "candidate")
+    paired = _required_mapping(raw, "paired")
+    reference = _required_mapping(raw, "reference")
+    if set(baseline) != {"meanScore", "normalizedMean"}:
+        raise ValueError("observed normalized baseline cell fields are unsupported")
+    if set(candidate) != {"meanScore", "normalizedLcb95", "normalizedMean"}:
+        raise ValueError("observed normalized candidate cell fields are unsupported")
+    if set(paired) != {"normalizedDeltaLcb95"}:
+        raise ValueError("observed normalized paired cell fields are unsupported")
+    if set(reference) != {"authority", "evidence", "score"}:
+        raise ValueError("observed normalized reference cell fields are unsupported")
+    reference_score = _required_number(reference, "score")
+    if reference_score <= 0.0 or reference_score > maximum_score:
+        raise ValueError("observed normalized reference score is unsupported")
+    reference_authority = _required_str(reference, "authority")
+    if reference_authority not in {"official", "validated-internal"}:
+        raise ValueError("observed normalized reference authority is unsupported")
+    mean_baseline_score = _required_number(baseline, "meanScore")
+    mean_candidate_score = _required_number(candidate, "meanScore")
+    if (
+        mean_baseline_score < 0.0
+        or mean_baseline_score > maximum_score
+        or mean_candidate_score < 0.0
+        or mean_candidate_score > maximum_score
+    ):
+        raise ValueError("observed normalized raw score is outside its metric bounds")
+    baseline_normalized_mean = _required_number(baseline, "normalizedMean")
+    candidate_normalized_mean = _required_number(candidate, "normalizedMean")
+    candidate_normalized_lcb95 = _required_number(candidate, "normalizedLcb95")
+    paired_normalized_delta_lcb95 = _required_number(paired, "normalizedDeltaLcb95")
+    if not math.isclose(
+        baseline_normalized_mean,
+        mean_baseline_score / reference_score,
+        rel_tol=1e-12,
+        abs_tol=1e-12,
+    ):
+        raise ValueError("observed normalized baseline mean is not derived from its raw score")
+    if not math.isclose(
+        candidate_normalized_mean,
+        mean_candidate_score / reference_score,
+        rel_tol=1e-12,
+        abs_tol=1e-12,
+    ):
+        raise ValueError("observed normalized candidate mean is not derived from its raw score")
+    return {
+        "aggregation": _required_str(raw, "aggregation"),
+        "baseline": {
+            "meanScore": mean_baseline_score,
+            "normalizedMean": baseline_normalized_mean,
+        },
+        "candidate": {
+            "meanScore": mean_candidate_score,
+            "normalizedLcb95": candidate_normalized_lcb95,
+            "normalizedMean": candidate_normalized_mean,
+        },
+        "metricFamily": _required_str(raw, "metricFamily"),
+        "metricId": _required_str(raw, "metricId"),
+        "maximumScore": maximum_score,
+        "paired": {"normalizedDeltaLcb95": paired_normalized_delta_lcb95},
+        "pairedCaseReceiptEvidence": _normalized_paired_case_receipt_evidence(raw),
+        "reference": {
+            "authority": reference_authority,
+            "evidence": _worm_evidence_reference(reference, "evidence"),
+            "score": reference_score,
+        },
+        "suiteId": suite_id,
+    }
 
 
 def _read_exact_worm_evidence_bytes(
