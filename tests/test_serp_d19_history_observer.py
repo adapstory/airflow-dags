@@ -453,7 +453,10 @@ def test_kubernetes_fence_release_and_child_validation_are_exact() -> None:
 
     wrong_version = _LeaseApi(read_response=_lease(resource_version="99"))
     with pytest.raises(ValueError, match="resourceVersion"):
-        KubernetesD19HistoryFenceClient(api=wrong_version).require_active(evidence)
+        KubernetesD19HistoryFenceClient(
+            api=wrong_version,
+            clock=lambda: datetime(2026, 7, 17, 0, 0, 10, tzinfo=UTC),
+        ).require_active(evidence)
 
 
 def test_manual_d19_is_blocked_only_while_a_real_fence_is_active() -> None:

@@ -4021,10 +4021,13 @@ def _load_execution_substrate_source_set(
         raise ValueError("benchmark execution substrate source set is not valid JSON") from exc
     if (
         not isinstance(source_set, Mapping)
-        or set(source_set) != {"schema", "suites"}
-        or source_set.get("schema") != "BenchmarkExecutionSubstrateSourceSet/v1"
+        or set(source_set) != {"schema", "suites", "supplyAttestationsEvidence"}
+        or source_set.get("schema") != "BenchmarkExecutionSubstrateSourceSet/v2"
     ):
         raise ValueError("benchmark execution substrate source set shape is invalid")
+    _load_benchmark_supply_attestations(
+        source_set.get("supplyAttestationsEvidence"), s3_client=s3_client
+    )
     raw_suites = source_set.get("suites")
     if not isinstance(raw_suites, list) or len(raw_suites) != len(
         EXTERNAL_EXECUTION_SUBSTRATE_ROLES
@@ -4077,6 +4080,77 @@ def _load_execution_substrate_source_set(
             loaded_roles[expected_role] = payload
         result[expected_suite_id] = loaded_roles
     return result
+
+
+def _load_benchmark_supply_attestations(evidence: object, *, s3_client: Any | None = None) -> None:
+    handle = _validated_compact_worm_handle(evidence, "benchmark substrate supply attestations")
+    client = s3_client or _s3_client(handle["s3Uri"])
+    payload, _, _ = _read_compliance_locked_s3_bytes(
+        client,
+        handle["s3Uri"],
+        field_name="benchmark substrate supply attestations",
+        version_id=handle["versionId"],
+    )
+    if "sha256:" + sha256(payload).hexdigest() != handle["sha256"]:
+        raise ValueError("benchmark substrate supply attestations digest is mismatched")
+    manifest = _canonical_json_object_bytes(payload, "benchmark substrate supply attestations")
+    if (
+        set(manifest) != {"ds1000", "schema", "sweBench"}
+        or manifest.get("schema") != "BenchmarkSubstrateSupplyAttestations/v1"
+    ):
+        raise ValueError("benchmark substrate supply attestations shape is invalid")
+    ds1000 = manifest.get("ds1000")
+    if (
+        not isinstance(ds1000, Mapping)
+        or set(ds1000) != {"imageReference", "sbomEvidence", "signatureStatus"}
+        or ds1000.get("signatureStatus") != "signed-and-verified"
+        or not isinstance(ds1000.get("imageReference"), str)
+        or not re.fullmatch(
+            r"harbor\.adapstory\.com/benchmark-sandboxes/ds1000@sha256:[0-9a-f]{64}",
+            ds1000["imageReference"],
+        )
+    ):
+        raise ValueError("DS-1000 supply attestation is invalid")
+    _validated_compact_worm_handle(ds1000.get("sbomEvidence"), "DS-1000 SBOM")
+
+    swe_bench = manifest.get("sweBench")
+    if (
+        not isinstance(swe_bench, Mapping)
+        or set(swe_bench) != {"datasetRevision", "images"}
+        or not isinstance(swe_bench.get("datasetRevision"), str)
+        or not re.fullmatch(r"[0-9a-f]{40}", swe_bench["datasetRevision"])
+        or not isinstance(swe_bench.get("images"), list)
+        or len(swe_bench["images"]) != 500
+    ):
+        raise ValueError("SWE-bench supply attestations are incomplete")
+    instance_ids: list[str] = []
+    for image in swe_bench["images"]:
+        if (
+            not isinstance(image, Mapping)
+            or set(image)
+            != {
+                "imageReference",
+                "instanceId",
+                "sbomEvidence",
+                "signatureStatus",
+            }
+            or image.get("signatureStatus") != "signed-and-verified"
+            or not isinstance(image.get("instanceId"), str)
+            or not isinstance(image.get("imageReference"), str)
+            or not re.fullmatch(
+                r"harbor\.adapstory\.com/benchmark-sandboxes/swe-bench/"
+                r"[a-z0-9._/-]+@sha256:[0-9a-f]{64}",
+                image["imageReference"],
+            )
+        ):
+            raise ValueError("SWE-bench supply attestation is invalid")
+        _validated_compact_worm_handle(
+            image.get("sbomEvidence"),
+            f"SWE-bench {image['instanceId']} SBOM",
+        )
+        instance_ids.append(image["instanceId"])
+    if instance_ids != sorted(instance_ids) or len(set(instance_ids)) != 500:
+        raise ValueError("SWE-bench supply attestation identities are invalid")
 
 
 def _validated_compact_worm_handle(value: object, field_name: str) -> dict[str, str]:

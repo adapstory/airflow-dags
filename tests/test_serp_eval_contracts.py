@@ -1103,9 +1103,56 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
                 }
             )
         suite_entries.append({"roles": role_entries, "suiteId": suite_id})
+
+    def sbom_handle(name: str) -> dict[str, str]:
+        return {
+            "objectLockMode": "COMPLIANCE",
+            "s3Uri": f"s3://airflow-serp-evidence/serp-evals/substrates/sboms/{name}.json",
+            "sha256": "sha256:" + "e" * 64,
+            "versionId": f"sbom-{name}-v1",
+        }
+
+    supply_attestations = {
+        "ds1000": {
+            "imageReference": (
+                "harbor.adapstory.com/benchmark-sandboxes/ds1000@sha256:" + "d" * 64
+            ),
+            "sbomEvidence": sbom_handle("ds1000"),
+            "signatureStatus": "signed-and-verified",
+        },
+        "schema": "BenchmarkSubstrateSupplyAttestations/v1",
+        "sweBench": {
+            "datasetRevision": "91aa3ed51b709be6457e12d00300a6a596d4c6a3",
+            "images": [
+                {
+                    "imageReference": (
+                        "harbor.adapstory.com/benchmark-sandboxes/swe-bench/"
+                        f"owner-repo-{index:03d}@sha256:{index:064x}"
+                    ),
+                    "instanceId": f"owner__repo-{index:03d}",
+                    "sbomEvidence": sbom_handle(f"swe-{index:03d}"),
+                    "signatureStatus": "signed-and-verified",
+                }
+                for index in range(500)
+            ],
+        },
+    }
+    supply_bytes = json.dumps(
+        supply_attestations, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+    ).encode()
+    supply_key = "serp-evals/substrates/supply-attestations.json"
+    supply_version = "supply-attestations-version"
+    objects[(supply_key, supply_version)] = supply_bytes
+    supply_evidence = {
+        "objectLockMode": "COMPLIANCE",
+        "s3Uri": f"s3://airflow-serp-evidence/{supply_key}",
+        "sha256": "sha256:" + sha256(supply_bytes).hexdigest(),
+        "versionId": supply_version,
+    }
     source_set = {
-        "schema": "BenchmarkExecutionSubstrateSourceSet/v1",
+        "schema": "BenchmarkExecutionSubstrateSourceSet/v2",
         "suites": suite_entries,
+        "supplyAttestationsEvidence": supply_evidence,
     }
     source_set_bytes = json.dumps(
         source_set, ensure_ascii=True, separators=(",", ":"), sort_keys=True
