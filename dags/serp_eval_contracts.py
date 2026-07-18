@@ -9,6 +9,7 @@ import re
 import subprocess
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -78,7 +79,15 @@ _BENCHMARK_SUBSTRATE_SOURCE_SET_URI_PATTERN = (
 _PAIRED_EVALUATION_REQUEST_SCHEMA = "PairedEvaluationRequest/v5"
 _PAIRED_EVALUATION_RECEIPT_CONTRACT_VERSION = "serp-paired-eval-receipt/v9"
 _PAIRED_EVALUATION_VERIFICATION_EVIDENCE_SCHEMA = "PairedEvaluationVerificationEvidence/v2"
-_D19_OBSERVED_NORMALIZED_SCORE_CELLS_SCHEMA = "D19ObservedNormalizedScoreCells/v1"
+_PAIRED_BENCHMARK_SCORE_SCHEMA = "PairedBenchmarkScore/v1"
+_PAIRED_BENCHMARK_SCORE_FORMULA = "min(candidateNormalizedLcb95 across canonical metric cells)"
+_PAIRED_BENCHMARK_PAIRED_DELTA_FORMULA = (
+    "LCB95 of paired (candidateScore - baselineScore) / referenceScore"
+)
+_PAIRED_BENCHMARK_RATIO_DIAGNOSTIC_FORMULA = (
+    "candidateNormalizedLcb95 / baselineNormalizedMean when baselineNormalizedMean > 0"
+)
+_D19_OBSERVED_NORMALIZED_SCORE_CELLS_SCHEMA = "D19ObservedNormalizedScoreCells/v2"
 _PAIRED_EVALUATION_FINAL_RECEIPT_PURPOSE = "serp-paired-evaluation-final-receipt"
 _D19_RUN_HISTORY_OBSERVATION_PURPOSE = "serp-d19-run-history-observation"
 _RUNTIME_BUILD_DRAFT_ATTESTATION_PURPOSE = "serp-airflow-runtime-build-draft"
@@ -7142,11 +7151,16 @@ def _observed_normalized_score_cells_payload(
         _normalized_observed_normalized_score_cell(raw, expected_suite_id=suite_id)
         for raw, suite_id in zip(raw_cells, MANDATORY_SERP_BENCHMARK_SUITES, strict=True)
     ]
+    benchmark_score = _validated_paired_benchmark_score(
+        _required_mapping(paired, "benchmarkScore"),
+        cells=cells,
+    )
     rejection_reasons = _paired_evaluation_rejection_reasons(
         paired,
         receipt_status=receipt_status,
     )
     return {
+        "benchmarkScore": benchmark_score,
         "cells": cells,
         "operationId": operation_id,
         "receiptAttestationEvidence": dict(receipt_attestation_evidence),
@@ -7171,6 +7185,193 @@ def _observed_normalized_score_cells_payload(
             "status": receipt_status,
         },
     }
+
+
+def _validated_paired_benchmark_score(
+    raw: Mapping[str, Any],
+    *,
+    cells: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Return the receipt-owned score after checking every canonical invariant.
+
+    The score is calculated by the signed paired-evaluation executor, rather
+    than by Airflow.  Airflow consequently preserves the receipt object
+    verbatim, but only after proving that every scalar, scorecard row, and
+    aggregate corresponds to the exact canonical score cells it persists.
+    """
+
+    expected_fields = {
+        "allNineCandidateNormalizedLcb95",
+        "candidateVsBaselineRatioDiagnosticByCell",
+        "candidateVsBaselineRatioDiagnosticFormula",
+        "canonicalScoreFormula",
+        "referenceNormalizedPairedDeltaFormula",
+        "referenceNormalizedPairedDeltaLcb95ByCell",
+        "schema",
+        "supportingAggregates",
+        "worstCell",
+    }
+    if set(raw) != expected_fields:
+        raise ValueError("benchmark score fields are unsupported")
+    if _required_str(raw, "schema") != _PAIRED_BENCHMARK_SCORE_SCHEMA:
+        raise ValueError("benchmark score schema is unsupported")
+    if _required_str(raw, "canonicalScoreFormula") != _PAIRED_BENCHMARK_SCORE_FORMULA:
+        raise ValueError("benchmark score canonical formula is unsupported")
+    if (
+        _required_str(raw, "referenceNormalizedPairedDeltaFormula")
+        != _PAIRED_BENCHMARK_PAIRED_DELTA_FORMULA
+    ):
+        raise ValueError("benchmark score paired delta formula is unsupported")
+    if (
+        _required_str(raw, "candidateVsBaselineRatioDiagnosticFormula")
+        != _PAIRED_BENCHMARK_RATIO_DIAGNOSTIC_FORMULA
+    ):
+        raise ValueError("benchmark score ratio diagnostic formula is unsupported")
+    if len(cells) != len(MANDATORY_SERP_BENCHMARK_SUITES):
+        raise ValueError("benchmark score requires exactly nine canonical cells")
+
+    metric_cell_ids: list[str] = []
+    baseline_normalized_means: list[float] = []
+    candidate_normalized_lcb95s: list[float] = []
+    candidate_normalized_means: list[float] = []
+    paired_normalized_delta_lcb95s: list[float] = []
+    for cell in cells:
+        metric_cell_id = ":".join(
+            (
+                _required_str(cell, "suiteId"),
+                _required_str(cell, "metricFamily"),
+                _required_str(cell, "metricId"),
+            )
+        )
+        if metric_cell_id in metric_cell_ids:
+            raise ValueError("benchmark score canonical metric cell IDs must be unique")
+        metric_cell_ids.append(metric_cell_id)
+        baseline_normalized_means.append(
+            _required_number(_required_mapping(cell, "baseline"), "normalizedMean")
+        )
+        candidate = _required_mapping(cell, "candidate")
+        candidate_normalized_lcb95s.append(_required_number(candidate, "normalizedLcb95"))
+        candidate_normalized_means.append(_required_number(candidate, "normalizedMean"))
+        paired_normalized_delta_lcb95s.append(
+            _required_number(_required_mapping(cell, "paired"), "normalizedDeltaLcb95")
+        )
+
+    limiting_index = min(
+        range(len(candidate_normalized_lcb95s)),
+        key=candidate_normalized_lcb95s.__getitem__,
+    )
+    expected_scalar = candidate_normalized_lcb95s[limiting_index]
+    scalar = _required_number(raw, "allNineCandidateNormalizedLcb95")
+    if not math.isclose(scalar, expected_scalar, rel_tol=1e-12, abs_tol=1e-12):
+        raise ValueError("benchmark score canonical scalar does not match the limiting cell")
+
+    worst_cell = _required_mapping(raw, "worstCell")
+    if set(worst_cell) != {"candidateNormalizedLcb95", "metricCellId"}:
+        raise ValueError("benchmark score worst-cell fields are unsupported")
+    if _required_str(worst_cell, "metricCellId") != metric_cell_ids[limiting_index]:
+        raise ValueError("benchmark score worst cell does not match the limiting cell")
+    if not math.isclose(
+        _required_number(worst_cell, "candidateNormalizedLcb95"),
+        expected_scalar,
+        rel_tol=1e-12,
+        abs_tol=1e-12,
+    ):
+        raise ValueError("benchmark score worst cell does not match the limiting cell")
+
+    delta_scorecard = _required_object_list(
+        raw,
+        "referenceNormalizedPairedDeltaLcb95ByCell",
+    )
+    if len(delta_scorecard) != len(metric_cell_ids):
+        raise ValueError("benchmark score paired delta scorecard must contain nine cells")
+    for index, value in enumerate(delta_scorecard):
+        if set(value) != {"metricCellId", "referenceNormalizedPairedDeltaLcb95"}:
+            raise ValueError("benchmark score paired delta scorecard fields are unsupported")
+        if _required_str(value, "metricCellId") != metric_cell_ids[index]:
+            raise ValueError("benchmark score paired delta scorecard order is unsupported")
+        if not math.isclose(
+            _required_number(value, "referenceNormalizedPairedDeltaLcb95"),
+            paired_normalized_delta_lcb95s[index],
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("benchmark score paired delta scorecard does not match its cells")
+
+    ratio_scorecard = _required_object_list(
+        raw,
+        "candidateVsBaselineRatioDiagnosticByCell",
+    )
+    if len(ratio_scorecard) != len(metric_cell_ids):
+        raise ValueError("benchmark score ratio scorecard must contain nine cells")
+    expected_measured_count = 0
+    for index, value in enumerate(ratio_scorecard):
+        if set(value) != {"candidateLcb95ToBaselineMeanRatio", "metricCellId"}:
+            raise ValueError("benchmark score ratio scorecard fields are unsupported")
+        if _required_str(value, "metricCellId") != metric_cell_ids[index]:
+            raise ValueError("benchmark score ratio scorecard order is unsupported")
+        baseline_normalized_mean = baseline_normalized_means[index]
+        raw_ratio = value["candidateLcb95ToBaselineMeanRatio"]
+        if baseline_normalized_mean <= 0.0:
+            if raw_ratio is not None:
+                raise ValueError(
+                    "benchmark score ratio diagnostic must be unavailable for a zero baseline"
+                )
+            continue
+        expected_measured_count += 1
+        if not math.isclose(
+            _required_number(value, "candidateLcb95ToBaselineMeanRatio"),
+            candidate_normalized_lcb95s[index] / baseline_normalized_mean,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("benchmark score ratio scorecard does not match its cells")
+
+    supporting_aggregates = _required_mapping(raw, "supportingAggregates")
+    expected_aggregate_fields = {
+        "candidateLcb95ToBaselineMeanRatioMeasuredCellCount",
+        "candidateLcb95ToBaselineMeanRatioUnavailableCellCount",
+        "meanBaselineNormalizedMean",
+        "meanCandidateNormalizedLcb95",
+        "meanCandidateNormalizedMean",
+        "meanReferenceNormalizedPairedDeltaLcb95",
+        "minimumReferenceNormalizedPairedDeltaLcb95",
+    }
+    if set(supporting_aggregates) != expected_aggregate_fields:
+        raise ValueError("benchmark score supporting aggregate fields are unsupported")
+    if (
+        _required_non_negative_int(
+            supporting_aggregates,
+            "candidateLcb95ToBaselineMeanRatioMeasuredCellCount",
+        )
+        != expected_measured_count
+        or _required_non_negative_int(
+            supporting_aggregates,
+            "candidateLcb95ToBaselineMeanRatioUnavailableCellCount",
+        )
+        != len(metric_cell_ids) - expected_measured_count
+    ):
+        raise ValueError("benchmark score ratio aggregate counts do not match its cells")
+    expected_aggregates = {
+        "meanBaselineNormalizedMean": math.fsum(baseline_normalized_means)
+        / len(baseline_normalized_means),
+        "meanCandidateNormalizedLcb95": math.fsum(candidate_normalized_lcb95s)
+        / len(candidate_normalized_lcb95s),
+        "meanCandidateNormalizedMean": math.fsum(candidate_normalized_means)
+        / len(candidate_normalized_means),
+        "meanReferenceNormalizedPairedDeltaLcb95": math.fsum(paired_normalized_delta_lcb95s)
+        / len(paired_normalized_delta_lcb95s),
+        "minimumReferenceNormalizedPairedDeltaLcb95": min(paired_normalized_delta_lcb95s),
+    }
+    for field_name, expected_value in expected_aggregates.items():
+        if not math.isclose(
+            _required_number(supporting_aggregates, field_name),
+            expected_value,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("benchmark score supporting aggregates do not match its cells")
+
+    return deepcopy(dict(raw))
 
 
 def _normalized_observed_normalized_score_cell(
@@ -7318,6 +7519,7 @@ def _normalized_observed_normalized_score_cells_evidence(
     """Validate the WORM projection before a downstream release consumes it."""
 
     expected_fields = {
+        "benchmarkScore",
         "cells",
         "operationId",
         "receiptAttestationEvidence",
@@ -7347,6 +7549,10 @@ def _normalized_observed_normalized_score_cells_evidence(
         _normalized_observed_score_cell_evidence(raw, expected_suite_id=suite_id)
         for raw, suite_id in zip(raw_cells, MANDATORY_SERP_BENCHMARK_SUITES, strict=True)
     ]
+    benchmark_score = _validated_paired_benchmark_score(
+        _required_mapping(payload, "benchmarkScore"),
+        cells=cells,
+    )
     summary = _required_mapping(payload, "summary")
     expected_summary_fields = {
         "cellCount",
@@ -7382,6 +7588,7 @@ def _normalized_observed_normalized_score_cells_evidence(
     if dict(summary) != expected_summary:
         raise ValueError("observed normalized score-cell summary does not match its cells")
     return {
+        "benchmarkScore": benchmark_score,
         "cells": cells,
         "operationId": expected_operation_id,
         "receiptAttestationEvidence": dict(expected_receipt_attestation_evidence),

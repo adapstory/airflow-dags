@@ -821,6 +821,9 @@ def test_scheduled_d6_receipt_rejects_score_cells_not_matching_the_signed_receip
     score_handle = fixture["triggered_verification"]["observedNormalizedScoreCellsEvidence"]
     score_cells = fixture["objects"][(score_handle["s3Uri"], score_handle["versionId"])]
     score_cells["cells"][0]["candidate"].update({"meanScore": 0.864, "normalizedMean": 0.96})
+    score_cells["benchmarkScore"]["supportingAggregates"]["meanCandidateNormalizedMean"] = (
+        0.96 + 8 * 0.95
+    ) / 9
 
     with pytest.raises(
         ValueError,
@@ -2562,9 +2565,26 @@ def test_d19_persists_observed_normalized_score_cells_and_identity_bound_verific
     score_cells_payload = json.loads(
         s3_client.objects[(score_cells_evidence["s3Uri"], score_cells_evidence["versionId"])]
     )
-    assert score_cells_payload["schema"] == "D19ObservedNormalizedScoreCells/v1"
+    receipt_payload = json.loads(
+        s3_client.objects[
+            (
+                evaluator_result["receiptEvidence"]["artifactPath"],
+                evaluator_result["receiptEvidence"]["artifactVersionId"],
+            )
+        ]
+    )
+    assert score_cells_payload["schema"] == "D19ObservedNormalizedScoreCells/v2"
     assert score_cells_payload["operationId"] == plan.payload["operation_id"]
     assert score_cells_payload["receiptEvidence"] == _d19_receipt_subject(evaluator_result)
+    assert (
+        score_cells_payload["receiptAttestationEvidence"]
+        == evaluator_result["receiptAttestationEvidence"]
+    )
+    assert (
+        score_cells_payload["benchmarkScore"]
+        == receipt_payload["pairedEvaluation"]["benchmarkScore"]
+    )
+    assert score_cells_payload["benchmarkScore"]["allNineCandidateNormalizedLcb95"] == 0.925
     assert [cell["suiteId"] for cell in score_cells_payload["cells"]] == list(
         MANDATORY_SERP_BENCHMARK_SUITES
     )
@@ -2600,11 +2620,159 @@ def test_d19_materializes_observed_score_cells_for_a_rejected_evaluation() -> No
     )
 
     assert payload["receiptStatus"] == "rejected"
+    assert payload["schema"] == "D19ObservedNormalizedScoreCells/v2"
     assert payload["summary"]["status"] == "rejected"
     assert payload["summary"]["rejectionReasons"] == [
         "candidate-below-baseline-mean:APIBench:observed-metric-1"
     ]
     assert len(payload["cells"]) == len(MANDATORY_SERP_BENCHMARK_SUITES)
+
+
+def test_d19_score_cells_v2_rejects_legacy_v1_artifact() -> None:
+    operation_id = "serp-airflow-benchmark-improvement-wave-legacy-score-cells"
+    receipt_evidence = _d19_worm_evidence("receipts/legacy-score-cells", "7")
+    attestation_evidence = _d19_worm_evidence("receipts/legacy-score-cells.attestation", "8")
+    payload = serp_eval_contracts_module._observed_normalized_score_cells_payload(
+        {"pairedEvaluation": _d19_observed_paired_evaluation(operation_id)},
+        operation_id=operation_id,
+        receipt_evidence=receipt_evidence,
+        receipt_attestation_evidence=attestation_evidence,
+        receipt_status="accepted",
+    )
+    payload["schema"] = "D19ObservedNormalizedScoreCells/v1"
+
+    with pytest.raises(
+        ValueError,
+        match="observed normalized score-cell evidence schema is unsupported",
+    ):
+        serp_eval_contracts_module._normalized_observed_normalized_score_cells_evidence(
+            payload,
+            expected_operation_id=operation_id,
+            expected_receipt_evidence=receipt_evidence,
+            expected_receipt_attestation_evidence=attestation_evidence,
+            expected_receipt_status="accepted",
+        )
+
+
+def test_d19_score_cells_v2_requires_receipt_benchmark_score_without_fallback() -> None:
+    operation_id = "serp-airflow-benchmark-improvement-wave-score-required"
+    paired = _d19_observed_paired_evaluation(operation_id)
+    paired.pop("benchmarkScore")
+
+    with pytest.raises(ValueError, match="benchmarkScore must be an object"):
+        serp_eval_contracts_module._observed_normalized_score_cells_payload(
+            {"pairedEvaluation": paired},
+            operation_id=operation_id,
+            receipt_evidence=_d19_worm_evidence("receipts/score-required", "7"),
+            receipt_attestation_evidence=_d19_worm_evidence(
+                "receipts/score-required.attestation", "8"
+            ),
+            receipt_status="accepted",
+        )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "message"),
+    (
+        ("schema", "PairedBenchmarkScore/v0", "benchmark score schema is unsupported"),
+        (
+            "canonicalScoreFormula",
+            "mean(candidateNormalizedLcb95 across canonical metric cells)",
+            "benchmark score canonical formula is unsupported",
+        ),
+        (
+            "allNineCandidateNormalizedLcb95",
+            0.924,
+            "benchmark score canonical scalar does not match the limiting cell",
+        ),
+    ),
+)
+def test_d19_score_cells_v2_rejects_noncanonical_receipt_benchmark_score(
+    field_name: str,
+    value: object,
+    message: str,
+) -> None:
+    operation_id = "serp-airflow-benchmark-improvement-wave-score-invariant"
+    paired = _d19_observed_paired_evaluation(operation_id)
+    paired["benchmarkScore"][field_name] = value
+
+    with pytest.raises(ValueError, match=message):
+        serp_eval_contracts_module._observed_normalized_score_cells_payload(
+            {"pairedEvaluation": paired},
+            operation_id=operation_id,
+            receipt_evidence=_d19_worm_evidence("receipts/score-invariant", "7"),
+            receipt_attestation_evidence=_d19_worm_evidence(
+                "receipts/score-invariant.attestation", "8"
+            ),
+            receipt_status="accepted",
+        )
+
+
+def test_d19_score_cells_v2_rejects_unknown_receipt_benchmark_score_field() -> None:
+    operation_id = "serp-airflow-benchmark-improvement-wave-score-fields"
+    paired = _d19_observed_paired_evaluation(operation_id)
+    paired["benchmarkScore"]["notCanonical"] = 1
+
+    with pytest.raises(ValueError, match="benchmark score fields are unsupported"):
+        serp_eval_contracts_module._observed_normalized_score_cells_payload(
+            {"pairedEvaluation": paired},
+            operation_id=operation_id,
+            receipt_evidence=_d19_worm_evidence("receipts/score-fields", "7"),
+            receipt_attestation_evidence=_d19_worm_evidence(
+                "receipts/score-fields.attestation", "8"
+            ),
+            receipt_status="accepted",
+        )
+
+
+@pytest.mark.parametrize(
+    ("tamper", "message"),
+    (
+        ("paired-delta-formula", "benchmark score paired delta formula is unsupported"),
+        ("ratio-formula", "benchmark score ratio diagnostic formula is unsupported"),
+        ("worst-cell", "benchmark score worst cell does not match the limiting cell"),
+        (
+            "paired-delta-scorecard",
+            "benchmark score paired delta scorecard does not match its cells",
+        ),
+        ("ratio-scorecard", "benchmark score ratio scorecard does not match its cells"),
+        ("supporting-aggregate", "benchmark score supporting aggregates do not match its cells"),
+    ),
+)
+def test_d19_score_cells_v2_rejects_tampered_benchmark_scorecard_invariants(
+    tamper: str,
+    message: str,
+) -> None:
+    operation_id = "serp-airflow-benchmark-improvement-wave-scorecard-invariant"
+    paired = _d19_observed_paired_evaluation(operation_id)
+    benchmark_score = paired["benchmarkScore"]
+    if tamper == "paired-delta-formula":
+        benchmark_score["referenceNormalizedPairedDeltaFormula"] = "mean delta"
+    elif tamper == "ratio-formula":
+        benchmark_score["candidateVsBaselineRatioDiagnosticFormula"] = "candidate / baseline"
+    elif tamper == "worst-cell":
+        benchmark_score["worstCell"]["metricCellId"] = "wrong:metric:cell"
+    elif tamper == "paired-delta-scorecard":
+        benchmark_score["referenceNormalizedPairedDeltaLcb95ByCell"][0][
+            "referenceNormalizedPairedDeltaLcb95"
+        ] = 0.024
+    elif tamper == "ratio-scorecard":
+        benchmark_score["candidateVsBaselineRatioDiagnosticByCell"][0][
+            "candidateLcb95ToBaselineMeanRatio"
+        ] = 1.0
+    else:
+        benchmark_score["supportingAggregates"]["meanCandidateNormalizedMean"] = 0.94
+
+    with pytest.raises(ValueError, match=message):
+        serp_eval_contracts_module._observed_normalized_score_cells_payload(
+            {"pairedEvaluation": paired},
+            operation_id=operation_id,
+            receipt_evidence=_d19_worm_evidence("receipts/scorecard-invariant", "7"),
+            receipt_attestation_evidence=_d19_worm_evidence(
+                "receipts/scorecard-invariant.attestation", "8"
+            ),
+            receipt_status="accepted",
+        )
 
 
 @pytest.mark.parametrize("tamper", ("receipt-digest", "verification-subject"))
@@ -8538,10 +8706,65 @@ def _d19_observed_paired_evaluation(operation_id: str) -> dict[str, Any]:
             }
         )
     return {
+        "benchmarkScore": _d19_paired_benchmark_score(cells),
         "contractVersion": "serp-paired-evaluation/v5",
         "metricCells": cells,
         "operationId": operation_id,
         "status": "accepted",
+    }
+
+
+def _d19_paired_benchmark_score(cells: list[dict[str, Any]]) -> dict[str, Any]:
+    score_cells = [
+        {
+            "baselineNormalizedMean": cell["baselineNormalizedMean"],
+            "candidateNormalizedLcb95": cell["candidateNormalizedLcb95"],
+            "candidateNormalizedMean": cell["candidateNormalizedMean"],
+            "metricCellId": (f"{cell['suiteId']}:{cell['metricFamily']}:{cell['metricId']}"),
+            "pairedNormalizedDeltaLcb95": cell["pairedNormalizedDeltaLcb95"],
+        }
+        for cell in cells
+    ]
+    worst_cell = score_cells[0]
+    return {
+        "allNineCandidateNormalizedLcb95": worst_cell["candidateNormalizedLcb95"],
+        "candidateVsBaselineRatioDiagnosticByCell": [
+            {
+                "candidateLcb95ToBaselineMeanRatio": (
+                    cell["candidateNormalizedLcb95"] / cell["baselineNormalizedMean"]
+                ),
+                "metricCellId": cell["metricCellId"],
+            }
+            for cell in score_cells
+        ],
+        "candidateVsBaselineRatioDiagnosticFormula": (
+            "candidateNormalizedLcb95 / baselineNormalizedMean when baselineNormalizedMean > 0"
+        ),
+        "canonicalScoreFormula": "min(candidateNormalizedLcb95 across canonical metric cells)",
+        "referenceNormalizedPairedDeltaFormula": (
+            "LCB95 of paired (candidateScore - baselineScore) / referenceScore"
+        ),
+        "referenceNormalizedPairedDeltaLcb95ByCell": [
+            {
+                "metricCellId": cell["metricCellId"],
+                "referenceNormalizedPairedDeltaLcb95": cell["pairedNormalizedDeltaLcb95"],
+            }
+            for cell in score_cells
+        ],
+        "schema": "PairedBenchmarkScore/v1",
+        "supportingAggregates": {
+            "candidateLcb95ToBaselineMeanRatioMeasuredCellCount": len(score_cells),
+            "candidateLcb95ToBaselineMeanRatioUnavailableCellCount": 0,
+            "meanBaselineNormalizedMean": 0.9,
+            "meanCandidateNormalizedLcb95": 0.925,
+            "meanCandidateNormalizedMean": 0.95,
+            "meanReferenceNormalizedPairedDeltaLcb95": 0.025,
+            "minimumReferenceNormalizedPairedDeltaLcb95": 0.025,
+        },
+        "worstCell": {
+            "candidateNormalizedLcb95": worst_cell["candidateNormalizedLcb95"],
+            "metricCellId": worst_cell["metricCellId"],
+        },
     }
 
 
