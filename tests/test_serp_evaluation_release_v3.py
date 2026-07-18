@@ -14,10 +14,13 @@ import dags.serp_eval_contracts as serp_eval_contracts
 from dags.serp_eval_contracts import (
     MANDATORY_SERP_BENCHMARK_SUITES,
     build_benchmark_improvement_wave_plan,
+    build_d17_event_d6_plan,
+    build_d17_event_d6_trigger_conf,
     build_model_catalog_promotion_plan,
     load_benchmark_pack_lifecycle_result_snapshot,
     load_governed_model_releases,
     load_model_catalog_promotion_snapshot,
+    validate_d17_event_d6_airflow_run,
     write_model_catalog_promotion_receipt,
     write_paired_eval_request_artifact,
 )
@@ -478,6 +481,172 @@ def test_d17_consumes_ci_v7_bundle_and_seals_governed_v7_promotion() -> None:
         assert forbidden not in serialized
 
 
+def test_d17_receipt_derives_one_strict_event_d6_then_native_d19_conf() -> None:
+    bundle, objects = _release_pair()
+    d17_plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
+    releases = load_governed_model_releases(
+        d17_plan.to_canonical_json(), s3_client=_FakeS3(objects)
+    )
+    receipt = write_model_catalog_promotion_receipt(
+        d17_plan.to_canonical_json(), releases, snapshot_writer=_snapshot_writer
+    )
+    source_run = {
+        "dagId": "serp_model_catalog_promotion",
+        "logicalDate": "2026-07-15T05:00:00Z",
+        "runId": "manual__d17-release-20260715T050000Z",
+        "runType": "manual",
+    }
+
+    event_conf = build_d17_event_d6_trigger_conf(d17_plan.to_canonical_json(), receipt, source_run)
+    event_plan = build_d17_event_d6_plan(event_conf)
+
+    assert event_conf == build_d17_event_d6_trigger_conf(
+        d17_plan.to_canonical_json(), receipt, source_run
+    )
+    assert set(event_conf) == {
+        "actor_id",
+        "artifact_root_path",
+        "eventD6RunId",
+        "generated_at",
+        "promotionEvidence",
+        "registry_resource_id",
+        "registry_resource_type",
+        "schema",
+        "sourceD17",
+        "tenant_id",
+    }
+    assert event_conf["schema"] == "D17EventD6Trigger/v1"
+    assert event_conf["sourceD17"] == {
+        "dagId": "serp_model_catalog_promotion",
+        "logicalDate": "2026-07-15T05:00:00Z",
+        "operationId": d17_plan.payload["operation_id"],
+        "promotionId": d17_plan.payload["promotion_id"],
+        "runId": source_run["runId"],
+        "runType": "manual",
+    }
+    assert event_conf["promotionEvidence"] == receipt["promotionEvidence"]
+    assert (
+        event_conf["promotionEvidence"]["s3Uri"]
+        == d17_plan.payload["artifact_paths"]["promotion_receipt"]
+    )
+
+    assert event_plan.payload["dag_id"] == "serp_model_promotion_regression_suite"
+    assert [task["task_id"] for task in d17_plan.payload["tasks"]] == [
+        "validate_model_catalog_promotion_plan",
+        "load_governed_model_releases",
+        "write_model_catalog_promotion_receipt",
+        "build_d17_event_d6_trigger_conf",
+        "trigger_model_promotion_regression_suite",
+        "notify_governance_eval_surfaces",
+    ]
+    assert [task["task_id"] for task in event_plan.payload["tasks"]] == [
+        "validate_d17_event_d6_plan",
+        "trigger_benchmark_improvement_wave",
+        "notify_governance_eval_surfaces",
+    ]
+    assert event_plan.payload["event_d6_run_id"] == event_conf["eventD6RunId"]
+    assert event_plan.payload["d19_trigger_run_id"] == (
+        "event_d6_d19__" + event_conf["eventD6RunId"].removeprefix("event_d6__")
+    )
+    assert event_plan.payload["d19_trigger_conf"] == {
+        "actor_id": d17_plan.payload["actor_id"],
+        "artifact_root_path": d17_plan.payload["artifact_root_path"],
+        "evaluation_release_promotion_evidence": receipt["promotionEvidence"],
+        "generated_at": d17_plan.payload["generated_at"],
+        "registry_resource_id": d17_plan.payload["registry_resource_id"],
+        "registry_resource_type": d17_plan.payload["registry_resource_type"],
+        "tenant_id": d17_plan.payload["tenant_id"],
+    }
+    d19_plan = build_benchmark_improvement_wave_plan(event_plan.payload["d19_trigger_conf"])
+    assert d19_plan.payload["evaluation_release_promotion_evidence"] == receipt["promotionEvidence"]
+    assert d19_plan.payload["generated_at"] == d17_plan.payload["generated_at"]
+
+    admitted = validate_d17_event_d6_airflow_run(
+        event_plan.to_canonical_json(),
+        {
+            "dagId": "serp_model_promotion_regression_suite",
+            "logicalDate": d17_plan.payload["generated_at"],
+            "runId": event_conf["eventD6RunId"],
+            "runType": "manual",
+        },
+    )
+    assert admitted == {
+        "dagId": "serp_model_promotion_regression_suite",
+        "logicalDate": d17_plan.payload["generated_at"],
+        "runId": event_conf["eventD6RunId"],
+        "runType": "manual",
+    }
+
+
+def test_d17_event_d6_rejects_mismatched_receipt_manual_scheduled_mixes_and_inline_d19() -> None:
+    bundle, objects = _release_pair()
+    d17_plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
+    releases = load_governed_model_releases(
+        d17_plan.to_canonical_json(), s3_client=_FakeS3(objects)
+    )
+    receipt = write_model_catalog_promotion_receipt(
+        d17_plan.to_canonical_json(), releases, snapshot_writer=_snapshot_writer
+    )
+    source_run = {
+        "dagId": "serp_model_catalog_promotion",
+        "logicalDate": "2026-07-15T05:00:00Z",
+        "runId": "manual__d17-release-20260715T050000Z",
+        "runType": "manual",
+    }
+    mismatched_receipt = dict(receipt)
+    mismatched_receipt["promotionEvidence"] = {
+        **receipt["promotionEvidence"],
+        "s3Uri": "s3://airflow-serp-evidence/serp-evals/foreign/promotion.json",
+    }
+
+    with pytest.raises(ValueError, match="promotionEvidence artifact path does not match D17 plan"):
+        build_d17_event_d6_trigger_conf(
+            d17_plan.to_canonical_json(), mismatched_receipt, source_run
+        )
+    with pytest.raises(ValueError, match="D17 source runType must be manual"):
+        build_d17_event_d6_trigger_conf(
+            d17_plan.to_canonical_json(), receipt, {**source_run, "runType": "scheduled"}
+        )
+
+    event_conf = build_d17_event_d6_trigger_conf(d17_plan.to_canonical_json(), receipt, source_run)
+    with pytest.raises(ValueError, match="inline D19 field is forbidden"):
+        build_d17_event_d6_plan({**event_conf, "candidate_evaluation": {"score": 1.0}})
+    for legacy_field in (
+        "bc21_base_url",
+        "benchmark_suite_inputs",
+        "evaluation_release_promotion_evidence",
+    ):
+        with pytest.raises(ValueError, match="D17 event-D6 trigger fields are unsupported"):
+            build_d17_event_d6_plan({**event_conf, legacy_field: "caller-controlled"})
+
+    event_plan = build_d17_event_d6_plan(event_conf)
+    with pytest.raises(ValueError, match="event D6 only admits trigger-created manual DagRuns"):
+        validate_d17_event_d6_airflow_run(
+            event_plan.to_canonical_json(),
+            {
+                "dagId": "serp_model_promotion_regression_suite",
+                "logicalDate": d17_plan.payload["generated_at"],
+                "runId": event_conf["eventD6RunId"],
+                "runType": "scheduled",
+            },
+        )
+    with pytest.raises(ValueError, match="event D6 DagRun runId does not match D17 trigger"):
+        validate_d17_event_d6_airflow_run(
+            event_plan.to_canonical_json(),
+            {
+                "dagId": "serp_model_promotion_regression_suite",
+                "logicalDate": d17_plan.payload["generated_at"],
+                "runId": "manual__caller-controlled",
+                "runType": "manual",
+            },
+        )
+
+    d19_conf = dict(event_plan.payload["d19_trigger_conf"])
+    d19_conf["candidate_evaluation"] = {"score": 1.0}
+    with pytest.raises(ValueError, match="inline D19 field is forbidden"):
+        build_benchmark_improvement_wave_plan(d19_conf)
+
+
 def test_d17_rejects_ci_v5_bundle_without_compatibility_fallback() -> None:
     bundle, _objects = _release_pair()
     bundle["contractVersion"] = "serp-ci-evaluation-release-evidence/v5"
@@ -546,7 +715,9 @@ def test_d17_rejects_runtime_source_set_handle_with_extra_fields() -> None:
     )
     plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
 
-    with pytest.raises(ValueError, match="benchmarkSubstrateSourceSetEvidence fields are unsupported"):
+    with pytest.raises(
+        ValueError, match="benchmarkSubstrateSourceSetEvidence fields are unsupported"
+    ):
         load_governed_model_releases(plan.to_canonical_json(), s3_client=_FakeS3(objects))
 
 
@@ -830,8 +1001,8 @@ def test_d19_builds_scoreless_reference_only_paired_request_v5(
     promotion = {
         "promotionEvidence": plan.payload["evaluation_release_promotion_evidence"],
         "promotion": {
-                "schema": "EvaluationReleasePromotionReceipt/v7",
-                "evaluationReleaseContractVersion": "serp-ci-evaluation-release-evidence/v7",
+            "schema": "EvaluationReleasePromotionReceipt/v7",
+            "evaluationReleaseContractVersion": "serp-ci-evaluation-release-evidence/v7",
             "promotionId": "all-nine-eval-2026-07-15",
             "tenantId": TENANT_ID,
             "registryResourceId": RESOURCE_ID,

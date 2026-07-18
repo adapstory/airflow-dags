@@ -103,6 +103,10 @@ _D19_DAG_ID = "serp_benchmark_improvement_wave"
 _D19_AIRFLOW_SUPPORTED_SERVER_MAJOR = 3
 _D19_VERIFICATION_EVIDENCE_MAX_BYTES = 16_000_000
 _SCHEDULED_D6_DAG_ID = "serp_nightly_regression_suite"
+_D17_EVENT_D6_DAG_ID = "serp_model_promotion_regression_suite"
+_D17_EVENT_D6_TRIGGER_SCHEMA = "D17EventD6Trigger/v1"
+_D17_EVENT_D6_RUN_ID_PREFIX = "event_d6__"
+_D17_EVENT_D19_RUN_ID_PREFIX = "event_d6_d19__"
 _SCHEDULED_D6_RECEIPT_SCHEMA = "ScheduledD6RegressionReceipt/v2"
 _D19_RUN_HISTORY_OBSERVATION_SCHEMA = "D19RunHistoryObservation/v1"
 _D19_RUN_HISTORY_OBSERVER_SERVICE_ACCOUNT = "airflow-serp-d19-history-observer"
@@ -1979,12 +1983,252 @@ def build_model_catalog_promotion_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
                     "validate_model_catalog_promotion_plan",
                     "load_governed_model_releases",
                     "write_model_catalog_promotion_receipt",
+                    "build_d17_event_d6_trigger_conf",
+                    "trigger_model_promotion_regression_suite",
                     "notify_governance_eval_surfaces",
                 )
             ),
             "tenant_id": str(tenant_id),
         }
     )
+
+
+def build_d17_event_d6_trigger_conf(
+    plan_json: Mapping[str, Any] | str,
+    promotion_receipt_result: Mapping[str, Any],
+    source_airflow_run: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project a sealed D17 receipt into the only event-D6 trigger envelope.
+
+    The result is deliberately not D19's run configuration.  Event D6 first
+    validates the D17 source identity and then derives D19's narrow native
+    configuration, so no caller can add scores, selection, or model authority
+    between the D17 WORM receipt and D19.
+    """
+
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != _MODEL_PROMOTION_DAG_ID:
+        raise ValueError("plan dag_id does not match D17 event-D6 trigger writer")
+    artifact_paths = _required_artifact_paths(plan, ("promotion_receipt",))
+    receipt_result = _payload(promotion_receipt_result)
+    receipt_payload = _artifact_payload(receipt_result, "model_catalog_promotion_receipt")
+    _validated_evaluation_release_promotion_receipt(receipt_payload, plan)
+    if _required_str(receipt_result, "operationId") != _required_str(plan, "operation_id"):
+        raise ValueError("D17 promotion receipt result operationId does not match plan")
+    if _required_str(receipt_result, "artifactPath") != artifact_paths["promotion_receipt"]:
+        raise ValueError("D17 promotion receipt result artifact path does not match plan")
+    promotion_evidence = _worm_evidence_reference(receipt_result, "promotionEvidence")
+    if promotion_evidence["s3Uri"] != artifact_paths["promotion_receipt"]:
+        raise ValueError("promotionEvidence artifact path does not match D17 plan")
+    if promotion_evidence["sha256"] != "sha256:" + _required_sha256_hex(
+        receipt_result, "artifactSha256"
+    ):
+        raise ValueError("promotionEvidence sha256 does not match D17 receipt result")
+    source = _normalized_d17_event_source_airflow_run(source_airflow_run)
+    source_d17 = {
+        "dagId": _MODEL_PROMOTION_DAG_ID,
+        "logicalDate": source["logicalDate"],
+        "operationId": _required_str(plan, "operation_id"),
+        "promotionId": _required_str(plan, "promotion_id"),
+        "runId": source["runId"],
+        "runType": "manual",
+    }
+    event_d6_run_id = _d17_event_d6_run_id(source_d17, promotion_evidence)
+    return {
+        "actor_id": _required_str(plan, "actor_id"),
+        "artifact_root_path": _required_artifact_root_path(plan),
+        "eventD6RunId": event_d6_run_id,
+        "generated_at": _required_datetime_string(plan, "generated_at"),
+        "promotionEvidence": promotion_evidence,
+        "registry_resource_id": _required_str(plan, "registry_resource_id"),
+        "registry_resource_type": _required_resource_type(plan, "registry_resource_type"),
+        "schema": _D17_EVENT_D6_TRIGGER_SCHEMA,
+        "sourceD17": source_d17,
+        "tenant_id": _required_str(plan, "tenant_id"),
+    }
+
+
+def build_d17_event_d6_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
+    """Admit the canonical D17 event route and derive D19's native input only."""
+
+    payload = _payload(conf)
+    _reject_raw_secrets(payload)
+    _reject_inline_d19_fields(payload)
+    expected = {
+        "actor_id",
+        "artifact_root_path",
+        "eventD6RunId",
+        "generated_at",
+        "promotionEvidence",
+        "registry_resource_id",
+        "registry_resource_type",
+        "schema",
+        "sourceD17",
+        "tenant_id",
+    }
+    if set(payload) != expected:
+        raise ValueError("D17 event-D6 trigger fields are unsupported")
+    if _required_str(payload, "schema") != _D17_EVENT_D6_TRIGGER_SCHEMA:
+        raise ValueError("D17 event-D6 trigger schema is unsupported")
+    source = _normalized_d17_event_trigger_source(_required_mapping(payload, "sourceD17"))
+    promotion_evidence = _worm_evidence_reference(payload, "promotionEvidence")
+    tenant_id = str(_required_uuid(payload, "tenant_id"))
+    registry_resource_id = str(_required_uuid(payload, "registry_resource_id"))
+    registry_resource_type = _required_resource_type(payload, "registry_resource_type")
+    generated_at = _required_datetime_string(payload, "generated_at")
+    artifact_root_path = _required_artifact_root_path(payload)
+    if not artifact_root_path.startswith("s3://"):
+        raise ValueError("event D6 requires an s3:// artifact_root_path")
+    _require_worm_evidence_within_artifact_root(
+        promotion_evidence,
+        artifact_root_path,
+        "promotionEvidence",
+    )
+    expected_event_d6_run_id = _d17_event_d6_run_id(source, promotion_evidence)
+    if _required_str(payload, "eventD6RunId") != expected_event_d6_run_id:
+        raise ValueError("eventD6RunId does not match D17 source identity")
+    operation_id = _operation_id(
+        "serp-airflow-d17-event-d6",
+        source["operationId"],
+        source["promotionId"],
+        source["runId"],
+        promotion_evidence["sha256"],
+        generated_at,
+    )
+    d19_trigger_conf = {
+        "actor_id": _required_str(payload, "actor_id"),
+        "artifact_root_path": artifact_root_path,
+        "evaluation_release_promotion_evidence": promotion_evidence,
+        "generated_at": generated_at,
+        "registry_resource_id": registry_resource_id,
+        "registry_resource_type": registry_resource_type,
+        "tenant_id": tenant_id,
+    }
+    return SerpDagPlan(
+        {
+            "actor_id": d19_trigger_conf["actor_id"],
+            "artifact_root_path": artifact_root_path,
+            "artifact_paths": _artifact_paths(
+                artifact_root_path,
+                operation_id,
+                (("airflow_plan", "airflow-plan.json"),),
+            ),
+            "d19_trigger_conf": d19_trigger_conf,
+            "d19_trigger_run_id": _d17_event_d19_run_id(source, promotion_evidence),
+            "dag_id": _D17_EVENT_D6_DAG_ID,
+            "event_d6_run_id": expected_event_d6_run_id,
+            "generated_at": generated_at,
+            "operation_id": operation_id,
+            "promotion_evidence": promotion_evidence,
+            "registry_resource_id": registry_resource_id,
+            "registry_resource_type": registry_resource_type,
+            "source_d17": source,
+            "tasks": _tasks(
+                (
+                    "validate_d17_event_d6_plan",
+                    "trigger_benchmark_improvement_wave",
+                    "notify_governance_eval_surfaces",
+                )
+            ),
+            "tenant_id": tenant_id,
+        }
+    )
+
+
+def validate_d17_event_d6_airflow_run(
+    plan_json: Mapping[str, Any] | str,
+    airflow_run: Mapping[str, Any],
+) -> dict[str, str]:
+    """Bind event D6 to D17's deterministic manual trigger and logical date."""
+
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != _D17_EVENT_D6_DAG_ID:
+        raise ValueError("plan dag_id does not match event D6 admission")
+    metadata = _payload(airflow_run)
+    expected = {"dagId", "logicalDate", "runId", "runType"}
+    if set(metadata) != expected:
+        raise ValueError("event D6 airflowRun fields are unsupported")
+    if _required_str(metadata, "dagId") != _D17_EVENT_D6_DAG_ID:
+        raise ValueError("event D6 airflowRun dagId does not match")
+    if _required_str(metadata, "runType") != "manual":
+        raise ValueError("event D6 only admits trigger-created manual DagRuns")
+    logical_date = _required_datetime_string(metadata, "logicalDate")
+    if logical_date != _required_datetime_string(plan, "generated_at"):
+        raise ValueError("event D6 DagRun logicalDate must match D17 generated_at")
+    run_id = _required_str(metadata, "runId")
+    if run_id != _required_str(plan, "event_d6_run_id"):
+        raise ValueError("event D6 DagRun runId does not match D17 trigger")
+    return {
+        "dagId": _D17_EVENT_D6_DAG_ID,
+        "logicalDate": logical_date,
+        "runId": run_id,
+        "runType": "manual",
+    }
+
+
+def _normalized_d17_event_source_airflow_run(value: Mapping[str, Any]) -> dict[str, str]:
+    metadata = _payload(value)
+    _reject_raw_secrets(metadata)
+    expected = {"dagId", "logicalDate", "runId", "runType"}
+    if set(metadata) != expected:
+        raise ValueError("D17 source airflowRun fields are unsupported")
+    if _required_str(metadata, "dagId") != _MODEL_PROMOTION_DAG_ID:
+        raise ValueError("D17 source airflowRun dagId does not match")
+    if _required_str(metadata, "runType") != "manual":
+        raise ValueError("D17 source runType must be manual")
+    return {
+        "dagId": _MODEL_PROMOTION_DAG_ID,
+        "logicalDate": _required_datetime_string(metadata, "logicalDate"),
+        "runId": _required_str(metadata, "runId"),
+        "runType": "manual",
+    }
+
+
+def _normalized_d17_event_trigger_source(value: Mapping[str, Any]) -> dict[str, str]:
+    source = _payload(value)
+    _reject_raw_secrets(source)
+    expected = {"dagId", "logicalDate", "operationId", "promotionId", "runId", "runType"}
+    if set(source) != expected:
+        raise ValueError("D17 event-D6 sourceD17 fields are unsupported")
+    if _required_str(source, "dagId") != _MODEL_PROMOTION_DAG_ID:
+        raise ValueError("D17 event-D6 sourceD17 dagId does not match")
+    if _required_str(source, "runType") != "manual":
+        raise ValueError("D17 event-D6 sourceD17 runType must be manual")
+    return {
+        "dagId": _MODEL_PROMOTION_DAG_ID,
+        "logicalDate": _required_datetime_string(source, "logicalDate"),
+        "operationId": _required_str(source, "operationId"),
+        "promotionId": _required_str(source, "promotionId"),
+        "runId": _required_str(source, "runId"),
+        "runType": "manual",
+    }
+
+
+def _d17_event_d6_run_id(
+    source_d17: Mapping[str, str], promotion_evidence: Mapping[str, str]
+) -> str:
+    return (
+        _D17_EVENT_D6_RUN_ID_PREFIX
+        + sha256(
+            "|".join(
+                (
+                    _required_str(source_d17, "operationId"),
+                    _required_str(source_d17, "runId"),
+                    _required_str(promotion_evidence, "sha256"),
+                )
+            ).encode("utf-8")
+        ).hexdigest()[:32]
+    )
+
+
+def _d17_event_d19_run_id(
+    source_d17: Mapping[str, str], promotion_evidence: Mapping[str, str]
+) -> str:
+    return _D17_EVENT_D19_RUN_ID_PREFIX + _d17_event_d6_run_id(
+        source_d17, promotion_evidence
+    ).removeprefix(_D17_EVENT_D6_RUN_ID_PREFIX)
 
 
 def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPlan:

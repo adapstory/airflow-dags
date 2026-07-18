@@ -65,6 +65,17 @@ SERP eval DAG contracts:
   `nightly-registry-submissions.json` to BC-21 through the reviewed
   `bc21_base_url`. Local dry-run receipt writers are explicit dev/test
   fallback helpers only and are not the default DAG runtime path.
+- `serp_model_promotion_regression_suite` is the separate event-only D6 route
+  from D17 to D19. It never reads the scheduled-D6 environment contract and
+  accepts only the versioned `D17EventD6Trigger/v1` envelope built by D17 from
+  its canonical plan, authoritative D17 DagRun identity, and the exact
+  `EvaluationReleasePromotionReceipt/v7` COMPLIANCE WORM handle. Its manual
+  trigger run ID and logical date are deterministic and must match the D17
+  source identity and D17-derived `generated_at`; it then projects exactly the
+  native D19 fields (tenant/resource/actor identity, artifact root, generated
+  timestamp, and promotion-evidence handle). Scores, release bodies, profiles,
+  scheduled-D6 fences, legacy suite inputs, and aliases are rejected before
+  D19 is triggered.
 - `serp_tenant_golden_set_regression` is the D13 scaffolded handoff contract
   DAG, not a native runtime-backed runner yet. Its
   `dag_run.conf` must provide tenant id, workflow id, golden set id/version,
@@ -93,7 +104,7 @@ SERP eval DAG contracts:
 - `serp_model_catalog_promotion` is the D17 model-governance authority. Its
   `dag_run.conf` accepts tenant/resource identity, promotion id, actor,
   generated timestamp, evidence root, and one canonical
-  `serp-ci-evaluation-release-evidence/v6` bundle. It does not accept model ids,
+  `serp-ci-evaluation-release-evidence/v7` bundle. It does not accept model ids,
   profile strings, scores, approval booleans, or separate caller-selected
   release pointers. The DAG re-reads both `EvaluationRelease/v3` manifests by
   exact `VersionId` and SHA-256 under `COMPLIANCE` retention, validates their
@@ -101,7 +112,7 @@ SERP eval DAG contracts:
   treatment delta in the governed model, retrieval profile, or reranker
   profile, and binds the immutable metric matrix and
   `evaluationObjectiveEvidence`. It then seals the only accepted
-  `EvaluationReleasePromotionReceipt/v6`, including the exact passed
+  `EvaluationReleasePromotionReceipt/v7`, including the exact passed
   `candidateReleaseAuthority`. Runtime-image-only candidate releases
   fail closed.
   Release manifest production belongs to the signed CI/release path: the
@@ -118,7 +129,7 @@ SERP eval DAG contracts:
   `evaluation_release_promotion_evidence` pointer. It rejects every
   caller-supplied baseline/candidate/replay/model-governance selection and every
   `candidate_evaluation` score/result payload. The D19 scheduler re-reads that
-  exact `EvaluationReleasePromotionReceipt/v6` and both referenced release
+  exact `EvaluationReleasePromotionReceipt/v7` and both referenced release
   manifests before it derives the reference-only `PairedEvaluationRequest/v5`.
   That request binds the promotion, releases, BC21 evaluation binding, metric
   matrix, `evaluationObjectiveEvidence`, and exact catalog evidence; no older

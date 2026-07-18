@@ -5679,6 +5679,17 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
                 "validate_model_catalog_promotion_plan",
                 "verify_runtime_terminal_activation_admission",
                 "write_model_catalog_promotion_receipt",
+                "build_d17_event_d6_trigger_conf",
+                "trigger_model_promotion_regression_suite",
+                "notify_governance_eval_surfaces",
+            ],
+        ),
+        (
+            "serp_model_promotion_regression_suite.py",
+            "serp_model_promotion_regression_suite",
+            [
+                "validate_d17_event_d6_plan",
+                "trigger_benchmark_improvement_wave",
                 "notify_governance_eval_surfaces",
             ],
         ),
@@ -5768,6 +5779,29 @@ def test_serp_dag_files_declare_expected_airflow_contracts(
         assert _keyword_values(tree, "TriggerDagRunOperator", "task_id") == [
             "trigger_benchmark_improvement_wave"
         ]
+    elif dag_id == "serp_model_catalog_promotion":
+        assert _keyword_values(tree, "PythonOperator", "task_id") == [
+            task_id for task_id in task_ids if task_id != "trigger_model_promotion_regression_suite"
+        ]
+        assert _keyword_values(tree, "TriggerDagRunOperator", "task_id") == [
+            "trigger_model_promotion_regression_suite"
+        ]
+        assert 'trigger_dag_id="serp_model_promotion_regression_suite"' in source
+        assert "write_receipt\n    >> build_event_d6_conf" in source
+        assert "trigger_event_d6\n    >> notify_governance" in source
+        assert "fail_when_dag_is_paused=True" in source
+    elif dag_id == "serp_model_promotion_regression_suite":
+        assert _keyword_values(tree, "PythonOperator", "task_id") == [
+            task_id for task_id in task_ids if task_id != "trigger_benchmark_improvement_wave"
+        ]
+        assert _keyword_values(tree, "TriggerDagRunOperator", "task_id") == [
+            "trigger_benchmark_improvement_wave"
+        ]
+        assert 'trigger_dag_id="serp_benchmark_improvement_wave"' in source
+        assert "logical_date" in source
+        assert "fail_when_dag_is_paused=True" in source
+        assert "default_nightly_regression_conf" not in source
+        assert "scheduled_d6_fence" not in source
     elif dag_id == "serp_mandatory_benchmark_dataset_evidence_snapshot":
         assert _keyword_values(tree, "PythonOperator", "task_id") == [
             "validate_mandatory_benchmark_dataset_evidence_plan"
@@ -5799,6 +5833,7 @@ def test_serp_dag_files_import_helpers_from_packaged_dags_namespace() -> None:
         "serp_online_eval_rollup.py",
         "serp_tenant_golden_set_regression.py",
         "serp_model_catalog_promotion.py",
+        "serp_model_promotion_regression_suite.py",
         "serp_benchmark_improvement_wave.py",
         "serp_publish_signed_pack.py",
         "serp_web_seed_crawl_refresh.py",
@@ -6052,6 +6087,8 @@ def test_serp_public_docs_dag_serializes_manual_and_nightly_runs() -> None:
         "serp_web_seed_crawl_refresh.py",
         "serp_publish_signed_pack.py",
         "serp_mandatory_benchmark_dataset_evidence_snapshot.py",
+        "serp_model_catalog_promotion.py",
+        "serp_model_promotion_regression_suite.py",
         "serp_benchmark_improvement_wave.py",
     ),
 )
@@ -6073,6 +6110,16 @@ def test_serp_operational_dags_are_unpaused_when_airflow_creates_them(dag_file: 
     )
 
     assert is_paused_upon_creation is False
+
+
+def test_event_d6_accepts_the_earliest_d17_contract_epoch() -> None:
+    """A D17 release generated at its supported epoch must create task instances."""
+
+    source = (REPO_ROOT / "dags" / "serp_model_promotion_regression_suite.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"start_date": datetime(2026, 7, 15, tzinfo=UTC)' in source
 
 
 def test_serp_public_docs_dag_dispatches_d5_natively_and_waits_for_completion() -> None:
