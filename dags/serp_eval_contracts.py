@@ -4889,7 +4889,7 @@ def _native_adapter_materializer(
 ) -> Mapping[str, object]:
     """Load the image-owned adapter only inside the isolated catalog workload."""
 
-    from adapstory_serp_pipeline.benchmark.native_adapters import (  # type: ignore[import-not-found]
+    from adapstory_serp_pipeline.benchmark.native_adapters import (
         build_native_case_manifest,
     )
 
@@ -4910,7 +4910,7 @@ def _native_corpus_materializer(
 ) -> Mapping[str, object]:
     """Derive only query-independent corpus bytes inside the isolated workload."""
 
-    from adapstory_serp_pipeline.benchmark.native_corpus import (  # type: ignore[import-not-found]
+    from adapstory_serp_pipeline.benchmark.native_corpus import (
         derive_native_benchmark_corpus,
     )
 
@@ -4935,20 +4935,17 @@ def _execution_substrate_materializer(
 ) -> Mapping[str, bytes]:
     """Materialize exact role bytes only inside the isolated catalog workload."""
 
-    from adapstory_serp_pipeline.benchmark.execution_substrate_materialization import (  # type: ignore[import-not-found]
+    from adapstory_serp_pipeline.benchmark.execution_substrate_materialization import (
         materialize_execution_substrate_role_payloads,
     )
 
-    return cast(
-        Mapping[str, bytes],
-        materialize_execution_substrate_role_payloads(
-            suite_id,
-            dataset_payloads,
-            dataset_snapshots,
-            corpus_payloads,
-            corpus_snapshots,
-            official_harness_payloads,
-        ),
+    return materialize_execution_substrate_role_payloads(
+        suite_id,
+        dataset_payloads,
+        dataset_snapshots,
+        corpus_payloads,
+        corpus_snapshots,
+        official_harness_payloads,
     )
 
 

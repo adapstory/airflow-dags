@@ -406,7 +406,10 @@ def _worm_object(
 ) -> dict[str, Any]:
     bucket = "airflow-serp-evidence"
     key = evidence["s3Uri"].removeprefix(f"s3://{bucket}/")
-    return json.loads(objects[(bucket, key, evidence["versionId"])])
+    decoded = json.loads(objects[(bucket, key, evidence["versionId"])])
+    if not isinstance(decoded, dict):
+        raise AssertionError("WORM fixture payload must be a JSON object")
+    return {str(field): value for field, value in decoded.items()}
 
 
 def _d19_conf() -> dict[str, object]:
