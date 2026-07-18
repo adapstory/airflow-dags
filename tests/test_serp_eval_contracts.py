@@ -1122,6 +1122,7 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
                 {
                     "evidence": {
                         "objectLockMode": "COMPLIANCE",
+                        "retainUntil": "2027-07-15T00:00:00Z",
                         "s3Uri": f"s3://airflow-serp-evidence/{key}",
                         "sha256": "sha256:" + sha256(payload).hexdigest(),
                         "versionId": version_id,
@@ -1134,6 +1135,7 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
     def sbom_handle(name: str) -> dict[str, str]:
         return {
             "objectLockMode": "COMPLIANCE",
+            "retainUntil": "2027-07-15T00:00:00Z",
             "s3Uri": f"s3://airflow-serp-evidence/serp-evals/substrates/sboms/{name}.json",
             "sha256": "sha256:" + "e" * 64,
             "versionId": f"sbom-{name}-v1",
@@ -1172,6 +1174,7 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
     objects[(supply_key, supply_version)] = supply_bytes
     supply_evidence = {
         "objectLockMode": "COMPLIANCE",
+        "retainUntil": "2027-07-15T00:00:00Z",
         "s3Uri": f"s3://airflow-serp-evidence/{supply_key}",
         "sha256": "sha256:" + sha256(supply_bytes).hexdigest(),
         "versionId": supply_version,
@@ -1189,6 +1192,7 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
     objects[(source_key, source_version)] = source_set_bytes
     source_evidence = {
         "objectLockMode": "COMPLIANCE",
+        "retainUntil": "2027-07-15T00:00:00Z",
         "s3Uri": f"s3://airflow-serp-evidence/{source_key}",
         "sha256": "sha256:" + sha256(source_set_bytes).hexdigest(),
         "versionId": source_version,
@@ -2436,6 +2440,7 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
         ),
     }
     assert [task["task_id"] for task in plan.payload["tasks"]] == [
+        "verify_runtime_terminal_activation_admission",
         "validate_d19_fence_admission",
         "validate_benchmark_improvement_wave_plan",
         "materialize_live_benchmark_catalog",
@@ -5672,7 +5677,7 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
             "serp_model_catalog_promotion",
             [
                 "validate_model_catalog_promotion_plan",
-                "load_governed_model_releases",
+                "verify_runtime_terminal_activation_admission",
                 "write_model_catalog_promotion_receipt",
                 "notify_governance_eval_surfaces",
             ],
@@ -5738,6 +5743,7 @@ def test_serp_dag_files_declare_expected_airflow_contracts(
         assert "render_template_as_native_obj=True" in source
         assert _keyword_values(tree, "PythonOperator", "task_id") == [
             "validate_d19_fence_admission",
+            "verify_runtime_terminal_activation_admission",
             "validate_benchmark_improvement_wave_plan",
             "load_materialized_benchmark_catalog",
             "load_model_catalog_promotion",
@@ -8228,8 +8234,8 @@ def _d6_d17_promotion_receipt(
         "promotionId": "serp-model-promotion-2026-07-12",
         "registryResourceId": plan.payload["registry_resource_id"],
         "registryResourceType": plan.payload["registry_resource_type"],
-        "schema": "EvaluationReleasePromotionReceipt/v6",
-        "evaluationReleaseContractVersion": "serp-ci-evaluation-release-evidence/v6",
+        "schema": "EvaluationReleasePromotionReceipt/v7",
+        "evaluationReleaseContractVersion": "serp-ci-evaluation-release-evidence/v7",
         "status": "approved-for-evaluation",
         "tenantId": plan.payload["tenant_id"],
     }
@@ -8740,8 +8746,8 @@ def _d19_promotion_snapshot(plan: Any) -> dict[str, Any]:
     return {
         "promotionEvidence": plan.payload["evaluation_release_promotion_evidence"],
         "promotion": {
-            "schema": "EvaluationReleasePromotionReceipt/v6",
-            "evaluationReleaseContractVersion": "serp-ci-evaluation-release-evidence/v6",
+            "schema": "EvaluationReleasePromotionReceipt/v7",
+            "evaluationReleaseContractVersion": "serp-ci-evaluation-release-evidence/v7",
             "baselineRelease": {
                 "evidence": _d19_worm_evidence("model-releases/baseline", "d"),
                 "releaseDigest": "sha256:" + "1" * 64,

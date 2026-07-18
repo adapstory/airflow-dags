@@ -32,6 +32,7 @@ from dags.serp_eval_contracts import (
     load_benchmark_pack_lifecycle_result_snapshot,
     load_materialized_benchmark_catalog_snapshot,
     load_model_catalog_promotion_snapshot,
+    verify_model_catalog_promotion_terminal_activation,
     write_airflow_plan_artifact,
     write_immutable_evidence_snapshot,
     write_paired_eval_request_artifact,
@@ -48,6 +49,7 @@ from dags.serp_evidence_workload_identity import (
     bc21_workload_env_vars,
     bc21_workload_volume_mounts,
     bc21_workload_volumes,
+    evaluation_admission_verifier_executor_config,
     hardened_runtime_container_security_context,
     hardened_runtime_pod_security_context,
     hardened_runtime_volume_mounts,
@@ -130,6 +132,13 @@ D19_BUILDER_WORKLOAD_LABELS = {
 D19_ADMISSION_WORKLOAD_LABELS = {
     "adapstory.com/serp-evidence-workload": "true",
     "adapstory.com/serp-network-profile": "d19-fence-admission",
+    "component": "worker",
+    "release": "airflow",
+    "tier": "airflow",
+}
+D19_RUNTIME_ADMISSION_WORKLOAD_LABELS = {
+    "adapstory.com/serp-evidence-workload": "true",
+    "adapstory.com/serp-network-profile": "evaluation-admission-verifier",
     "component": "worker",
     "release": "airflow",
     "tier": "airflow",
@@ -369,6 +378,9 @@ D19_ADMISSION_EXECUTOR_CONFIG = {
         ),
     )
 }
+D19_RUNTIME_ADMISSION_EXECUTOR_CONFIG = evaluation_admission_verifier_executor_config(
+    labels=D19_RUNTIME_ADMISSION_WORKLOAD_LABELS,
+)
 
 
 def d19_aggregator_env_vars() -> list[k8s.V1EnvVar]:
@@ -767,6 +779,15 @@ def validate_benchmark_improvement_wave_plan(**context: Any) -> dict[str, Any]:
     return plan
 
 
+def verify_runtime_terminal_activation_admission(**context: Any) -> dict[str, Any]:
+    """Fail before a D19 fence if D17 terminal provenance cannot be reverified."""
+
+    dag_run = context.get("dag_run")
+    conf = getattr(dag_run, "conf", None) or {}
+    plan_json = write_airflow_plan_artifact(build_benchmark_improvement_wave_plan(conf))
+    return verify_model_catalog_promotion_terminal_activation(plan_json)
+
+
 def validate_d19_fence_admission(**context: Any) -> dict[str, Any]:
     dag_run = context.get("dag_run")
     if dag_run is None:
@@ -1040,6 +1061,13 @@ validate_admission = PythonOperator(
     task_id="validate_d19_fence_admission",
     python_callable=validate_d19_fence_admission,
     executor_config=D19_ADMISSION_EXECUTOR_CONFIG,
+    dag=dag,
+)
+
+verify_terminal_activation = PythonOperator(
+    task_id="verify_runtime_terminal_activation_admission",
+    python_callable=verify_runtime_terminal_activation_admission,
+    executor_config=D19_RUNTIME_ADMISSION_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -1704,7 +1732,13 @@ notify_governance = PythonOperator(
     dag=dag,
 )
 
-validate_admission >> validate_plan >> materialize_catalog >> load_catalog
+(
+    verify_terminal_activation
+    >> validate_admission
+    >> validate_plan
+    >> materialize_catalog
+    >> load_catalog
+)
 validate_plan >> load_promotion
 load_catalog >> build_exact_nine_benchmark_packs
 load_promotion >> build_exact_nine_benchmark_packs

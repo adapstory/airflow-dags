@@ -4,11 +4,15 @@ version = "2026.07.2"
 description = "Installable Airflow DAG package for the Adapstory runtime image."
 requires-python = ">=3.12"
 dependencies = [
+    "adapstory-serp-pipeline==2026.07.2",
     "boto3>=1.35,<2.0",
     "huggingface_hub>=0.32,<2.0",
     "kubernetes>=36.0.2,<37.0.0",
     "rfc8785==0.1.4",
 ]
+
+[tool.uv.sources]
+adapstory-serp-pipeline = { path = "../adapstory-serp-pipeline", editable = true }
 
 [dependency-groups]
 dev = [

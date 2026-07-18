@@ -11,11 +11,14 @@ from airflow.sdk import DAG
 from dags.serp_eval_contracts import (
     build_model_catalog_promotion_plan,
     governance_notification_pending,
-    load_governed_model_releases,
+    verify_governed_model_releases_terminal_activation,
     write_airflow_plan_artifact,
     write_model_catalog_promotion_receipt,
 )
-from dags.serp_evidence_workload_identity import minio_web_identity_executor_config
+from dags.serp_evidence_workload_identity import (
+    evaluation_admission_verifier_executor_config,
+    minio_web_identity_executor_config,
+)
 
 D17_MODEL_GOVERNANCE_SERVICE_ACCOUNT = "airflow-serp-benchmark-aggregator"
 D17_MODEL_GOVERNANCE_LABELS = {
@@ -29,6 +32,16 @@ D17_MODEL_GOVERNANCE_EXECUTOR_CONFIG = minio_web_identity_executor_config(
     service_account_name=D17_MODEL_GOVERNANCE_SERVICE_ACCOUNT,
     labels=D17_MODEL_GOVERNANCE_LABELS,
 )
+D17_ADMISSION_LABELS = {
+    "adapstory.com/serp-evidence-workload": "true",
+    "adapstory.com/serp-network-profile": "evaluation-admission-verifier",
+    "component": "worker",
+    "release": "airflow",
+    "tier": "airflow",
+}
+D17_ADMISSION_EXECUTOR_CONFIG = evaluation_admission_verifier_executor_config(
+    labels=D17_ADMISSION_LABELS,
+)
 
 
 def validate_model_catalog_promotion_plan(**context: Any) -> str:
@@ -37,8 +50,8 @@ def validate_model_catalog_promotion_plan(**context: Any) -> str:
     return write_airflow_plan_artifact(build_model_catalog_promotion_plan(conf))
 
 
-def load_model_releases(plan_json: str) -> dict[str, Any]:
-    return load_governed_model_releases(plan_json)
+def verify_runtime_terminal_activation_admission(plan_json: str) -> dict[str, Any]:
+    return verify_governed_model_releases_terminal_activation(plan_json)
 
 
 def write_promotion_receipt(plan_json: str, releases: dict[str, Any]) -> dict[str, Any]:
@@ -69,11 +82,11 @@ validate_plan = PythonOperator(
     dag=dag,
 )
 
-load_releases = PythonOperator(
-    task_id="load_governed_model_releases",
-    python_callable=load_model_releases,
+verify_terminal_activation = PythonOperator(
+    task_id="verify_runtime_terminal_activation_admission",
+    python_callable=verify_runtime_terminal_activation_admission,
     op_args=["{{ ti.xcom_pull(task_ids='validate_model_catalog_promotion_plan') }}"],
-    executor_config=D17_MODEL_GOVERNANCE_EXECUTOR_CONFIG,
+    executor_config=D17_ADMISSION_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -82,7 +95,7 @@ write_receipt = PythonOperator(
     python_callable=write_promotion_receipt,
     op_args=[
         "{{ ti.xcom_pull(task_ids='validate_model_catalog_promotion_plan') }}",
-        "{{ ti.xcom_pull(task_ids='load_governed_model_releases') }}",
+        "{{ ti.xcom_pull(task_ids='verify_runtime_terminal_activation_admission') }}",
     ],
     executor_config=D17_MODEL_GOVERNANCE_EXECUTOR_CONFIG,
     dag=dag,
@@ -96,4 +109,4 @@ notify_governance = PythonOperator(
     dag=dag,
 )
 
-validate_plan >> load_releases >> write_receipt >> notify_governance
+validate_plan >> verify_terminal_activation >> write_receipt >> notify_governance

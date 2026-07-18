@@ -63,6 +63,9 @@ def test_vault_executor_rejects_non_evaluation_auth_role() -> None:
 
 
 def test_admission_verifier_has_a_fixed_verify_only_identity() -> None:
+    assert EVALUATION_ADMISSION_VERIFIER_VAULT_AUTH_ROLE == (
+        "serp-evaluation-admission-attestor-role"
+    )
     config = evaluation_admission_verifier_executor_config(
         labels={"adapstory.com/serp-network-profile": "evaluation-admission-verifier"}
     )

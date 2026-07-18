@@ -38,7 +38,7 @@ VAULT_INTERNAL_CA_VOLUME_NAME = "vault-internal-ca"
 VAULT_INTERNAL_CA_FILE = "/var/run/secrets/adapstory/vault-ca/ca.crt"
 VAULT_ADDR = "https://vault.vault.svc.cluster.local:8200"
 EVALUATION_ADMISSION_VERIFIER_SERVICE_ACCOUNT = "serp-evaluation-admission-verifier"
-EVALUATION_ADMISSION_VERIFIER_VAULT_AUTH_ROLE = "serp-evaluation-runtime-verifier-role"
+EVALUATION_ADMISSION_VERIFIER_VAULT_AUTH_ROLE = "serp-evaluation-admission-attestor-role"
 _EVALUATION_SIGNER_VAULT_AUTH_ROLES = frozenset(
     {
         "serp-d19-history-observer-attestor-role",

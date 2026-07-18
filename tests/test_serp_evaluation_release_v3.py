@@ -56,6 +56,7 @@ def _benchmark_substrate_source_set_handle(
     *,
     canonical_uri: bool = True,
     extra_handle_fields: Mapping[str, str] | None = None,
+    omit_retain_until: bool = False,
 ) -> dict[str, str]:
     body = _canonical_bytes(payload)
     if canonical_uri:
@@ -64,13 +65,17 @@ def _benchmark_substrate_source_set_handle(
         key = f"serp-evals/substrates-{substrate_id}/source-set.json"
     version_id = f"substrate-source-set-{substrate_id}"
     objects[("airflow-serp-evidence", key, version_id)] = body
-    return {
+    handle = {
         "objectLockMode": "COMPLIANCE",
+        "retainUntil": "2027-07-15T00:00:00Z",
         "s3Uri": f"s3://airflow-serp-evidence/{key}",
         "sha256": "sha256:" + sha256(body).hexdigest(),
         "versionId": version_id,
         **dict(extra_handle_fields or {}),
     }
+    if omit_retain_until:
+        handle.pop("retainUntil")
+    return handle
 
 
 def _release_pair(
@@ -83,6 +88,7 @@ def _release_pair(
     different_runtime_source_set_handles: bool = False,
     canonical_runtime_source_set_uri: bool = True,
     runtime_source_set_extra_handle_fields: Mapping[str, str] | None = None,
+    runtime_source_set_omit_retain_until: bool = False,
 ) -> tuple[dict[str, Any], dict[tuple[str, str, str], bytes]]:
     objects: dict[tuple[str, str, str], bytes] = {}
     component_cache: dict[bytes, dict[str, str]] = {}
@@ -104,6 +110,7 @@ def _release_pair(
                     {
                         "evidence": {
                             "objectLockMode": "COMPLIANCE",
+                            "retainUntil": "2027-07-15T00:00:00Z",
                             "s3Uri": (
                                 "s3://airflow-serp-evidence/serp-evals/"
                                 f"ci-benchmark-substrates-1/"
@@ -121,6 +128,7 @@ def _release_pair(
         ],
         "supplyAttestationsEvidence": {
             "objectLockMode": "COMPLIANCE",
+            "retainUntil": "2027-07-15T00:00:00Z",
             "s3Uri": "s3://airflow-serp-evidence/serp-evals/ci-benchmark-substrates-1/"
             "supply-attestations.json",
             "sha256": "sha256:" + "a" * 64,
@@ -134,6 +142,7 @@ def _release_pair(
             objects,
             canonical_uri=canonical_runtime_source_set_uri,
             extra_handle_fields=runtime_source_set_extra_handle_fields,
+            omit_retain_until=runtime_source_set_omit_retain_until,
         ),
         "candidate": _benchmark_substrate_source_set_handle(
             2 if different_runtime_source_set_handles else 1,
@@ -141,24 +150,61 @@ def _release_pair(
             objects,
             canonical_uri=canonical_runtime_source_set_uri,
             extra_handle_fields=runtime_source_set_extra_handle_fields,
+            omit_retain_until=runtime_source_set_omit_retain_until,
         ),
     }
 
-    def runtime_receipt(side: str, digest: str, build: int) -> dict[str, Any]:
-        receipt: dict[str, Any] = {
-            "digest": "sha256:" + digest * 64,
+    def runtime_terminal_binding(side: str) -> dict[str, str]:
+        runtime_side = "baseline" if not different_runtime_source_set_handles else side
+        build = 160 if runtime_side == "baseline" else 161
+        draft: dict[str, Any] = {
+            "contractVersion": "AirflowRuntimeBuildDraft/v1",
+            "repository": "harbor.adapstory.com/adapstory/airflow",
+            "tag": f"3.3.0-runtime-{runtime_side}",
+            "digest": "sha256:" + ("b" if runtime_side == "baseline" else "c") * 64,
+            "manifestMediaType": "application/vnd.oci.image.manifest.v1+json",
+            "configMediaType": "application/vnd.oci.image.config.v1+json",
+            "airflowDagsRef": "a" * 40,
+            "serpMcpGatewayRef": "b" * 40,
+            "serpPipelineRef": "c" * 40,
+            "serpContextBenchmarkRef": "d" * 40,
             "jenkinsBuildUrl": f"https://jenkins.adapstory.com/job/infra-build/{build}/",
-            "result": "SUCCESS",
-            "sourceRevision": digest * 40,
         }
         if include_runtime_source_set:
-            receipt["benchmarkSubstrateSourceSetEvidence"] = source_set_evidence[side]
-        return receipt
+            draft["benchmarkSubstrateSourceSetEvidence"] = source_set_evidence[runtime_side]
+        draft_evidence = component(f"runtime-draft-{runtime_side}", draft)
+        draft_transit_evidence = component(
+            f"runtime-draft-transit-{runtime_side}",
+            {"schema": "ArtifactSignatureAttestationReceipt/v2", "subject": draft_evidence},
+        )
+        terminal_attestation = {
+            "schema": "AirflowRuntimeTerminalAttestation/v1",
+            "runtimeBuildDraftEvidence": draft_evidence,
+            "runtimeBuildDraftSha256": draft_evidence["sha256"],
+            "gitopsCommit": "f" * 40,
+            "jenkinsBuildUrl": draft["jenkinsBuildUrl"],
+            "terminalResult": "SUCCESS",
+            "writtenAt": "2026-07-15T05:00:00Z",
+        }
+        terminal_evidence = component(
+            f"runtime-terminal-attestation-{runtime_side}", terminal_attestation
+        )
+        terminal_transit_evidence = component(
+            f"runtime-terminal-transit-{runtime_side}",
+            {"schema": "ArtifactSignatureAttestationReceipt/v2", "subject": terminal_evidence},
+        )
+        return component(
+            f"runtime-terminal-binding-{runtime_side}",
+            {
+                "schema": "RuntimeTerminalActivationBinding/v1",
+                "runtimeBuildDraftEvidence": draft_evidence,
+                "runtimeBuildDraftVaultTransitEvidence": draft_transit_evidence,
+                "terminalBuildAttestationEvidence": terminal_evidence,
+                "terminalBuildAttestationVaultTransitEvidence": terminal_transit_evidence,
+            },
+        )
 
-    runtime_evidence = {
-        side: component(f"runtime-{side}", runtime_receipt(side, digest, build))
-        for side, digest, build in (("baseline", "b", 160), ("candidate", "c", 161))
-    }
+    runtime_evidence = {side: runtime_terminal_binding(side) for side in ("baseline", "candidate")}
 
     def profiles(side: str) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
@@ -311,7 +357,7 @@ def _release_pair(
     )
     bundle = {
         "apiVersion": "serp.adapstory.ai/v2alpha1",
-        "contractVersion": "serp-ci-evaluation-release-evidence/v6",
+        "contractVersion": "serp-ci-evaluation-release-evidence/v7",
         "kind": "EvaluationReleaseEvidence",
         "metricCompatibilityMatrixEvidence": metric_matrix_evidence,
         "evaluationObjectiveEvidence": evaluation_objective_evidence,
@@ -352,6 +398,14 @@ def _reference(name: str, digest: str = "a") -> dict[str, str]:
     }
 
 
+def _worm_object(
+    objects: Mapping[tuple[str, str, str], bytes], evidence: Mapping[str, str]
+) -> dict[str, Any]:
+    bucket = "airflow-serp-evidence"
+    key = evidence["s3Uri"].removeprefix(f"s3://{bucket}/")
+    return json.loads(objects[(bucket, key, evidence["versionId"])])
+
+
 def _d19_conf() -> dict[str, object]:
     return {
         "actor_id": "airflow-serp-eval-runner",
@@ -364,7 +418,7 @@ def _d19_conf() -> dict[str, object]:
     }
 
 
-def test_d17_consumes_ci_v6_bundle_and_seals_governed_v6_promotion() -> None:
+def test_d17_consumes_ci_v7_bundle_and_seals_governed_v7_promotion() -> None:
     bundle, objects = _release_pair()
     plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
 
@@ -381,7 +435,7 @@ def test_d17_consumes_ci_v6_bundle_and_seals_governed_v6_promotion() -> None:
     )
     assert "evaluation_release_evidence" not in plan.payload
     assert plan.payload["ci_evaluation_release_contract_version"] == (
-        "serp-ci-evaluation-release-evidence/v6"
+        "serp-ci-evaluation-release-evidence/v7"
     )
 
     releases = load_governed_model_releases(plan.to_canonical_json(), s3_client=_FakeS3(objects))
@@ -393,8 +447,8 @@ def test_d17_consumes_ci_v6_bundle_and_seals_governed_v6_promotion() -> None:
         plan.to_canonical_json(), releases, snapshot_writer=_snapshot_writer
     )
     payload = receipt["payload"]
-    assert payload["schema"] == "EvaluationReleasePromotionReceipt/v6"
-    assert payload["evaluationReleaseContractVersion"] == "serp-ci-evaluation-release-evidence/v6"
+    assert payload["schema"] == "EvaluationReleasePromotionReceipt/v7"
+    assert payload["evaluationReleaseContractVersion"] == "serp-ci-evaluation-release-evidence/v7"
     assert payload["status"] == "approved-for-evaluation"
     assert payload["baselineRelease"] == {
         "evidence": bundle["baselineReleaseEvidence"],
@@ -432,11 +486,11 @@ def test_d17_rejects_ci_v5_bundle_without_compatibility_fallback() -> None:
         build_model_catalog_promotion_plan(_promotion_conf(bundle))
 
 
-def test_d17_rejects_runtime_receipt_without_benchmark_substrate_source_set_evidence() -> None:
+def test_d17_rejects_terminal_draft_without_benchmark_substrate_source_set_evidence() -> None:
     bundle, objects = _release_pair(include_runtime_source_set=False)
     plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
 
-    with pytest.raises(ValueError, match="benchmarkSubstrateSourceSetEvidence"):
+    with pytest.raises(ValueError, match="AirflowRuntimeBuildDraft/v1"):
         load_governed_model_releases(plan.to_canonical_json(), s3_client=_FakeS3(objects))
 
 
@@ -475,10 +529,8 @@ def test_d17_rejects_runtime_source_set_with_unsupported_schema() -> None:
 def test_d17_rejects_tampered_runtime_source_set_bytes() -> None:
     bundle, objects = _release_pair()
     runtime_evidence = bundle["baselineRelease"]["runtimeEvidence"]
-    runtime_key = runtime_evidence["s3Uri"].removeprefix("s3://airflow-serp-evidence/")
-    runtime = json.loads(
-        objects[("airflow-serp-evidence", runtime_key, runtime_evidence["versionId"])]
-    )
+    binding = _worm_object(objects, runtime_evidence)
+    runtime = _worm_object(objects, binding["runtimeBuildDraftEvidence"])
     source_set_evidence = runtime["benchmarkSubstrateSourceSetEvidence"]
     source_set_key = source_set_evidence["s3Uri"].removeprefix("s3://airflow-serp-evidence/")
     objects[("airflow-serp-evidence", source_set_key, source_set_evidence["versionId"])] = b"{}"
@@ -490,11 +542,11 @@ def test_d17_rejects_tampered_runtime_source_set_bytes() -> None:
 
 def test_d17_rejects_runtime_source_set_handle_with_extra_fields() -> None:
     bundle, objects = _release_pair(
-        runtime_source_set_extra_handle_fields={"retainUntil": "2027-07-15T00:00:00Z"}
+        runtime_source_set_extra_handle_fields={"unexpected": "unsupported"}
     )
     plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
 
-    with pytest.raises(ValueError, match="benchmarkSubstrateSourceSetEvidence must define exactly"):
+    with pytest.raises(ValueError, match="benchmarkSubstrateSourceSetEvidence fields are unsupported"):
         load_governed_model_releases(plan.to_canonical_json(), s3_client=_FakeS3(objects))
 
 
@@ -579,7 +631,7 @@ def test_d17_uses_a_read_only_session_for_the_exact_ci_release_operation(
     ]
 
 
-def test_d19_rereads_the_v6_promotion_and_both_release_manifests() -> None:
+def test_d19_rereads_the_v7_promotion_and_both_release_manifests() -> None:
     bundle, objects = _release_pair()
     d17_plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
     releases = load_governed_model_releases(
@@ -601,9 +653,9 @@ def test_d19_rereads_the_v6_promotion_and_both_release_manifests() -> None:
         d19_plan.to_canonical_json(), s3_client=_FakeS3(objects)
     )
 
-    assert snapshot["promotion"]["schema"] == "EvaluationReleasePromotionReceipt/v6"
+    assert snapshot["promotion"]["schema"] == "EvaluationReleasePromotionReceipt/v7"
     assert snapshot["promotion"]["evaluationReleaseContractVersion"] == (
-        "serp-ci-evaluation-release-evidence/v6"
+        "serp-ci-evaluation-release-evidence/v7"
     )
     assert (
         snapshot["promotion"]["baselineRelease"]["releaseDigest"]
@@ -665,7 +717,7 @@ def test_d19_rejects_duplicate_promotion_member_even_when_digest_matches() -> No
         d17_plan.to_canonical_json(), releases, snapshot_writer=_snapshot_writer
     )
     canonical_body = _canonical_bytes(receipt["payload"])
-    body = b'{"schema":"EvaluationReleasePromotionReceipt/v6",' + canonical_body[1:]
+    body = b'{"schema":"EvaluationReleasePromotionReceipt/v7",' + canonical_body[1:]
     receipt_evidence = dict(receipt["promotionEvidence"])
     receipt_evidence["sha256"] = "sha256:" + sha256(body).hexdigest()
     bucket = "airflow-serp-evidence"
@@ -778,8 +830,8 @@ def test_d19_builds_scoreless_reference_only_paired_request_v5(
     promotion = {
         "promotionEvidence": plan.payload["evaluation_release_promotion_evidence"],
         "promotion": {
-            "schema": "EvaluationReleasePromotionReceipt/v6",
-            "evaluationReleaseContractVersion": "serp-ci-evaluation-release-evidence/v6",
+                "schema": "EvaluationReleasePromotionReceipt/v7",
+                "evaluationReleaseContractVersion": "serp-ci-evaluation-release-evidence/v7",
             "promotionId": "all-nine-eval-2026-07-15",
             "tenantId": TENANT_ID,
             "registryResourceId": RESOURCE_ID,

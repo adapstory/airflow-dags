@@ -23,6 +23,14 @@ from urllib.request import ProxyHandler, Request, build_opener, urlopen
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import rfc8785
+from adapstory_serp_pipeline.orchestration.vault_transit_attestation import (
+    VaultTransitClient,
+    verify_artifact_attestation,
+)
+from adapstory_serp_pipeline.registry.evaluation_release_contract import (
+    normalize_airflow_runtime_terminal_activation,
+    normalize_runtime_terminal_activation_binding,
+)
 
 from dags.public_docs_crawler import CrawlResponse, crawl_public_docs
 from dags.serp_public_docs_seed_catalog import (
@@ -60,9 +68,9 @@ _PIPELINE_CLI_CONTRACT_VERSION = "serp-airflow-pipeline-cli-bridge/v1"
 _AIRFLOW_ARTIFACT_CONTRACT_VERSION = "serp-airflow-artifact-writer/v1"
 _EVAL_CONTRACT_VERSION = "2026.07.2"
 _METRIC_COMPATIBILITY_CONTRACT_VERSION = "serp-suite-metric-compatibility/v1"
-_CI_EVALUATION_RELEASE_CONTRACT_VERSION = "serp-ci-evaluation-release-evidence/v6"
+_CI_EVALUATION_RELEASE_CONTRACT_VERSION = "serp-ci-evaluation-release-evidence/v7"
 _EVALUATION_RELEASE_SCHEMA = "EvaluationRelease/v3"
-_EVALUATION_RELEASE_PROMOTION_SCHEMA = "EvaluationReleasePromotionReceipt/v6"
+_EVALUATION_RELEASE_PROMOTION_SCHEMA = "EvaluationReleasePromotionReceipt/v7"
 _BENCHMARK_SUBSTRATE_SOURCE_SET_SCHEMA = "BenchmarkExecutionSubstrateSourceSet/v2"
 _BENCHMARK_SUBSTRATE_SOURCE_SET_URI_PATTERN = (
     r"s3://airflow-serp-evidence/serp-evals/ci-benchmark-substrates-[1-9][0-9]*/source-set\.json"
@@ -73,6 +81,8 @@ _PAIRED_EVALUATION_VERIFICATION_EVIDENCE_SCHEMA = "PairedEvaluationVerificationE
 _D19_OBSERVED_NORMALIZED_SCORE_CELLS_SCHEMA = "D19ObservedNormalizedScoreCells/v1"
 _PAIRED_EVALUATION_FINAL_RECEIPT_PURPOSE = "serp-paired-evaluation-final-receipt"
 _D19_RUN_HISTORY_OBSERVATION_PURPOSE = "serp-d19-run-history-observation"
+_RUNTIME_BUILD_DRAFT_ATTESTATION_PURPOSE = "serp-airflow-runtime-build-draft"
+_RUNTIME_TERMINAL_ATTESTATION_PURPOSE = "serp-airflow-runtime-terminal-attestation"
 _PAIRED_EVALUATION_ATTESTATION_PURPOSES = {
     "evaluationObjective": "serp-evaluation-objective",
     "evaluationReferenceSet": "serp-evaluation-reference-set",
@@ -84,6 +94,8 @@ _PAIRED_EVALUATION_PURPOSE_TRANSIT_KEYS = {
     "serp-evaluation-execution-manifest": "serp-evaluation-runtime",
     _PAIRED_EVALUATION_FINAL_RECEIPT_PURPOSE: "serp-evaluation-runtime",
     _D19_RUN_HISTORY_OBSERVATION_PURPOSE: "serp-d19-history-observation",
+    _RUNTIME_BUILD_DRAFT_ATTESTATION_PURPOSE: "serp-evaluation-authority",
+    _RUNTIME_TERMINAL_ATTESTATION_PURPOSE: "serp-evaluation-authority",
 }
 _BENCHMARK_CATALOG_PACK_ACTIVATION_SCHEMA = "BenchmarkCatalogPackActivation/v1"
 _MODEL_PROMOTION_DAG_ID = "serp_model_catalog_promotion"
@@ -2048,6 +2060,7 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
         "registry_resource_type": registry_resource_type,
         "tasks": _tasks(
             (
+                "verify_runtime_terminal_activation_admission",
                 "validate_d19_fence_admission",
                 "validate_benchmark_improvement_wave_plan",
                 "materialize_live_benchmark_catalog",
@@ -2129,21 +2142,11 @@ def _worm_evidence_reference(payload: Mapping[str, Any], field_name: str) -> dic
 def _benchmark_substrate_source_set_evidence(
     payload: Mapping[str, Any], field_name: str
 ) -> dict[str, str]:
-    evidence = _required_mapping(payload, field_name)
-    expected = {"objectLockMode", "s3Uri", "sha256", "versionId"}
-    if set(evidence) != expected:
-        raise ValueError(f"{field_name} must define exactly {sorted(expected)}")
-    s3_uri = _required_str(evidence, "s3Uri")
+    evidence = _worm_evidence_reference(payload, field_name)
+    s3_uri = evidence["s3Uri"]
     if not re.fullmatch(_BENCHMARK_SUBSTRATE_SOURCE_SET_URI_PATTERN, s3_uri):
         raise ValueError(f"{field_name}.s3Uri must be a ci-benchmark-substrates source-set object")
-    if _required_str(evidence, "objectLockMode") != "COMPLIANCE":
-        raise ValueError(f"{field_name} must declare COMPLIANCE object lock")
-    return {
-        "objectLockMode": "COMPLIANCE",
-        "s3Uri": s3_uri,
-        "sha256": _required_sha256_prefixed(evidence, "sha256"),
-        "versionId": _required_str(evidence, "versionId"),
-    }
+    return evidence
 
 
 def _load_benchmark_substrate_source_set_evidence(
@@ -2292,6 +2295,26 @@ def load_governed_model_releases(
     return {"baselineRelease": baseline, "candidateRelease": candidate}
 
 
+def verify_governed_model_releases_terminal_activation(
+    plan_json: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    """Freshly verify both terminal runtime attestations before D17 may seal.
+
+    This function is intentionally executed by the dedicated read/verify-only
+    Airflow identity.  It is separate from release construction so a writer
+    identity can never mint its own admission decision.
+    """
+
+    releases = load_governed_model_releases(plan_json)
+    for role in ("baselineRelease", "candidateRelease"):
+        release = _required_mapping(releases, role)
+        _verify_runtime_terminal_activation_with_vault(
+            _required_mapping(release, "release")["runtimeTerminalActivation"],
+            field_name=f"{role}.runtimeTerminalActivation",
+        )
+    return releases
+
+
 def write_model_catalog_promotion_receipt(
     plan_json: Mapping[str, Any] | str,
     releases: Mapping[str, Any],
@@ -2395,6 +2418,34 @@ def load_model_catalog_promotion_snapshot(
     return {"promotionEvidence": receipt_evidence, "promotion": normalized}
 
 
+def verify_model_catalog_promotion_terminal_activation(
+    plan_json: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    """Re-verify D17's exact release runtime attestations before D19 starts."""
+
+    snapshot = load_model_catalog_promotion_snapshot(plan_json)
+    promotion = _required_mapping(snapshot, "promotion")
+    release_evidence = tuple(
+        (
+            role,
+            _worm_evidence_reference(_required_mapping(promotion, role), "evidence"),
+        )
+        for role in ("baselineRelease", "candidateRelease")
+    )
+    client = _s3_read_client(*(evidence["s3Uri"] for _, evidence in release_evidence))
+    for role, evidence in release_evidence:
+        release = _load_governed_evaluation_release(
+            evidence,
+            field_name=f"{role}.evidence",
+            s3_client=client,
+        )
+        _verify_runtime_terminal_activation_with_vault(
+            _required_mapping(release, "release")["runtimeTerminalActivation"],
+            field_name=f"{role}.runtimeTerminalActivation",
+        )
+    return snapshot
+
+
 def load_benchmark_pack_lifecycle_result_snapshot(
     plan_json: Mapping[str, Any] | str,
     promotion_snapshot: Mapping[str, Any],
@@ -2467,6 +2518,101 @@ def _load_worm_json_evidence(
     return _canonical_json_object_bytes(payload, field_name)
 
 
+def _load_runtime_terminal_activation(
+    runtime_binding_evidence: Mapping[str, str],
+    *,
+    field_name: str,
+    s3_client: Any,
+) -> dict[str, Any]:
+    """Resolve one terminal runtime activation without trusting a build-stage result.
+
+    The release points at a sealed binding, never at a mutable or pre-terminal
+    build receipt.  Every referenced WORM object is read back before the
+    activation may contribute a benchmark source-set identity.
+    """
+
+    binding_payload = _load_worm_json_evidence(
+        runtime_binding_evidence,
+        field_name=f"{field_name}.runtimeTerminalActivationBinding",
+        s3_client=s3_client,
+    )
+    try:
+        binding = normalize_runtime_terminal_activation_binding(
+            binding_payload,
+            field_name=f"{field_name}.runtimeTerminalActivationBinding",
+        )
+    except ValueError as exc:
+        raise ValueError(
+            f"{field_name} runtime terminal activation binding is invalid: {exc}"
+        ) from exc
+    runtime_build_draft = _load_worm_json_evidence(
+        binding["runtimeBuildDraftEvidence"],
+        field_name=f"{field_name}.runtimeBuildDraftEvidence",
+        s3_client=s3_client,
+    )
+    terminal_attestation = _load_worm_json_evidence(
+        binding["terminalBuildAttestationEvidence"],
+        field_name=f"{field_name}.terminalBuildAttestationEvidence",
+        s3_client=s3_client,
+    )
+    draft_transit_attestation = _load_worm_json_evidence(
+        binding["runtimeBuildDraftVaultTransitEvidence"],
+        field_name=f"{field_name}.runtimeBuildDraftVaultTransitEvidence",
+        s3_client=s3_client,
+    )
+    terminal_transit_attestation = _load_worm_json_evidence(
+        binding["terminalBuildAttestationVaultTransitEvidence"],
+        field_name=f"{field_name}.terminalBuildAttestationVaultTransitEvidence",
+        s3_client=s3_client,
+    )
+    try:
+        source_set_evidence = normalize_airflow_runtime_terminal_activation(
+            binding_payload,
+            terminal_attestation=terminal_attestation,
+            runtime_build_draft=runtime_build_draft,
+            field_name=f"{field_name}.runtimeTerminalActivation",
+        )
+    except ValueError as exc:
+        raise ValueError(f"{field_name} terminal runtime activation is invalid: {exc}") from exc
+    return {
+        "binding": binding,
+        "bindingPayload": dict(binding_payload),
+        "draftTransitAttestation": dict(draft_transit_attestation),
+        "runtimeBuildDraft": dict(runtime_build_draft),
+        "sourceSetEvidence": source_set_evidence,
+        "terminalAttestation": dict(terminal_attestation),
+        "terminalTransitAttestation": dict(terminal_transit_attestation),
+    }
+
+
+def _verify_runtime_terminal_activation_with_vault(
+    activation: Mapping[str, Any], *, field_name: str
+) -> None:
+    """Perform fresh Transit verification with the fixed admission identity."""
+
+    try:
+        client = VaultTransitClient.from_environment(
+            expected_service_account_namespace="airflow",
+            expected_service_account_name="serp-evaluation-admission-verifier",
+            expected_token_policy="serp-evaluation-admission-attestor",
+        )
+        binding = _required_mapping(activation, "binding")
+        verify_artifact_attestation(
+            _required_mapping(activation, "draftTransitAttestation"),
+            expected_subject=_required_mapping(binding, "runtimeBuildDraftEvidence"),
+            expected_purpose=_RUNTIME_BUILD_DRAFT_ATTESTATION_PURPOSE,
+            live_verify=client.verify_statement,
+        )
+        verify_artifact_attestation(
+            _required_mapping(activation, "terminalTransitAttestation"),
+            expected_subject=_required_mapping(binding, "terminalBuildAttestationEvidence"),
+            expected_purpose=_RUNTIME_TERMINAL_ATTESTATION_PURPOSE,
+            live_verify=client.verify_statement,
+        )
+    except ValueError as exc:
+        raise ValueError(f"{field_name} runtime terminal Transit verification failed") from exc
+
+
 def _normalize_evaluation_release(
     payload: Mapping[str, Any], *, field_name: str, s3_client: Any
 ) -> dict[str, Any]:
@@ -2505,18 +2651,13 @@ def _normalize_evaluation_release(
     if len(set(profile_digests)) != len(profile_digests):
         raise ValueError(f"{field_name} suite profile digests must be unique")
     runtime_evidence = _worm_evidence_reference(payload, "runtimeEvidence")
-    runtime = _load_worm_json_evidence(
-        runtime_evidence, field_name=f"{field_name}.runtimeEvidence", s3_client=s3_client
+    runtime_activation = _load_runtime_terminal_activation(
+        runtime_evidence,
+        field_name=f"{field_name}.runtimeEvidence",
+        s3_client=s3_client,
     )
-    if _required_str(runtime, "result") != "SUCCESS":
-        raise ValueError(f"{field_name} runtime evidence is not a successful signed build")
-    if not _required_str(runtime, "jenkinsBuildUrl").startswith(
-        "https://jenkins.adapstory.com/job/infra-build/"
-    ):
-        raise ValueError(f"{field_name} runtime evidence is not owned by Jenkins")
-    _required_sha256_prefixed(runtime, "digest")
     benchmark_substrate_source_set_evidence = _load_benchmark_substrate_source_set_evidence(
-        runtime,
+        runtime_activation["runtimeBuildDraft"],
         field_name=f"{field_name}.runtimeEvidence.benchmarkSubstrateSourceSetEvidence",
         s3_client=s3_client,
     )
@@ -2555,6 +2696,7 @@ def _normalize_evaluation_release(
         **release_core,
         "releaseDigest": release_digest,
         "benchmarkSubstrateSourceSetEvidence": benchmark_substrate_source_set_evidence,
+        "runtimeTerminalActivation": runtime_activation,
     }
 
 
@@ -4364,20 +4506,9 @@ def _load_benchmark_supply_attestations(evidence: object, *, s3_client: Any | No
 
 
 def _validated_compact_worm_handle(value: object, field_name: str) -> dict[str, str]:
-    if not isinstance(value, Mapping) or set(value) != {
-        "objectLockMode",
-        "s3Uri",
-        "sha256",
-        "versionId",
-    }:
-        raise ValueError(f"{field_name} evidence shape is invalid")
-    handle = {key: _required_str(value, key) for key in value}
-    if handle["objectLockMode"] != "COMPLIANCE":
-        raise ValueError(f"{field_name} must declare COMPLIANCE object lock")
-    if not re.fullmatch(r"sha256:[0-9a-f]{64}", handle["sha256"]):
-        raise ValueError(f"{field_name} digest must be sha256:<64 lowercase hex>")
-    _artifact_ref(field_name, handle["s3Uri"])
-    return handle
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{field_name} evidence must be a mapping")
+    return _worm_evidence_reference({field_name: value}, field_name)
 
 
 def _execution_substrate_source_set_from_env() -> dict[str, dict[str, bytes]]:
