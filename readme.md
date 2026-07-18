@@ -130,10 +130,14 @@ SERP eval DAG contracts:
   caller-supplied baseline/candidate/replay/model-governance selection and every
   `candidate_evaluation` score/result payload. The D19 scheduler re-reads that
   exact `EvaluationReleasePromotionReceipt/v7` and both referenced release
-  manifests before it derives the reference-only `PairedEvaluationRequest/v5`.
-  That request binds the promotion, releases, BC21 evaluation binding, metric
-  matrix, `evaluationObjectiveEvidence`, and exact catalog evidence; no older
-  request, promotion, or objective alias is accepted.
+  manifests before it derives the reference-only `PairedEvaluationRequest/v6`.
+  D17 and D19 both resolve and validate the detached `EvaluationObjective/v6`
+  object itself: its content-addressed version, fixed five-run LCB95 method,
+  non-weakenable 0.90 candidate and retention floors, and the exact canonical
+  nine metric cells. That request binds the promotion, releases, BC21
+  evaluation binding, metric matrix, `evaluationObjectiveEvidence`, and exact
+  catalog evidence; no older request, promotion, or objective alias is
+  accepted.
   The DAG derives `airflow-plan.json`, `improvement-spec.json`, a restricted
   acquisition-pod materialized v5 `benchmark-catalog.json` and receipt. Every
   ready suite has the exact role-keyed execution-substrate inventory retained
@@ -145,8 +149,8 @@ SERP eval DAG contracts:
   deterministic operation directory. The packaged pipeline evaluator is the
   sole result authority; its immutable receipt cannot share or be overwritten
   by the Airflow stdout control artifact. Airflow projects exactly the
-  executor-observed nine baseline/candidate normalized cells and the receipt's
-  exact `PairedBenchmarkScore/v1` into the linked COMPLIANCE-locked
+  executor-observed nine baseline/candidate normalized cells and the executor's
+  `serp-paired-evaluation/v6` receipt-owned `PairedBenchmarkScore/v2` into the linked COMPLIANCE-locked
   `D19ObservedNormalizedScoreCells/v2` artifact. The scorecard and its
   all-nine canonical scalar are checked against those same cells and retained
   verbatim with the receipt's WORM handle in

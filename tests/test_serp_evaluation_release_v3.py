@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 import rfc8785
+from adapstory_serp_pipeline.benchmark.native_suite_scoring import suite_metric_profile
 
 import dags.serp_eval_contracts as serp_eval_contracts
 from dags.serp_eval_contracts import (
@@ -343,21 +344,73 @@ def _release_pair(
         {"schema": "MetricCompatibilityMatrix/v1", "suiteMetricFamilies": []},
         objects,
     )
-    evaluation_objective_evidence = _handle(
-        "evaluation-objective",
-        {
-            "metricCells": [],
-            "objectiveId": "serp-all-nine-quality",
-            "schema": "EvaluationObjective/v5",
-            "version": "serp-all-nine-quality-444444444444.v5",
-        },
-        objects,
+    metric_cells: list[dict[str, Any]] = []
+    for suite_id in MANDATORY_SERP_BENCHMARK_SUITES:
+        primary_metric = suite_metric_profile(suite_id)["primaryMetric"]
+        assert isinstance(primary_metric, Mapping)
+        metric_cell = {
+            "aggregation": primary_metric["aggregation"],
+            "maximumScore": primary_metric["maximumScore"],
+            "metricFamily": primary_metric["metricFamily"],
+            "metricId": primary_metric["metricId"],
+            "referenceAuthority": "official",
+            "referenceEvidence": component(
+                f"evaluation-metric-reference-{suite_id}",
+                {
+                    "aggregation": primary_metric["aggregation"],
+                    "maximumScore": primary_metric["maximumScore"],
+                    "metricFamily": primary_metric["metricFamily"],
+                    "metricId": primary_metric["metricId"],
+                    "referenceAuthority": "official",
+                    "referenceScore": 0.9,
+                    "schema": "EvaluationMetricReference/v1",
+                    "suiteId": suite_id,
+                },
+            ),
+            "referenceScore": 0.9,
+            "suiteId": suite_id,
+        }
+        metric_cells.append(metric_cell)
+    reference_set_evidence = component(
+        "evaluation-reference-set",
+        {"metricReferences": metric_cells, "schema": "EvaluationReferenceSet/v1"},
     )
     evaluation_objective_attestation_evidence = _handle(
         "evaluation-objective-attestation",
         {"schema": "ArtifactSignatureAttestationReceipt/v2"},
         objects,
     )
+    evaluation_objective = {
+        "bootstrapConfidenceLevel": 0.95,
+        "bootstrapSampleCount": 10_000,
+        "metricCells": metric_cells,
+        "minimumCandidateNormalizedLcb95": 0.9,
+        "minimumCandidateNormalizedMean": 0.9,
+        "minimumBaselineRetentionLcb95ToMean": 0.9,
+        "minimumPairedNormalizedDeltaLcb95": 0.0,
+        "objectiveId": "serp-all-nine-quality",
+        "pairedRunCount": 5,
+        "referenceAuthority": {
+            "authorityId": "serp-all-nine-reference-set",
+            "evidence": reference_set_evidence,
+            "hardcoded": False,
+            "kind": "official-harness",
+            "referenceScore": 0.9,
+            "scoreOrigin": "official-harness-result",
+            "validationStatus": "passed",
+            "version": reference_set_evidence["versionId"],
+        },
+        "referenceSetEvidence": reference_set_evidence,
+        "referenceSetAttestationEvidence": evaluation_objective_attestation_evidence,
+        "requiredConsecutiveAcceptedEvaluations": 3,
+        "schema": "EvaluationObjective/v6",
+    }
+    evaluation_objective["version"] = (
+        "serp-all-nine-quality-"
+        + sha256(_canonical_bytes(evaluation_objective)).hexdigest()
+        + ".v6"
+    )
+    evaluation_objective_evidence = _handle("evaluation-objective", evaluation_objective, objects)
     bundle = {
         "apiVersion": "serp.adapstory.ai/v2alpha1",
         "contractVersion": "serp-ci-evaluation-release-evidence/v7",
@@ -399,6 +452,57 @@ def _reference(name: str, digest: str = "a") -> dict[str, str]:
         "objectLockMode": "COMPLIANCE",
         "retainUntil": "2027-07-15T00:00:00Z",
     }
+
+
+def _evaluation_objective_v6_fixture() -> dict[str, Any]:
+    reference_set_evidence = _reference("evaluation-reference-set", "4")
+    cells: list[dict[str, Any]] = []
+    for suite_id in MANDATORY_SERP_BENCHMARK_SUITES:
+        primary_metric = suite_metric_profile(suite_id)["primaryMetric"]
+        assert isinstance(primary_metric, Mapping)
+        cells.append(
+            {
+                "aggregation": primary_metric["aggregation"],
+                "maximumScore": primary_metric["maximumScore"],
+                "metricFamily": primary_metric["metricFamily"],
+                "metricId": primary_metric["metricId"],
+                "referenceAuthority": "official",
+                "referenceEvidence": _reference(
+                    f"evaluation-reference-{suite_id}", format(len(cells), "x")
+                ),
+                "referenceScore": 0.9,
+                "suiteId": suite_id,
+            }
+        )
+    payload: dict[str, Any] = {
+        "bootstrapConfidenceLevel": 0.95,
+        "bootstrapSampleCount": 10_000,
+        "metricCells": cells,
+        "minimumCandidateNormalizedLcb95": 0.9,
+        "minimumCandidateNormalizedMean": 0.9,
+        "minimumBaselineRetentionLcb95ToMean": 0.9,
+        "minimumPairedNormalizedDeltaLcb95": 0.0,
+        "objectiveId": "serp-all-nine-quality",
+        "pairedRunCount": 5,
+        "referenceAuthority": {
+            "authorityId": "serp-all-nine-reference-set",
+            "evidence": reference_set_evidence,
+            "hardcoded": False,
+            "kind": "official-harness",
+            "referenceScore": 0.9,
+            "scoreOrigin": "official-harness-result",
+            "validationStatus": "passed",
+            "version": reference_set_evidence["versionId"],
+        },
+        "referenceSetEvidence": reference_set_evidence,
+        "referenceSetAttestationEvidence": _reference("evaluation-reference-set-attestation", "5"),
+        "requiredConsecutiveAcceptedEvaluations": 3,
+        "schema": "EvaluationObjective/v6",
+    }
+    payload["version"] = (
+        "serp-all-nine-quality-" + sha256(_canonical_bytes(payload)).hexdigest() + ".v6"
+    )
+    return payload
 
 
 def _worm_object(
@@ -579,6 +683,34 @@ def test_d17_receipt_derives_one_strict_event_d6_then_native_d19_conf() -> None:
         "runId": event_conf["eventD6RunId"],
         "runType": "manual",
     }
+
+
+def test_d17_promotion_writer_uses_canonical_retain_until_not_executor_receipt_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, objects = _release_pair()
+    plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
+    releases = load_governed_model_releases(plan.to_canonical_json(), s3_client=_FakeS3(objects))
+
+    def canonical_writer(artifact_path: str, **kwargs: object) -> dict[str, str]:
+        return {
+            "artifactETag": "a" * 64,
+            "artifactPath": artifact_path,
+            "artifactSha256": "a" * 64,
+            "artifactType": str(kwargs["artifact_type"]),
+            "artifactVersionId": "canonical-writer-version-001",
+            "contractVersion": "serp-airflow-artifact-writer/v1",
+            "objectLockMode": "COMPLIANCE",
+            "operationId": str(kwargs["operation_id"]),
+            "retainUntil": "2027-07-15T00:00:00Z",
+            "retentionDays": "365",
+            "status": "written",
+        }
+
+    monkeypatch.setattr(serp_eval_contracts, "write_immutable_evidence_snapshot", canonical_writer)
+    receipt = write_model_catalog_promotion_receipt(plan.to_canonical_json(), releases)
+
+    assert receipt["promotionEvidence"]["retainUntil"] == "2027-07-15T00:00:00Z"
 
 
 def test_d17_event_d6_rejects_mismatched_receipt_manual_scheduled_mixes_and_inline_d19() -> None:
@@ -783,6 +915,30 @@ def test_d17_rejects_noncanonical_release_bytes_even_when_digest_matches() -> No
         load_governed_model_releases(plan.to_canonical_json(), s3_client=_FakeS3(objects))
 
 
+def test_d17_rejects_an_opaque_or_incomplete_evaluation_objective_v6() -> None:
+    bundle, objects = _release_pair()
+    objective_evidence = bundle["evaluationObjectiveEvidence"]
+    objective = _worm_object(objects, objective_evidence)
+    objective["metricCells"] = []
+    versionless = dict(objective)
+    versionless.pop("version")
+    objective["version"] = (
+        "serp-all-nine-quality-" + sha256(_canonical_bytes(versionless)).hexdigest() + ".v6"
+    )
+    body = _canonical_bytes(objective)
+    bucket = "airflow-serp-evidence"
+    key = objective_evidence["s3Uri"].removeprefix(f"s3://{bucket}/")
+    objects[(bucket, key, objective_evidence["versionId"])] = body
+    bundle["evaluationObjectiveEvidence"] = {
+        **objective_evidence,
+        "sha256": "sha256:" + sha256(body).hexdigest(),
+    }
+    plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
+
+    with pytest.raises(ValueError, match="exact canonical nine cells"):
+        load_governed_model_releases(plan.to_canonical_json(), s3_client=_FakeS3(objects))
+
+
 def test_d17_uses_a_read_only_session_for_the_exact_ci_release_operation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -801,6 +957,7 @@ def test_d17_uses_a_read_only_session_for_the_exact_ci_release_operation(
         (
             bundle["baselineReleaseEvidence"]["s3Uri"],
             bundle["candidateReleaseEvidence"]["s3Uri"],
+            bundle["evaluationObjectiveEvidence"]["s3Uri"],
         )
     ]
 
@@ -876,6 +1033,44 @@ def test_d19_rejects_v5_promotion_receipt_without_compatibility_fallback() -> No
     d19_plan = build_benchmark_improvement_wave_plan(conf)
 
     with pytest.raises(ValueError, match="D17 promotion receipt schema is unsupported"):
+        load_model_catalog_promotion_snapshot(
+            d19_plan.to_canonical_json(), s3_client=_FakeS3(objects)
+        )
+
+
+def test_d19_rejects_an_opaque_or_incomplete_evaluation_objective_v6() -> None:
+    bundle, objects = _release_pair()
+    d17_plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
+    releases = load_governed_model_releases(
+        d17_plan.to_canonical_json(), s3_client=_FakeS3(objects)
+    )
+    receipt = write_model_catalog_promotion_receipt(
+        d17_plan.to_canonical_json(), releases, snapshot_writer=_snapshot_writer
+    )
+    objective_evidence = bundle["evaluationObjectiveEvidence"]
+    objective = _worm_object(objects, objective_evidence)
+    objective["metricCells"] = []
+    versionless = dict(objective)
+    versionless.pop("version")
+    objective["version"] = (
+        "serp-all-nine-quality-" + sha256(_canonical_bytes(versionless)).hexdigest() + ".v6"
+    )
+    body = _canonical_bytes(objective)
+    bucket = "airflow-serp-evidence"
+    objective_key = objective_evidence["s3Uri"].removeprefix(f"s3://{bucket}/")
+    objects[(bucket, objective_key, objective_evidence["versionId"])] = body
+    tampered_objective_evidence = {
+        **objective_evidence,
+        "sha256": "sha256:" + sha256(body).hexdigest(),
+    }
+    tampered_receipt = json.loads(json.dumps(receipt["payload"]))
+    tampered_receipt["evaluationObjectiveEvidence"] = tampered_objective_evidence
+    tampered_receipt_evidence = _handle("opaque-objective-promotion", tampered_receipt, objects)
+    conf = _d19_conf()
+    conf["evaluation_release_promotion_evidence"] = tampered_receipt_evidence
+    d19_plan = build_benchmark_improvement_wave_plan(conf)
+
+    with pytest.raises(ValueError, match="exact canonical nine cells"):
         load_model_catalog_promotion_snapshot(
             d19_plan.to_canonical_json(), s3_client=_FakeS3(objects)
         )
@@ -1003,6 +1198,7 @@ def test_d19_builds_scoreless_reference_only_paired_request_v5(
     candidate = _reference("release-candidate", "1")
     promotion = {
         "promotionEvidence": plan.payload["evaluation_release_promotion_evidence"],
+        "evaluationObjective": _evaluation_objective_v6_fixture(),
         "promotion": {
             "schema": "EvaluationReleasePromotionReceipt/v7",
             "evaluationReleaseContractVersion": "serp-ci-evaluation-release-evidence/v7",
@@ -1031,6 +1227,7 @@ def test_d19_builds_scoreless_reference_only_paired_request_v5(
     monkeypatch.setattr(
         "dags.serp_eval_contracts.write_immutable_evidence_snapshot", _snapshot_writer
     )
+    mcp_objects: dict[tuple[str, str, str], bytes] = {}
     lifecycle_result = {
         "schema": "BC21AllNineBenchmarkPackLifecycleResult/v1",
         "tenantId": TENANT_ID,
@@ -1043,9 +1240,7 @@ def test_d19_builds_scoreless_reference_only_paired_request_v5(
         "candidateReleaseEvidence": candidate,
         "baselineReleaseDigest": promotion["promotion"]["baselineRelease"]["releaseDigest"],
         "candidateReleaseDigest": promotion["promotion"]["candidateRelease"]["releaseDigest"],
-        "packMaterialBindings": [
-            {"suiteId": suite_id} for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
-        ],
+        "packMaterialBindings": _d19_pack_material_bindings(mcp_objects),
         "suiteExecutionBindings": [
             {"suiteId": suite_id} for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
         ],
@@ -1053,11 +1248,15 @@ def test_d19_builds_scoreless_reference_only_paired_request_v5(
         "productionActivationRequested": False,
     }
     artifact = write_paired_eval_request_artifact(
-        plan.to_canonical_json(), _catalog_snapshot(plan), promotion, lifecycle_result
+        plan.to_canonical_json(),
+        _catalog_snapshot(plan),
+        promotion,
+        lifecycle_result,
+        s3_client=_FakeS3(mcp_objects),
     )
     request = artifact["payload"]
 
-    assert request["schema"] == "PairedEvaluationRequest/v5"
+    assert request["schema"] == "PairedEvaluationRequest/v6"
     assert (
         request["evaluationReleasePromotionEvidence"]
         == _d19_conf()["evaluation_release_promotion_evidence"]
@@ -1122,6 +1321,103 @@ def test_d19_rejects_caller_supplied_metric_authority(field: str) -> None:
 
     with pytest.raises(ValueError, match="inline D19 field is forbidden"):
         build_benchmark_improvement_wave_plan(conf)
+
+
+def _d19_pack_material_bindings(
+    objects: dict[tuple[str, str, str], bytes],
+) -> list[dict[str, object]]:
+    bindings: list[dict[str, object]] = []
+    for index, suite_id in enumerate(MANDATORY_SERP_BENCHMARK_SUITES):
+        bindings.append(
+            {
+                "suiteId": suite_id,
+                "baseline": _d19_pack_material_side(
+                    suite_id,
+                    "baseline",
+                    index,
+                    objects,
+                ),
+                "candidate": _d19_pack_material_side(
+                    suite_id,
+                    "candidate",
+                    index,
+                    objects,
+                ),
+            }
+        )
+    return bindings
+
+
+def _d19_pack_material_side(
+    suite_id: str,
+    side: str,
+    index: int,
+    objects: dict[tuple[str, str, str], bytes],
+) -> dict[str, object]:
+    side_digit = "1" if side == "baseline" else "2"
+    digest_digit = "a" if side == "baseline" else "b"
+    profile_digit = "c" if side == "baseline" else "d"
+    pack_id = f"00000000-0000-4000-a000-{side_digit}{index:011d}"
+    pack_version_id = f"00000000-0000-4000-a000-{side_digit}{index + 100:011d}"
+    profile_sha256 = "sha256:" + profile_digit * 64
+    receipt_evidence = _handle(
+        f"pack-receipt-{suite_id.casefold().replace(' ', '-')}-{side}",
+        {
+            "packId": pack_id,
+            "packVersionId": pack_version_id,
+            "profileSha256": profile_sha256,
+            "schema": "BenchmarkPackBuildReceipt/v1",
+            "suiteId": suite_id,
+        },
+        objects,
+    )
+    snapshot_id = f"pack-snapshot:v2:{suite_id.casefold().replace(' ', '-')}:{side}"
+    snapshot_evidence = _handle(
+        f"hermetic-snapshot-{suite_id.casefold().replace(' ', '-')}-{side}",
+        {
+            "contract_version": "SerpMcpHermeticPackSnapshot/v2",
+            "pack_build_receipt_sha256": receipt_evidence["sha256"],
+            "pack_id": pack_id,
+            "pack_snapshot_id": snapshot_id,
+            "pack_version_id": pack_version_id,
+            "tenant_id": TENANT_ID,
+        },
+        objects,
+    )
+    runtime_binding_evidence = _handle(
+        f"mcp-runtime-binding-{suite_id.casefold().replace(' ', '-')}-{side}",
+        {
+            "contractVersion": "BenchmarkPackMcpRuntimeBinding/v1",
+            "mcpRuntimeContractVersion": "SerpMcpHermeticBenchmarkRuntime/v1",
+            "packBuildReceiptEvidence": receipt_evidence,
+            "packBuildReceiptSha256": receipt_evidence["sha256"],
+            "packId": pack_id,
+            "packSnapshotId": snapshot_id,
+            "packSnapshotSha256": snapshot_evidence["sha256"],
+            "packVersionId": pack_version_id,
+            "snapshotContractVersion": "SerpMcpHermeticPackSnapshot/v2",
+            "snapshotEvidence": snapshot_evidence,
+        },
+        objects,
+    )
+    return {
+        "executionSubstrateSha256": "sha256:" + digest_digit * 64,
+        "mcpRuntimeBindingEvidence": runtime_binding_evidence,
+        "metricProfileSha256": profile_sha256,
+        "officialHarnessIdentitySha256": "sha256:" + "e" * 64,
+        "packBuildReceiptEvidence": receipt_evidence,
+        "packBuildReceiptSha256": receipt_evidence["sha256"],
+        "packId": pack_id,
+        "packProfileEvidence": _reference(
+            f"pack-profile-{suite_id.casefold().replace(' ', '-')}-{side}",
+            profile_digit,
+        ),
+        "packProfileSha256": profile_sha256,
+        "packVersionId": pack_version_id,
+        "releaseManifestSha256": "sha256:" + "f" * 64,
+        "side": side,
+        "suiteId": suite_id,
+    }
 
 
 def _catalog_snapshot(plan: Any) -> dict[str, object]:

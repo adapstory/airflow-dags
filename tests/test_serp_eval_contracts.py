@@ -4,6 +4,7 @@ import ast
 import importlib
 import io
 import json
+import math
 import sys
 import types
 from collections.abc import Mapping
@@ -19,6 +20,7 @@ from urllib.request import Request
 from uuid import UUID
 
 import pytest
+from adapstory_serp_pipeline.benchmark.native_suite_scoring import suite_metric_profile
 
 import dags.serp_eval_contracts as serp_eval_contracts_module
 from dags.serp_benchmark_catalog import (
@@ -2602,9 +2604,18 @@ def test_d19_persists_observed_normalized_score_cells_and_identity_bound_verific
 def test_d19_materializes_observed_score_cells_for_a_rejected_evaluation() -> None:
     operation_id = "serp-airflow-benchmark-improvement-wave-rejected"
     paired = _d19_observed_paired_evaluation(operation_id)
+    first_cell = paired["metricCells"][0]
+    first_cell["candidateNormalizedLcb95"] = 0.8
+    first_cell["candidateNormalizedMean"] = 0.8
+    first_cell["meanCandidateScore"] = 0.72
+    paired["benchmarkScore"] = _d19_paired_benchmark_score(paired["metricCells"])
     paired.update(
         {
-            "rejectionReasons": ["candidate-below-baseline-mean:APIBench:observed-metric-1"],
+            "rejectionReasons": [
+                "candidate-normalized-mean-not-met:APIBench:answer-quality:observed-metric-1",
+                "candidate-normalized-lcb95-not-met:APIBench:answer-quality:observed-metric-1",
+                "baseline-retention-lcb95-to-mean-not-met:APIBench:answer-quality:observed-metric-1",
+            ],
             "status": "rejected",
         }
     )
@@ -2623,9 +2634,114 @@ def test_d19_materializes_observed_score_cells_for_a_rejected_evaluation() -> No
     assert payload["schema"] == "D19ObservedNormalizedScoreCells/v2"
     assert payload["summary"]["status"] == "rejected"
     assert payload["summary"]["rejectionReasons"] == [
-        "candidate-below-baseline-mean:APIBench:observed-metric-1"
+        "candidate-normalized-mean-not-met:APIBench:answer-quality:observed-metric-1",
+        "candidate-normalized-lcb95-not-met:APIBench:answer-quality:observed-metric-1",
+        "baseline-retention-lcb95-to-mean-not-met:APIBench:answer-quality:observed-metric-1",
     ]
     assert len(payload["cells"]) == len(MANDATORY_SERP_BENCHMARK_SUITES)
+
+
+def test_d19_materializes_insufficient_baseline_as_a_rejected_score() -> None:
+    operation_id = "serp-airflow-benchmark-improvement-wave-insufficient-baseline"
+    paired = _d19_observed_paired_evaluation(operation_id)
+    first_cell = paired["metricCells"][0]
+    first_cell["baselineNormalizedMean"] = 0.0
+    first_cell["meanBaselineScore"] = 0.0
+    paired["benchmarkScore"] = _d19_paired_benchmark_score(paired["metricCells"])
+    paired.update(
+        {
+            "rejectionReasons": [
+                "insufficient-baseline-normalized-mean:APIBench:answer-quality:observed-metric-1"
+            ],
+            "status": "rejected",
+        }
+    )
+
+    payload = serp_eval_contracts_module._observed_normalized_score_cells_payload(
+        {"pairedEvaluation": paired},
+        operation_id=operation_id,
+        receipt_evidence=_d19_worm_evidence("receipts/insufficient-baseline", "7"),
+        receipt_attestation_evidence=_d19_worm_evidence(
+            "receipts/insufficient-baseline.attestation", "8"
+        ),
+        receipt_status="rejected",
+    )
+
+    benchmark_score = payload["benchmarkScore"]
+    assert benchmark_score["allNineCandidateNormalizedLcb95"] == 0.925
+    assert benchmark_score["allNineBaselineRetentionLcb95ToMean"] is None
+    assert benchmark_score["worstBaselineRetentionCell"] is None
+    aggregates = benchmark_score["supportingAggregates"]
+    assert aggregates["baselineRetentionMeasuredCellCount"] == 8
+    assert aggregates["insufficientBaselineCellCount"] == 1
+    assert aggregates["meanBaselineNormalizedMean"] == pytest.approx(0.8)
+    assert aggregates["meanCandidateNormalizedLcb95"] == pytest.approx(0.925)
+    assert aggregates["meanCandidateNormalizedMean"] == pytest.approx(0.95)
+    assert aggregates["meanReferenceNormalizedPairedDeltaLcb95"] == pytest.approx(0.025)
+    assert aggregates["minimumReferenceNormalizedPairedDeltaLcb95"] == pytest.approx(0.025)
+
+
+def test_d19_rejects_accepted_score_with_insufficient_baseline() -> None:
+    operation_id = "serp-airflow-benchmark-improvement-wave-insufficient-baseline-accepted"
+    paired = _d19_observed_paired_evaluation(operation_id)
+    first_cell = paired["metricCells"][0]
+    first_cell["baselineNormalizedMean"] = 0.0
+    first_cell["meanBaselineScore"] = 0.0
+    paired["benchmarkScore"] = _d19_paired_benchmark_score(paired["metricCells"])
+
+    with pytest.raises(ValueError, match="does not satisfy quality gates"):
+        serp_eval_contracts_module._observed_normalized_score_cells_payload(
+            {"pairedEvaluation": paired},
+            operation_id=operation_id,
+            receipt_evidence=_d19_worm_evidence("receipts/insufficient-baseline-accepted", "7"),
+            receipt_attestation_evidence=_d19_worm_evidence(
+                "receipts/insufficient-baseline-accepted.attestation", "8"
+            ),
+            receipt_status="accepted",
+        )
+
+
+def test_d19_rejects_accepted_score_below_candidate_floor_despite_healthy_retention() -> None:
+    operation_id = "serp-airflow-benchmark-improvement-wave-candidate-floor"
+    paired = _d19_observed_paired_evaluation(operation_id)
+    first_cell = paired["metricCells"][0]
+    first_cell["candidateNormalizedLcb95"] = 0.89
+    paired["benchmarkScore"] = _d19_paired_benchmark_score(paired["metricCells"])
+
+    with pytest.raises(ValueError, match="does not satisfy quality gates"):
+        serp_eval_contracts_module._observed_normalized_score_cells_payload(
+            {"pairedEvaluation": paired},
+            operation_id=operation_id,
+            receipt_evidence=_d19_worm_evidence("receipts/candidate-floor-accepted", "7"),
+            receipt_attestation_evidence=_d19_worm_evidence(
+                "receipts/candidate-floor-accepted.attestation", "8"
+            ),
+            receipt_status="accepted",
+        )
+
+    paired.update(
+        {
+            "rejectionReasons": [
+                "candidate-normalized-lcb95-not-met:APIBench:answer-quality:observed-metric-1"
+            ],
+            "status": "rejected",
+        }
+    )
+    payload = serp_eval_contracts_module._observed_normalized_score_cells_payload(
+        {"pairedEvaluation": paired},
+        operation_id=operation_id,
+        receipt_evidence=_d19_worm_evidence("receipts/candidate-floor-rejected", "7"),
+        receipt_attestation_evidence=_d19_worm_evidence(
+            "receipts/candidate-floor-rejected.attestation", "8"
+        ),
+        receipt_status="rejected",
+    )
+
+    assert payload["benchmarkScore"]["allNineCandidateNormalizedLcb95"] == pytest.approx(0.89)
+    assert payload["benchmarkScore"]["allNineBaselineRetentionLcb95ToMean"] == pytest.approx(
+        0.89 / 0.9
+    )
+    assert payload["summary"]["rejectionReasons"] == paired["rejectionReasons"]
 
 
 def test_d19_score_cells_v2_rejects_legacy_v1_artifact() -> None:
@@ -2674,7 +2790,7 @@ def test_d19_score_cells_v2_requires_receipt_benchmark_score_without_fallback() 
 @pytest.mark.parametrize(
     ("field_name", "value", "message"),
     (
-        ("schema", "PairedBenchmarkScore/v0", "benchmark score schema is unsupported"),
+        ("schema", "PairedBenchmarkScore/v1", "benchmark score schema is unsupported"),
         (
             "canonicalScoreFormula",
             "mean(candidateNormalizedLcb95 across canonical metric cells)",
@@ -2729,13 +2845,20 @@ def test_d19_score_cells_v2_rejects_unknown_receipt_benchmark_score_field() -> N
     ("tamper", "message"),
     (
         ("paired-delta-formula", "benchmark score paired delta formula is unsupported"),
-        ("ratio-formula", "benchmark score ratio diagnostic formula is unsupported"),
+        ("retention-formula", "benchmark score baseline retention formula is unsupported"),
         ("worst-cell", "benchmark score worst cell does not match the limiting cell"),
         (
             "paired-delta-scorecard",
             "benchmark score paired delta scorecard does not match its cells",
         ),
-        ("ratio-scorecard", "benchmark score ratio scorecard does not match its cells"),
+        (
+            "retention-scorecard",
+            "benchmark score baseline retention scorecard does not match its cells",
+        ),
+        (
+            "retention-worst",
+            "benchmark score worst baseline retention cell does not match the limiting cell",
+        ),
         ("supporting-aggregate", "benchmark score supporting aggregates do not match its cells"),
     ),
 )
@@ -2748,18 +2871,18 @@ def test_d19_score_cells_v2_rejects_tampered_benchmark_scorecard_invariants(
     benchmark_score = paired["benchmarkScore"]
     if tamper == "paired-delta-formula":
         benchmark_score["referenceNormalizedPairedDeltaFormula"] = "mean delta"
-    elif tamper == "ratio-formula":
-        benchmark_score["candidateVsBaselineRatioDiagnosticFormula"] = "candidate / baseline"
+    elif tamper == "retention-formula":
+        benchmark_score["baselineRetentionFormula"] = "candidate / baseline"
     elif tamper == "worst-cell":
         benchmark_score["worstCell"]["metricCellId"] = "wrong:metric:cell"
     elif tamper == "paired-delta-scorecard":
         benchmark_score["referenceNormalizedPairedDeltaLcb95ByCell"][0][
             "referenceNormalizedPairedDeltaLcb95"
         ] = 0.024
-    elif tamper == "ratio-scorecard":
-        benchmark_score["candidateVsBaselineRatioDiagnosticByCell"][0][
-            "candidateLcb95ToBaselineMeanRatio"
-        ] = 1.0
+    elif tamper == "retention-scorecard":
+        benchmark_score["baselineRetentionByCell"][0]["baselineRetentionLcb95ToMean"] = 1.0
+    elif tamper == "retention-worst":
+        benchmark_score["worstBaselineRetentionCell"]["metricCellId"] = "wrong:metric:cell"
     else:
         benchmark_score["supportingAggregates"]["meanCandidateNormalizedMean"] = 0.94
 
@@ -2793,6 +2916,70 @@ def test_d19_verification_persistence_rejects_tampered_receipt_identity(
             plan.to_canonical_json(),
             evaluator_result,
             _d19_airflow_run(),
+            s3_client=_D19VerificationS3(objects),
+        )
+
+
+def test_d19_lifecycle_rejects_missing_mcp_runtime_binding_evidence_for_each_side() -> None:
+    plan = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
+    promotion_snapshot = _d19_promotion_snapshot(plan)
+    promotion = serp_eval_contracts_module._validated_d19_promotion_snapshot(
+        json.loads(plan.to_canonical_json()), promotion_snapshot
+    )
+    lifecycle_result = _d19_lifecycle_result(promotion_snapshot)
+
+    with pytest.raises(ValueError, match="mcpRuntimeBindingEvidence"):
+        serp_eval_contracts_module._validated_d19_lifecycle_result(
+            json.loads(plan.to_canonical_json()), promotion, lifecycle_result
+        )
+
+
+@pytest.mark.parametrize(
+    ("tamper", "message"),
+    (
+        ("receipt", "MCP runtime binding receipt evidence is mismatched"),
+        ("pack", "MCP runtime binding packId is mismatched"),
+        ("snapshot", "hermetic MCP snapshot ID is mismatched"),
+    ),
+)
+def test_d19_lifecycle_rejects_mcp_runtime_binding_identity_drift(
+    tamper: str,
+    message: str,
+) -> None:
+    plan = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
+    promotion_snapshot = _d19_promotion_snapshot(plan)
+    promotion = serp_eval_contracts_module._validated_d19_promotion_snapshot(
+        json.loads(plan.to_canonical_json()), promotion_snapshot
+    )
+    lifecycle_result = _d19_lifecycle_result(promotion_snapshot)
+    objects = _attach_d19_mcp_runtime_binding_evidence(lifecycle_result)
+    material_pair = lifecycle_result["packMaterialBindings"][0]
+    assert isinstance(material_pair, dict)
+    material = material_pair["baseline"]
+    assert isinstance(material, dict)
+    runtime_evidence = material["mcpRuntimeBindingEvidence"]
+    assert isinstance(runtime_evidence, dict)
+    raw = objects[(runtime_evidence["s3Uri"], runtime_evidence["versionId"])]
+    binding = json.loads(raw)
+    assert isinstance(binding, dict)
+    if tamper == "receipt":
+        binding["packBuildReceiptEvidence"] = _d19_worm_evidence("foreign-receipt", "9")
+        binding["packBuildReceiptSha256"] = "sha256:" + "9" * 64
+    elif tamper == "pack":
+        candidate = material_pair["candidate"]
+        assert isinstance(candidate, dict)
+        binding["packId"] = candidate["packId"]
+    else:
+        binding["packSnapshotId"] = "pack-snapshot:v2:tampered"
+    material["mcpRuntimeBindingEvidence"] = _d19_worm_payload(
+        f"mcp-runtime-bindings/tampered-{tamper}", binding, objects
+    )
+
+    with pytest.raises(ValueError, match=message):
+        serp_eval_contracts_module._validated_d19_lifecycle_result(
+            json.loads(plan.to_canonical_json()),
+            promotion,
+            lifecycle_result,
             s3_client=_D19VerificationS3(objects),
         )
 
@@ -2836,15 +3023,17 @@ def test_paired_eval_request_derives_canonical_catalog_bindings_as_worm_evidence
     )
     promotion_snapshot = _d19_promotion_snapshot(plan)
     lifecycle_result = _d19_lifecycle_result(promotion_snapshot)
+    mcp_objects = _attach_d19_mcp_runtime_binding_evidence(lifecycle_result)
     request_artifact = write_paired_eval_request_artifact(
         plan.to_canonical_json(),
-        _d19_catalog_snapshot(plan),
-        promotion_snapshot,
-        lifecycle_result,
+        json.dumps(_d19_catalog_snapshot(plan)),
+        json.dumps(promotion_snapshot),
+        json.dumps(lifecycle_result),
+        s3_client=_D19VerificationS3(mcp_objects),
     )
     request = request_artifact["payload"]
 
-    assert request["schema"] == "PairedEvaluationRequest/v5"
+    assert request["schema"] == "PairedEvaluationRequest/v6"
     assert request["evaluationBindingId"] == lifecycle_result["evaluationBindingId"]
     assert request["evaluationBindingEvidence"] == lifecycle_result["evaluationBindingEvidence"]
     assert (
@@ -8563,6 +8752,62 @@ def _d19_worm_evidence(name: str, digest: str) -> dict[str, str]:
     }
 
 
+def _d19_evaluation_objective_v6() -> dict[str, Any]:
+    reference_set_evidence = _d19_worm_evidence("evaluation-reference-set", "6")
+    cells: list[dict[str, Any]] = []
+    for suite_id in MANDATORY_SERP_BENCHMARK_SUITES:
+        primary_metric = suite_metric_profile(suite_id)["primaryMetric"]
+        assert isinstance(primary_metric, Mapping)
+        cells.append(
+            {
+                "aggregation": primary_metric["aggregation"],
+                "maximumScore": primary_metric["maximumScore"],
+                "metricFamily": primary_metric["metricFamily"],
+                "metricId": primary_metric["metricId"],
+                "referenceAuthority": "official",
+                "referenceEvidence": _d19_worm_evidence(
+                    f"evaluation-reference/{suite_id.casefold().replace(' ', '-')}",
+                    format(len(cells), "x"),
+                ),
+                "referenceScore": 0.9,
+                "suiteId": suite_id,
+            }
+        )
+    objective: dict[str, Any] = {
+        "bootstrapConfidenceLevel": 0.95,
+        "bootstrapSampleCount": 10_000,
+        "metricCells": cells,
+        "minimumCandidateNormalizedLcb95": 0.9,
+        "minimumCandidateNormalizedMean": 0.9,
+        "minimumBaselineRetentionLcb95ToMean": 0.9,
+        "minimumPairedNormalizedDeltaLcb95": 0.0,
+        "objectiveId": "serp-all-nine-quality",
+        "pairedRunCount": 5,
+        "referenceAuthority": {
+            "authorityId": "serp-all-nine-reference-set",
+            "evidence": reference_set_evidence,
+            "hardcoded": False,
+            "kind": "official-harness",
+            "referenceScore": 0.9,
+            "scoreOrigin": "official-harness-result",
+            "validationStatus": "passed",
+            "version": reference_set_evidence["versionId"],
+        },
+        "referenceSetEvidence": reference_set_evidence,
+        "referenceSetAttestationEvidence": _d19_worm_evidence(
+            "evaluation-reference-set-attestation", "7"
+        ),
+        "requiredConsecutiveAcceptedEvaluations": 3,
+        "schema": "EvaluationObjective/v6",
+    }
+    objective["version"] = (
+        "serp-all-nine-quality-"
+        + sha256(serp_eval_contracts_module._canonical_json(objective).encode("utf-8")).hexdigest()
+        + ".v6"
+    )
+    return objective
+
+
 def _d19_airflow_run() -> dict[str, str]:
     return {
         "dagId": "serp_benchmark_improvement_wave",
@@ -8707,7 +8952,7 @@ def _d19_observed_paired_evaluation(operation_id: str) -> dict[str, Any]:
         )
     return {
         "benchmarkScore": _d19_paired_benchmark_score(cells),
-        "contractVersion": "serp-paired-evaluation/v5",
+        "contractVersion": "serp-paired-evaluation/v6",
         "metricCells": cells,
         "operationId": operation_id,
         "status": "accepted",
@@ -8725,20 +8970,41 @@ def _d19_paired_benchmark_score(cells: list[dict[str, Any]]) -> dict[str, Any]:
         }
         for cell in cells
     ]
-    worst_cell = score_cells[0]
+    worst_cell = min(score_cells, key=lambda cell: cell["candidateNormalizedLcb95"])
+    retention_by_cell = [
+        {
+            "baselineNormalizedMean": cell["baselineNormalizedMean"],
+            "baselineRetentionLcb95ToMean": (
+                cell["candidateNormalizedLcb95"] / cell["baselineNormalizedMean"]
+                if cell["baselineNormalizedMean"] > 0.0
+                else None
+            ),
+            "candidateNormalizedLcb95": cell["candidateNormalizedLcb95"],
+            "metricCellId": cell["metricCellId"],
+        }
+        for cell in score_cells
+    ]
+    measured_retention_rows = [
+        row for row in retention_by_cell if row["baselineRetentionLcb95ToMean"] is not None
+    ]
+    worst_retention_cell = (
+        min(
+            measured_retention_rows,
+            key=lambda row: cast(float, row["baselineRetentionLcb95ToMean"]),
+        )
+        if len(measured_retention_rows) == len(retention_by_cell)
+        else None
+    )
     return {
+        "allNineBaselineRetentionLcb95ToMean": (
+            worst_retention_cell["baselineRetentionLcb95ToMean"]
+            if worst_retention_cell is not None
+            else None
+        ),
         "allNineCandidateNormalizedLcb95": worst_cell["candidateNormalizedLcb95"],
-        "candidateVsBaselineRatioDiagnosticByCell": [
-            {
-                "candidateLcb95ToBaselineMeanRatio": (
-                    cell["candidateNormalizedLcb95"] / cell["baselineNormalizedMean"]
-                ),
-                "metricCellId": cell["metricCellId"],
-            }
-            for cell in score_cells
-        ],
-        "candidateVsBaselineRatioDiagnosticFormula": (
-            "candidateNormalizedLcb95 / baselineNormalizedMean when baselineNormalizedMean > 0"
+        "baselineRetentionByCell": retention_by_cell,
+        "baselineRetentionFormula": (
+            "min(candidateNormalizedLcb95 / baselineNormalizedMean across canonical metric cells)"
         ),
         "canonicalScoreFormula": "min(candidateNormalizedLcb95 across canonical metric cells)",
         "referenceNormalizedPairedDeltaFormula": (
@@ -8751,16 +9017,33 @@ def _d19_paired_benchmark_score(cells: list[dict[str, Any]]) -> dict[str, Any]:
             }
             for cell in score_cells
         ],
-        "schema": "PairedBenchmarkScore/v1",
+        "schema": "PairedBenchmarkScore/v2",
         "supportingAggregates": {
-            "candidateLcb95ToBaselineMeanRatioMeasuredCellCount": len(score_cells),
-            "candidateLcb95ToBaselineMeanRatioUnavailableCellCount": 0,
-            "meanBaselineNormalizedMean": 0.9,
-            "meanCandidateNormalizedLcb95": 0.925,
-            "meanCandidateNormalizedMean": 0.95,
-            "meanReferenceNormalizedPairedDeltaLcb95": 0.025,
-            "minimumReferenceNormalizedPairedDeltaLcb95": 0.025,
+            "baselineRetentionMeasuredCellCount": len(measured_retention_rows),
+            "insufficientBaselineCellCount": len(score_cells) - len(measured_retention_rows),
+            "meanBaselineNormalizedMean": math.fsum(
+                cell["baselineNormalizedMean"] for cell in score_cells
+            )
+            / len(score_cells),
+            "meanCandidateNormalizedLcb95": math.fsum(
+                cell["candidateNormalizedLcb95"] for cell in score_cells
+            )
+            / len(score_cells),
+            "meanCandidateNormalizedMean": math.fsum(
+                cell["candidateNormalizedMean"] for cell in score_cells
+            )
+            / len(score_cells),
+            "meanReferenceNormalizedPairedDeltaLcb95": math.fsum(
+                cell["pairedNormalizedDeltaLcb95"] for cell in score_cells
+            )
+            / len(score_cells),
+            "minimumReferenceNormalizedPairedDeltaLcb95": min(
+                cell["pairedNormalizedDeltaLcb95"] for cell in score_cells
+            ),
         },
+        "worstBaselineRetentionCell": (
+            dict(worst_retention_cell) if worst_retention_cell is not None else None
+        ),
         "worstCell": {
             "candidateNormalizedLcb95": worst_cell["candidateNormalizedLcb95"],
             "metricCellId": worst_cell["metricCellId"],
@@ -9015,6 +9298,7 @@ def _d19_catalog_snapshot(plan: Any) -> dict[str, object]:
 def _d19_promotion_snapshot(plan: Any) -> dict[str, Any]:
     return {
         "promotionEvidence": plan.payload["evaluation_release_promotion_evidence"],
+        "evaluationObjective": _d19_evaluation_objective_v6(),
         "promotion": {
             "schema": "EvaluationReleasePromotionReceipt/v7",
             "evaluationReleaseContractVersion": "serp-ci-evaluation-release-evidence/v7",
@@ -9063,7 +9347,8 @@ def _d19_lifecycle_result(promotion_snapshot: Mapping[str, Any]) -> dict[str, An
         "baselineReleaseDigest": promotion["baselineRelease"]["releaseDigest"],
         "candidateReleaseDigest": promotion["candidateRelease"]["releaseDigest"],
         "packMaterialBindings": [
-            {"suiteId": suite_id} for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+            _d19_pack_material_binding(suite_id, index)
+            for index, suite_id in enumerate(MANDATORY_SERP_BENCHMARK_SUITES)
         ],
         "suiteExecutionBindings": [
             {"suiteId": suite_id} for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
@@ -9071,6 +9356,118 @@ def _d19_lifecycle_result(promotion_snapshot: Mapping[str, Any]) -> dict[str, An
         "indexedReceiptCount": 18,
         "productionActivationRequested": False,
     }
+
+
+def _d19_pack_material_binding(suite_id: str, index: int) -> dict[str, object]:
+    return {
+        "suiteId": suite_id,
+        "baseline": _d19_pack_material_side(suite_id, "baseline", index),
+        "candidate": _d19_pack_material_side(suite_id, "candidate", index),
+    }
+
+
+def _d19_pack_material_side(suite_id: str, side: str, index: int) -> dict[str, object]:
+    side_digit = "1" if side == "baseline" else "2"
+    digest_digit = "a" if side == "baseline" else "b"
+    profile_digit = "c" if side == "baseline" else "d"
+    return {
+        "executionSubstrateSha256": "sha256:" + digest_digit * 64,
+        "metricProfileSha256": "sha256:" + profile_digit * 64,
+        "officialHarnessIdentitySha256": "sha256:" + "e" * 64,
+        "packBuildReceiptEvidence": _d19_worm_evidence(
+            f"pack-receipts/{suite_id.casefold().replace(' ', '-')}/{side}",
+            digest_digit,
+        ),
+        "packBuildReceiptSha256": "sha256:" + digest_digit * 64,
+        "packId": f"00000000-0000-4000-a000-{side_digit}{index:011d}",
+        "packProfileEvidence": _d19_worm_evidence(
+            f"pack-profiles/{suite_id.casefold().replace(' ', '-')}/{side}",
+            profile_digit,
+        ),
+        "packProfileSha256": "sha256:" + profile_digit * 64,
+        "packVersionId": f"00000000-0000-4000-a000-{side_digit}{index + 100:011d}",
+        "releaseManifestSha256": "sha256:" + "f" * 64,
+        "side": side,
+        "suiteId": suite_id,
+    }
+
+
+def _attach_d19_mcp_runtime_binding_evidence(
+    lifecycle_result: Mapping[str, Any],
+) -> dict[tuple[str, str], bytes]:
+    """Attach valid immutable receipt/snapshot/binding artifacts to a test lifecycle."""
+
+    objects: dict[tuple[str, str], bytes] = {}
+    bindings = lifecycle_result["packMaterialBindings"]
+    assert isinstance(bindings, list)
+    for pair in bindings:
+        assert isinstance(pair, dict)
+        suite_id = pair["suiteId"]
+        assert isinstance(suite_id, str)
+        suite_slug = suite_id.casefold().replace(" ", "-")
+        for side in ("baseline", "candidate"):
+            material = pair[side]
+            assert isinstance(material, dict)
+            receipt_payload = {
+                "packId": material["packId"],
+                "packVersionId": material["packVersionId"],
+                "profileSha256": material["packProfileSha256"],
+                "schema": "BenchmarkPackBuildReceipt/v1",
+                "suiteId": suite_id,
+            }
+            receipt_evidence = _d19_worm_payload(
+                f"pack-receipts/{suite_slug}/{side}", receipt_payload, objects
+            )
+            material["packBuildReceiptEvidence"] = receipt_evidence
+            material["packBuildReceiptSha256"] = receipt_evidence["sha256"]
+            snapshot_id = f"pack-snapshot:v2:{suite_slug}:{side}"
+            snapshot_evidence = _d19_worm_payload(
+                f"hermetic-snapshots/{suite_slug}/{side}",
+                {
+                    "contract_version": "SerpMcpHermeticPackSnapshot/v2",
+                    "pack_build_receipt_sha256": receipt_evidence["sha256"],
+                    "pack_id": material["packId"],
+                    "pack_snapshot_id": snapshot_id,
+                    "pack_version_id": material["packVersionId"],
+                    "tenant_id": TENANT_ID,
+                },
+                objects,
+            )
+            binding_evidence = _d19_worm_payload(
+                f"mcp-runtime-bindings/{suite_slug}/{side}",
+                {
+                    "contractVersion": "BenchmarkPackMcpRuntimeBinding/v1",
+                    "mcpRuntimeContractVersion": "SerpMcpHermeticBenchmarkRuntime/v1",
+                    "packBuildReceiptEvidence": receipt_evidence,
+                    "packBuildReceiptSha256": receipt_evidence["sha256"],
+                    "packId": material["packId"],
+                    "packSnapshotId": snapshot_id,
+                    "packSnapshotSha256": snapshot_evidence["sha256"],
+                    "packVersionId": material["packVersionId"],
+                    "snapshotContractVersion": "SerpMcpHermeticPackSnapshot/v2",
+                    "snapshotEvidence": snapshot_evidence,
+                },
+                objects,
+            )
+            material["mcpRuntimeBindingEvidence"] = binding_evidence
+    return objects
+
+
+def _d19_worm_payload(
+    name: str,
+    payload: Mapping[str, object],
+    objects: dict[tuple[str, str], bytes],
+) -> dict[str, str]:
+    raw = serp_eval_contracts_module._canonical_json(payload).encode("utf-8")
+    evidence = {
+        "objectLockMode": "COMPLIANCE",
+        "retainUntil": "2027-07-15T00:00:00Z",
+        "s3Uri": f"s3://airflow-serp-evidence/serp-evals/{name}.json",
+        "sha256": "sha256:" + sha256(raw).hexdigest(),
+        "versionId": f"{name.replace('/', '-')}-version-001",
+    }
+    objects[(evidence["s3Uri"], evidence["versionId"])] = raw
+    return evidence
 
 
 def _public_docs_seed_refresh_conf() -> dict[str, Any]:

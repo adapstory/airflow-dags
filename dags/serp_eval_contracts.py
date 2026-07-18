@@ -24,6 +24,7 @@ from urllib.request import ProxyHandler, Request, build_opener, urlopen
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import rfc8785
+from adapstory_serp_pipeline.benchmark.native_suite_scoring import suite_metric_profile
 from adapstory_serp_pipeline.orchestration.vault_transit_attestation import (
     VaultTransitClient,
     verify_artifact_attestation,
@@ -76,17 +77,24 @@ _BENCHMARK_SUBSTRATE_SOURCE_SET_SCHEMA = "BenchmarkExecutionSubstrateSourceSet/v
 _BENCHMARK_SUBSTRATE_SOURCE_SET_URI_PATTERN = (
     r"s3://airflow-serp-evidence/serp-evals/ci-benchmark-substrates-[1-9][0-9]*/source-set\.json"
 )
-_PAIRED_EVALUATION_REQUEST_SCHEMA = "PairedEvaluationRequest/v5"
+_PAIRED_EVALUATION_REQUEST_SCHEMA = "PairedEvaluationRequest/v6"
 _PAIRED_EVALUATION_RECEIPT_CONTRACT_VERSION = "serp-paired-eval-receipt/v9"
+_EVALUATION_OBJECTIVE_V6_SCHEMA = "EvaluationObjective/v6"
+_EVALUATION_OBJECTIVE_V6_ID = "serp-all-nine-quality"
+_EVALUATION_OBJECTIVE_V6_BOOTSTRAP_CONFIDENCE_LEVEL = 0.95
+_EVALUATION_OBJECTIVE_V6_BOOTSTRAP_SAMPLE_COUNT = 10_000
+_EVALUATION_OBJECTIVE_V6_PAIRED_RUN_COUNT = 5
+_EVALUATION_OBJECTIVE_V6_MINIMUM_CONSECUTIVE_ACCEPTED_EVALUATIONS = 3
 _PAIRED_EVALUATION_VERIFICATION_EVIDENCE_SCHEMA = "PairedEvaluationVerificationEvidence/v2"
-_PAIRED_BENCHMARK_SCORE_SCHEMA = "PairedBenchmarkScore/v1"
+_PAIRED_BENCHMARK_SCORE_SCHEMA = "PairedBenchmarkScore/v2"
 _PAIRED_BENCHMARK_SCORE_FORMULA = "min(candidateNormalizedLcb95 across canonical metric cells)"
 _PAIRED_BENCHMARK_PAIRED_DELTA_FORMULA = (
     "LCB95 of paired (candidateScore - baselineScore) / referenceScore"
 )
-_PAIRED_BENCHMARK_RATIO_DIAGNOSTIC_FORMULA = (
-    "candidateNormalizedLcb95 / baselineNormalizedMean when baselineNormalizedMean > 0"
+_PAIRED_BENCHMARK_BASELINE_RETENTION_FORMULA = (
+    "min(candidateNormalizedLcb95 / baselineNormalizedMean across canonical metric cells)"
 )
+_MINIMUM_BASELINE_RETENTION_LCB95_TO_MEAN = 0.90
 _D19_OBSERVED_NORMALIZED_SCORE_CELLS_SCHEMA = "D19ObservedNormalizedScoreCells/v2"
 _PAIRED_EVALUATION_FINAL_RECEIPT_PURPOSE = "serp-paired-evaluation-final-receipt"
 _D19_RUN_HISTORY_OBSERVATION_PURPOSE = "serp-d19-run-history-observation"
@@ -1675,7 +1683,7 @@ def _normalized_accepted_v9_receipt(
         raise ValueError("scheduled D6 requires the exact accepted paired evaluation receipt")
     paired = _required_mapping(receipt, "pairedEvaluation")
     if (
-        _required_str(paired, "contractVersion") != "serp-paired-evaluation/v5"
+        _required_str(paired, "contractVersion") != "serp-paired-evaluation/v6"
         or _required_str(paired, "operationId") != request_id
         or _required_str(paired, "status") != "accepted"
     ):
@@ -2520,6 +2528,191 @@ def _require_worm_evidence_within_artifact_root(
         raise ValueError(f"{field_name} must be stored under artifact_root_path")
 
 
+def _validated_evaluation_objective_v6(
+    payload: Mapping[str, Any],
+    *,
+    expected_evidence: Mapping[str, str],
+) -> dict[str, Any]:
+    """Fail closed on the immutable objective consumed by D17 and D19.
+
+    The persisted objective deliberately does not contain its own WORM handle:
+    that detached identity is the enclosing release evidence.  Its version,
+    thresholds, canonical cells, and reference authority must nevertheless be
+    fully verifiable before either promotion or paired evaluation can proceed.
+    """
+
+    expected_fields = {
+        "bootstrapConfidenceLevel",
+        "bootstrapSampleCount",
+        "metricCells",
+        "minimumCandidateNormalizedLcb95",
+        "minimumCandidateNormalizedMean",
+        "minimumBaselineRetentionLcb95ToMean",
+        "minimumPairedNormalizedDeltaLcb95",
+        "objectiveId",
+        "pairedRunCount",
+        "referenceAuthority",
+        "referenceSetEvidence",
+        "referenceSetAttestationEvidence",
+        "requiredConsecutiveAcceptedEvaluations",
+        "schema",
+        "version",
+    }
+    if set(payload) != expected_fields:
+        raise ValueError("EvaluationObjective/v6 fields are unsupported")
+    if _required_str(payload, "schema") != _EVALUATION_OBJECTIVE_V6_SCHEMA:
+        raise ValueError("EvaluationObjective/v6 schema is unsupported")
+    if _required_str(payload, "objectiveId") != _EVALUATION_OBJECTIVE_V6_ID:
+        raise ValueError("EvaluationObjective/v6 objectiveId is unsupported")
+
+    versionless = dict(payload)
+    versionless.pop("version")
+    expected_version = (
+        _EVALUATION_OBJECTIVE_V6_ID
+        + "-"
+        + sha256(_canonical_json(versionless).encode("utf-8")).hexdigest()
+        + ".v6"
+    )
+    if _required_str(payload, "version") != expected_version:
+        raise ValueError("EvaluationObjective/v6 version is not content-addressed")
+
+    if (
+        _required_number(payload, "bootstrapConfidenceLevel")
+        != _EVALUATION_OBJECTIVE_V6_BOOTSTRAP_CONFIDENCE_LEVEL
+        or _required_positive_int(payload, "bootstrapSampleCount")
+        != _EVALUATION_OBJECTIVE_V6_BOOTSTRAP_SAMPLE_COUNT
+        or _required_positive_int(payload, "pairedRunCount")
+        != _EVALUATION_OBJECTIVE_V6_PAIRED_RUN_COUNT
+    ):
+        raise ValueError(
+            "EvaluationObjective/v6 must use five matched runs and deterministic LCB95"
+        )
+
+    minimum_candidate_mean = _required_number(payload, "minimumCandidateNormalizedMean")
+    minimum_candidate_lcb95 = _required_number(payload, "minimumCandidateNormalizedLcb95")
+    minimum_baseline_retention = _required_number(payload, "minimumBaselineRetentionLcb95ToMean")
+    minimum_paired_delta = _required_number(payload, "minimumPairedNormalizedDeltaLcb95")
+    if (
+        minimum_candidate_mean < SERP_NORMALIZED_GATE_FLOOR
+        or minimum_candidate_lcb95 < SERP_NORMALIZED_GATE_FLOOR
+        or minimum_baseline_retention < _MINIMUM_BASELINE_RETENTION_LCB95_TO_MEAN
+        or minimum_paired_delta < 0.0
+        or _required_positive_int(payload, "requiredConsecutiveAcceptedEvaluations")
+        < _EVALUATION_OBJECTIVE_V6_MINIMUM_CONSECUTIVE_ACCEPTED_EVALUATIONS
+    ):
+        raise ValueError("EvaluationObjective/v6 cannot weaken canonical release policy")
+
+    if dict(expected_evidence) != _worm_evidence_reference(
+        {"evaluationObjectiveEvidence": expected_evidence}, "evaluationObjectiveEvidence"
+    ):
+        raise ValueError("EvaluationObjective/v6 evidence is invalid")
+    reference_set_evidence = _worm_evidence_reference(payload, "referenceSetEvidence")
+    _worm_evidence_reference(payload, "referenceSetAttestationEvidence")
+    raw_cells_value = payload.get("metricCells")
+    if not isinstance(raw_cells_value, list):
+        raise ValueError("EvaluationObjective/v6 metricCells must be a list")
+    raw_cells = [
+        cast(Mapping[str, Any], value)
+        if isinstance(value, Mapping)
+        else _raise_evaluation_objective_metric_cell_type()
+        for value in raw_cells_value
+    ]
+    if len(raw_cells) != len(MANDATORY_SERP_BENCHMARK_SUITES):
+        raise ValueError("EvaluationObjective/v6 must define the exact canonical nine cells")
+
+    normalized_cells: list[dict[str, Any]] = []
+    for suite_id, raw_cell in zip(MANDATORY_SERP_BENCHMARK_SUITES, raw_cells, strict=True):
+        expected_cell_fields = {
+            "aggregation",
+            "maximumScore",
+            "metricFamily",
+            "metricId",
+            "referenceAuthority",
+            "referenceEvidence",
+            "referenceScore",
+            "suiteId",
+        }
+        if set(raw_cell) != expected_cell_fields:
+            raise ValueError("EvaluationObjective/v6 metric cell fields are unsupported")
+        profile = suite_metric_profile(suite_id)
+        primary_metric = _required_mapping(profile, "primaryMetric")
+        if (
+            _required_str(raw_cell, "suiteId") != suite_id
+            or _required_str(raw_cell, "metricFamily")
+            != _required_str(primary_metric, "metricFamily")
+            or _required_str(raw_cell, "metricId") != _required_str(primary_metric, "metricId")
+            or _required_str(raw_cell, "aggregation")
+            != _required_str(primary_metric, "aggregation")
+            or _required_number(raw_cell, "maximumScore")
+            != _required_number(primary_metric, "maximumScore")
+        ):
+            raise ValueError("EvaluationObjective/v6 cell does not match canonical suite metrics")
+        cell_reference_authority = _required_str(raw_cell, "referenceAuthority")
+        if cell_reference_authority not in {"official", "validated-internal"}:
+            raise ValueError("EvaluationObjective/v6 metric reference authority is unsupported")
+        maximum_score = _required_number(raw_cell, "maximumScore")
+        reference_score = _required_number(raw_cell, "referenceScore")
+        if maximum_score <= 0.0 or reference_score <= 0.0 or reference_score > maximum_score:
+            raise ValueError("EvaluationObjective/v6 metric reference score is outside bounds")
+        normalized_cells.append(
+            {
+                "aggregation": _required_str(raw_cell, "aggregation"),
+                "maximumScore": maximum_score,
+                "metricFamily": _required_str(raw_cell, "metricFamily"),
+                "metricId": _required_str(raw_cell, "metricId"),
+                "referenceAuthority": cell_reference_authority,
+                "referenceEvidence": _worm_evidence_reference(raw_cell, "referenceEvidence"),
+                "referenceScore": reference_score,
+                "suiteId": suite_id,
+            }
+        )
+
+    objective_reference_authority = _required_mapping(payload, "referenceAuthority")
+    expected_authority_fields = {
+        "authorityId",
+        "evidence",
+        "hardcoded",
+        "kind",
+        "referenceScore",
+        "scoreOrigin",
+        "validationStatus",
+        "version",
+    }
+    if set(objective_reference_authority) != expected_authority_fields:
+        raise ValueError("EvaluationObjective/v6 referenceAuthority fields are unsupported")
+    if _required_str(objective_reference_authority, "authorityId") != "serp-all-nine-reference-set":
+        raise ValueError("EvaluationObjective/v6 referenceAuthorityId is unsupported")
+    if objective_reference_authority.get("hardcoded") is not False:
+        raise ValueError("EvaluationObjective/v6 reference authority must not be hardcoded")
+    if (
+        _worm_evidence_reference(objective_reference_authority, "evidence")
+        != reference_set_evidence
+    ):
+        raise ValueError("EvaluationObjective/v6 reference authority evidence is mismatched")
+    all_references_official = all(
+        cell["referenceAuthority"] == "official" for cell in normalized_cells
+    )
+    expected_kind = "official-harness" if all_references_official else "validated-baseline"
+    expected_score_origin = (
+        "official-harness-result" if all_references_official else "validated-baseline-result"
+    )
+    if (
+        _required_str(objective_reference_authority, "kind") != expected_kind
+        or _required_str(objective_reference_authority, "scoreOrigin") != expected_score_origin
+        or _required_str(objective_reference_authority, "validationStatus") != "passed"
+        or _required_str(objective_reference_authority, "version")
+        != reference_set_evidence["versionId"]
+        or _required_number(objective_reference_authority, "referenceScore")
+        != min(cell["referenceScore"] for cell in normalized_cells)
+    ):
+        raise ValueError("EvaluationObjective/v6 reference authority is not canonical")
+    return dict(payload)
+
+
+def _raise_evaluation_objective_metric_cell_type() -> NoReturn:
+    raise ValueError("EvaluationObjective/v6 metricCells must contain only objects")
+
+
 def load_governed_model_releases(
     plan_json: Mapping[str, Any] | str,
     *,
@@ -2537,7 +2730,12 @@ def load_governed_model_releases(
         raise ValueError("D17 CI evaluation release contract is unsupported")
     baseline_evidence = _worm_evidence_reference(plan, "baseline_release_evidence")
     candidate_evidence = _worm_evidence_reference(plan, "candidate_release_evidence")
-    client = s3_client or _s3_read_client(baseline_evidence["s3Uri"], candidate_evidence["s3Uri"])
+    evaluation_objective_evidence = _worm_evidence_reference(plan, "evaluation_objective_evidence")
+    client = s3_client or _s3_read_client(
+        baseline_evidence["s3Uri"],
+        candidate_evidence["s3Uri"],
+        evaluation_objective_evidence["s3Uri"],
+    )
     baseline = _load_governed_evaluation_release(
         baseline_evidence, field_name="baseline_release_evidence", s3_client=client
     )
@@ -2545,7 +2743,19 @@ def load_governed_model_releases(
         candidate_evidence, field_name="candidate_release_evidence", s3_client=client
     )
     _validate_evaluation_release_pair(baseline["release"], candidate["release"])
-    return {"baselineRelease": baseline, "candidateRelease": candidate}
+    evaluation_objective = _validated_evaluation_objective_v6(
+        _load_worm_json_evidence(
+            evaluation_objective_evidence,
+            field_name="evaluation_objective_evidence",
+            s3_client=client,
+        ),
+        expected_evidence=evaluation_objective_evidence,
+    )
+    return {
+        "baselineRelease": baseline,
+        "candidateRelease": candidate,
+        "evaluationObjective": evaluation_objective,
+    }
 
 
 def verify_governed_model_releases_terminal_activation(
@@ -2586,6 +2796,10 @@ def write_model_catalog_promotion_receipt(
     )
     candidate = _validated_evaluation_release_binding(
         _required_mapping(releases, "candidateRelease"), "candidateRelease"
+    )
+    _validated_evaluation_objective_v6(
+        _required_mapping(releases, "evaluationObjective"),
+        expected_evidence=_worm_evidence_reference(plan, "evaluation_objective_evidence"),
     )
     if baseline["evidence"] != _worm_evidence_reference(plan, "baseline_release_evidence"):
         raise ValueError("D17 baseline release evidence does not match plan")
@@ -2668,7 +2882,25 @@ def load_model_catalog_promotion_snapshot(
     }
     if normalized["candidateReleaseAuthority"] != expected_candidate_authority:
         raise ValueError("D17 candidateReleaseAuthority no longer matches its immutable manifest")
-    return {"promotionEvidence": receipt_evidence, "promotion": normalized}
+    evaluation_objective_evidence = _worm_evidence_reference(
+        normalized, "evaluationObjectiveEvidence"
+    )
+    evaluation_objective_client = s3_client or _s3_read_client(
+        evaluation_objective_evidence["s3Uri"]
+    )
+    evaluation_objective = _validated_evaluation_objective_v6(
+        _load_worm_json_evidence(
+            evaluation_objective_evidence,
+            field_name="D17 evaluation objective evidence",
+            s3_client=evaluation_objective_client,
+        ),
+        expected_evidence=evaluation_objective_evidence,
+    )
+    return {
+        "promotionEvidence": receipt_evidence,
+        "promotion": normalized,
+        "evaluationObjective": evaluation_objective,
+    }
 
 
 def verify_model_catalog_promotion_terminal_activation(
@@ -2729,7 +2961,12 @@ def load_benchmark_pack_lifecycle_result_snapshot(
         raise ValueError("D19 lifecycle result SHA-256 does not match evidence")
     lifecycle_result = _canonical_json_object_bytes(payload, "lifecycle_result")
     promotion = _validated_d19_promotion_snapshot(plan, promotion_snapshot)
-    return _validated_d19_lifecycle_result(plan, promotion, lifecycle_result)
+    return _validated_d19_lifecycle_result(
+        plan,
+        promotion,
+        lifecycle_result,
+        s3_client=s3_client,
+    )
 
 
 def _load_governed_evaluation_release(
@@ -6851,9 +7088,11 @@ def _execute_retired_pack_cleanup_noop_spec(spec: Mapping[str, Any]) -> dict[str
 
 def write_paired_eval_request_artifact(
     plan_json: Mapping[str, Any] | str,
-    catalog_snapshot: Mapping[str, Any],
-    promotion_snapshot: Mapping[str, Any],
-    lifecycle_result: Mapping[str, Any],
+    catalog_snapshot: Mapping[str, Any] | str,
+    promotion_snapshot: Mapping[str, Any] | str,
+    lifecycle_result: Mapping[str, Any] | str,
+    *,
+    s3_client: Any | None = None,
 ) -> dict[str, Any]:
     """Persist the scoreless D19 request consumed by the paired evaluator."""
 
@@ -6861,6 +7100,9 @@ def write_paired_eval_request_artifact(
     _reject_raw_secrets(plan)
     if _required_str(plan, "dag_id") != "serp_benchmark_improvement_wave":
         raise ValueError("plan dag_id does not match paired-eval request writer")
+    catalog = _json_object(catalog_snapshot, "catalog_snapshot")
+    promotion_input = _json_object(promotion_snapshot, "promotion_snapshot")
+    lifecycle_input = _json_object(lifecycle_result, "lifecycle_result")
     artifact_paths = _required_artifact_paths(
         plan,
         (
@@ -6871,9 +7113,14 @@ def write_paired_eval_request_artifact(
             "paired_eval_receipt",
         ),
     )
-    promotion = _validated_d19_promotion_snapshot(plan, promotion_snapshot)
-    lifecycle = _validated_d19_lifecycle_result(plan, promotion, lifecycle_result)
-    catalog_evidence = _paired_eval_catalog_evidence(plan, catalog_snapshot)
+    promotion = _validated_d19_promotion_snapshot(plan, promotion_input)
+    lifecycle = _validated_d19_lifecycle_result(
+        plan,
+        promotion,
+        lifecycle_input,
+        s3_client=s3_client,
+    )
+    catalog_evidence = _paired_eval_catalog_evidence(plan, catalog)
     activation_path = artifact_paths["benchmark_catalog_pack_activation"]
     activation_payload = _benchmark_catalog_pack_activation_payload(
         plan,
@@ -7137,7 +7384,7 @@ def _observed_normalized_score_cells_payload(
     """
 
     paired = _required_mapping(receipt, "pairedEvaluation")
-    if _required_str(paired, "contractVersion") != "serp-paired-evaluation/v5":
+    if _required_str(paired, "contractVersion") != "serp-paired-evaluation/v6":
         raise ValueError("paired evaluation score source contract is unsupported")
     if _required_str(paired, "operationId") != operation_id:
         raise ValueError("paired evaluation score source operationId does not match")
@@ -7158,6 +7405,7 @@ def _observed_normalized_score_cells_payload(
     rejection_reasons = _paired_evaluation_rejection_reasons(
         paired,
         receipt_status=receipt_status,
+        benchmark_score=benchmark_score,
     )
     return {
         "benchmarkScore": benchmark_score,
@@ -7201,14 +7449,16 @@ def _validated_paired_benchmark_score(
     """
 
     expected_fields = {
+        "allNineBaselineRetentionLcb95ToMean",
         "allNineCandidateNormalizedLcb95",
-        "candidateVsBaselineRatioDiagnosticByCell",
-        "candidateVsBaselineRatioDiagnosticFormula",
+        "baselineRetentionByCell",
+        "baselineRetentionFormula",
         "canonicalScoreFormula",
         "referenceNormalizedPairedDeltaFormula",
         "referenceNormalizedPairedDeltaLcb95ByCell",
         "schema",
         "supportingAggregates",
+        "worstBaselineRetentionCell",
         "worstCell",
     }
     if set(raw) != expected_fields:
@@ -7223,10 +7473,10 @@ def _validated_paired_benchmark_score(
     ):
         raise ValueError("benchmark score paired delta formula is unsupported")
     if (
-        _required_str(raw, "candidateVsBaselineRatioDiagnosticFormula")
-        != _PAIRED_BENCHMARK_RATIO_DIAGNOSTIC_FORMULA
+        _required_str(raw, "baselineRetentionFormula")
+        != _PAIRED_BENCHMARK_BASELINE_RETENTION_FORMULA
     ):
-        raise ValueError("benchmark score ratio diagnostic formula is unsupported")
+        raise ValueError("benchmark score baseline retention formula is unsupported")
     if len(cells) != len(MANDATORY_SERP_BENCHMARK_SUITES):
         raise ValueError("benchmark score requires exactly nine canonical cells")
 
@@ -7297,39 +7547,102 @@ def _validated_paired_benchmark_score(
         ):
             raise ValueError("benchmark score paired delta scorecard does not match its cells")
 
-    ratio_scorecard = _required_object_list(
-        raw,
-        "candidateVsBaselineRatioDiagnosticByCell",
-    )
-    if len(ratio_scorecard) != len(metric_cell_ids):
-        raise ValueError("benchmark score ratio scorecard must contain nine cells")
-    expected_measured_count = 0
-    for index, value in enumerate(ratio_scorecard):
-        if set(value) != {"candidateLcb95ToBaselineMeanRatio", "metricCellId"}:
-            raise ValueError("benchmark score ratio scorecard fields are unsupported")
+    retention_scorecard = _required_object_list(raw, "baselineRetentionByCell")
+    if len(retention_scorecard) != len(metric_cell_ids):
+        raise ValueError("benchmark score baseline retention scorecard must contain nine cells")
+    expected_retention_rows: list[dict[str, Any]] = []
+    insufficient_baseline_count = 0
+    for index, value in enumerate(retention_scorecard):
+        if set(value) != {
+            "baselineNormalizedMean",
+            "baselineRetentionLcb95ToMean",
+            "candidateNormalizedLcb95",
+            "metricCellId",
+        }:
+            raise ValueError("benchmark score baseline retention scorecard fields are unsupported")
         if _required_str(value, "metricCellId") != metric_cell_ids[index]:
-            raise ValueError("benchmark score ratio scorecard order is unsupported")
-        baseline_normalized_mean = baseline_normalized_means[index]
-        raw_ratio = value["candidateLcb95ToBaselineMeanRatio"]
-        if baseline_normalized_mean <= 0.0:
-            if raw_ratio is not None:
-                raise ValueError(
-                    "benchmark score ratio diagnostic must be unavailable for a zero baseline"
-                )
-            continue
-        expected_measured_count += 1
+            raise ValueError("benchmark score baseline retention scorecard order is unsupported")
+        baseline_normalized_mean = _required_number(value, "baselineNormalizedMean")
+        candidate_normalized_lcb95 = _required_number(value, "candidateNormalizedLcb95")
         if not math.isclose(
-            _required_number(value, "candidateLcb95ToBaselineMeanRatio"),
-            candidate_normalized_lcb95s[index] / baseline_normalized_mean,
+            baseline_normalized_mean,
+            baseline_normalized_means[index],
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ) or not math.isclose(
+            candidate_normalized_lcb95,
+            candidate_normalized_lcb95s[index],
             rel_tol=1e-12,
             abs_tol=1e-12,
         ):
-            raise ValueError("benchmark score ratio scorecard does not match its cells")
+            raise ValueError(
+                "benchmark score baseline retention scorecard does not match its cells"
+            )
+        raw_retention = value.get("baselineRetentionLcb95ToMean")
+        if baseline_normalized_mean <= 0.0:
+            if raw_retention is not None:
+                raise ValueError(
+                    "benchmark score baseline retention must be unavailable "
+                    "for an insufficient baseline"
+                )
+            insufficient_baseline_count += 1
+            retention = None
+        else:
+            retention = _required_number(value, "baselineRetentionLcb95ToMean")
+            if not math.isclose(
+                retention,
+                candidate_normalized_lcb95 / baseline_normalized_mean,
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            ):
+                raise ValueError(
+                    "benchmark score baseline retention scorecard does not match its cells"
+                )
+        expected_retention_rows.append(
+            {
+                "baselineNormalizedMean": baseline_normalized_mean,
+                "baselineRetentionLcb95ToMean": retention,
+                "candidateNormalizedLcb95": candidate_normalized_lcb95,
+                "metricCellId": metric_cell_ids[index],
+            }
+        )
+
+    raw_all_nine_retention = raw["allNineBaselineRetentionLcb95ToMean"]
+    raw_worst_retention_cell = raw["worstBaselineRetentionCell"]
+    if insufficient_baseline_count:
+        if raw_all_nine_retention is not None or raw_worst_retention_cell is not None:
+            raise ValueError(
+                "benchmark score baseline retention must be unavailable "
+                "for an insufficient baseline"
+            )
+    else:
+        retention_values = [
+            _required_number(row, "baselineRetentionLcb95ToMean") for row in expected_retention_rows
+        ]
+        retention_limiting_index = min(
+            range(len(retention_values)),
+            key=retention_values.__getitem__,
+        )
+        expected_retention = retention_values[retention_limiting_index]
+        if not math.isclose(
+            _required_number(raw, "allNineBaselineRetentionLcb95ToMean"),
+            expected_retention,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            raise ValueError(
+                "benchmark score baseline retention scalar does not match the limiting cell"
+            )
+        worst_retention_cell = _required_mapping(raw, "worstBaselineRetentionCell")
+        if dict(worst_retention_cell) != expected_retention_rows[retention_limiting_index]:
+            raise ValueError(
+                "benchmark score worst baseline retention cell does not match the limiting cell"
+            )
 
     supporting_aggregates = _required_mapping(raw, "supportingAggregates")
     expected_aggregate_fields = {
-        "candidateLcb95ToBaselineMeanRatioMeasuredCellCount",
-        "candidateLcb95ToBaselineMeanRatioUnavailableCellCount",
+        "baselineRetentionMeasuredCellCount",
+        "insufficientBaselineCellCount",
         "meanBaselineNormalizedMean",
         "meanCandidateNormalizedLcb95",
         "meanCandidateNormalizedMean",
@@ -7339,18 +7652,14 @@ def _validated_paired_benchmark_score(
     if set(supporting_aggregates) != expected_aggregate_fields:
         raise ValueError("benchmark score supporting aggregate fields are unsupported")
     if (
-        _required_non_negative_int(
-            supporting_aggregates,
-            "candidateLcb95ToBaselineMeanRatioMeasuredCellCount",
-        )
-        != expected_measured_count
-        or _required_non_negative_int(
-            supporting_aggregates,
-            "candidateLcb95ToBaselineMeanRatioUnavailableCellCount",
-        )
-        != len(metric_cell_ids) - expected_measured_count
+        _required_non_negative_int(supporting_aggregates, "baselineRetentionMeasuredCellCount")
+        != len(metric_cell_ids) - insufficient_baseline_count
+        or _required_non_negative_int(supporting_aggregates, "insufficientBaselineCellCount")
+        != insufficient_baseline_count
     ):
-        raise ValueError("benchmark score ratio aggregate counts do not match its cells")
+        raise ValueError(
+            "benchmark score baseline retention aggregate counts do not match its cells"
+        )
     expected_aggregates = {
         "meanBaselineNormalizedMean": math.fsum(baseline_normalized_means)
         / len(baseline_normalized_means),
@@ -7494,17 +7803,66 @@ def _paired_evaluation_rejection_reasons(
     paired: Mapping[str, Any],
     *,
     receipt_status: str,
+    benchmark_score: Mapping[str, Any],
 ) -> list[str]:
+    raw_metric_cells = _required_object_list(paired, "metricCells")
+    retention_rows = _required_object_list(benchmark_score, "baselineRetentionByCell")
+    if len(raw_metric_cells) != len(retention_rows):
+        raise ValueError("paired evaluation metric cells and retention scorecard do not align")
+
+    mean_rejection_reasons: list[str] = []
+    lcb95_rejection_reasons: list[str] = []
+    baseline_retention_rejection_reasons: list[str] = []
+    for raw_metric_cell, row in zip(raw_metric_cells, retention_rows, strict=True):
+        metric_cell_id = _required_str(row, "metricCellId")
+        observed_metric_cell_id = ":".join(
+            (
+                _required_str(raw_metric_cell, "suiteId"),
+                _required_str(raw_metric_cell, "metricFamily"),
+                _required_str(raw_metric_cell, "metricId"),
+            )
+        )
+        if observed_metric_cell_id != metric_cell_id:
+            raise ValueError(
+                "paired evaluation metric cells and retention scorecard order do not align"
+            )
+        if (
+            _required_number(raw_metric_cell, "candidateNormalizedMean")
+            < SERP_NORMALIZED_GATE_FLOOR
+        ):
+            mean_rejection_reasons.append(f"candidate-normalized-mean-not-met:{metric_cell_id}")
+        if _required_number(row, "candidateNormalizedLcb95") < SERP_NORMALIZED_GATE_FLOOR:
+            lcb95_rejection_reasons.append(f"candidate-normalized-lcb95-not-met:{metric_cell_id}")
+        retention = row.get("baselineRetentionLcb95ToMean")
+        if retention is None:
+            baseline_retention_rejection_reasons.append(
+                f"insufficient-baseline-normalized-mean:{metric_cell_id}"
+            )
+        elif _required_number(row, "baselineRetentionLcb95ToMean") < (
+            _MINIMUM_BASELINE_RETENTION_LCB95_TO_MEAN
+        ):
+            baseline_retention_rejection_reasons.append(
+                f"baseline-retention-lcb95-to-mean-not-met:{metric_cell_id}"
+            )
+
+    expected_reasons = [
+        *mean_rejection_reasons,
+        *lcb95_rejection_reasons,
+        *baseline_retention_rejection_reasons,
+    ]
+
     raw_reasons = paired.get("rejectionReasons")
     if receipt_status == "accepted":
         if raw_reasons is not None:
             raise ValueError("accepted paired evaluation must not contain rejection reasons")
+        if expected_reasons:
+            raise ValueError("accepted paired evaluation does not satisfy quality gates")
         return []
     if raw_reasons is None:
         raise ValueError("rejected paired evaluation requires rejection reasons")
     reasons = _required_str_list_allow_empty(paired, "rejectionReasons")
-    if not reasons or len(set(reasons)) != len(reasons):
-        raise ValueError("paired evaluation rejection reasons are unsupported")
+    if reasons != expected_reasons:
+        raise ValueError("paired evaluation rejection reasons do not match quality gates")
     return reasons
 
 
@@ -9451,10 +9809,49 @@ def _benchmark_catalog_pack_activation_payload(
     }
 
 
+_D19_MATERIAL_PAIR_FIELDS = frozenset({"baseline", "candidate", "suiteId"})
+_D19_MATERIAL_SIDE_FIELDS = frozenset(
+    {
+        "executionSubstrateSha256",
+        "mcpRuntimeBindingEvidence",
+        "metricProfileSha256",
+        "officialHarnessIdentitySha256",
+        "packBuildReceiptEvidence",
+        "packBuildReceiptSha256",
+        "packId",
+        "packProfileEvidence",
+        "packProfileSha256",
+        "packVersionId",
+        "releaseManifestSha256",
+        "side",
+        "suiteId",
+    }
+)
+_D19_MCP_RUNTIME_BINDING_FIELDS = frozenset(
+    {
+        "contractVersion",
+        "mcpRuntimeContractVersion",
+        "packBuildReceiptEvidence",
+        "packBuildReceiptSha256",
+        "packId",
+        "packSnapshotId",
+        "packSnapshotSha256",
+        "packVersionId",
+        "snapshotContractVersion",
+        "snapshotEvidence",
+    }
+)
+_D19_MCP_RUNTIME_BINDING_SCHEMA = "BenchmarkPackMcpRuntimeBinding/v1"
+_D19_HERMETIC_RUNTIME_CONTRACT_VERSION = "SerpMcpHermeticBenchmarkRuntime/v1"
+_D19_HERMETIC_SNAPSHOT_CONTRACT_VERSION = "SerpMcpHermeticPackSnapshot/v2"
+
+
 def _validated_d19_lifecycle_result(
     plan: Mapping[str, Any],
     promotion: Mapping[str, Any],
     lifecycle_result: Mapping[str, Any],
+    *,
+    s3_client: Any | None = None,
 ) -> dict[str, Any]:
     expected_fields = {
         "baselineReleaseDigest",
@@ -9512,15 +9909,15 @@ def _validated_d19_lifecycle_result(
         raise ValueError("D19 lifecycle must prove exactly 18 indexed receipts")
     if lifecycle_result.get("productionActivationRequested") is not False:
         raise ValueError("D19 lifecycle must not request production activation")
-    pack_material_bindings = _required_object_list(lifecycle_result, "packMaterialBindings")
+    pack_material_bindings = _validated_d19_pack_material_bindings(
+        plan,
+        _required_object_list(lifecycle_result, "packMaterialBindings"),
+        s3_client=s3_client,
+    )
     suite_execution_bindings = _required_object_list(lifecycle_result, "suiteExecutionBindings")
-    for field_name, bindings in (
-        ("packMaterialBindings", pack_material_bindings),
-        ("suiteExecutionBindings", suite_execution_bindings),
-    ):
-        observed_suites = [_required_str(item, "suiteId") for item in bindings]
-        if observed_suites != list(MANDATORY_SERP_BENCHMARK_SUITES):
-            raise ValueError(f"D19 lifecycle {field_name} must cover the canonical nine")
+    observed_suites = [_required_str(item, "suiteId") for item in suite_execution_bindings]
+    if observed_suites != list(MANDATORY_SERP_BENCHMARK_SUITES):
+        raise ValueError("D19 lifecycle suiteExecutionBindings must cover the canonical nine")
     return {
         **dict(lifecycle_result),
         "baselineReleaseDigest": baseline_digest,
@@ -9531,7 +9928,258 @@ def _validated_d19_lifecycle_result(
         "evaluationBindingEvidence": binding_evidence,
         "evaluationBindingId": binding_id,
         "evaluationReleasePromotionEvidence": promotion_evidence,
+        "packMaterialBindings": pack_material_bindings,
     }
+
+
+def _validated_d19_pack_material_bindings(
+    plan: Mapping[str, Any],
+    bindings: Sequence[Mapping[str, Any]],
+    *,
+    s3_client: Any | None,
+) -> list[dict[str, Any]]:
+    """Validate each pack/side MCP join before D19 can issue a request.
+
+    The lifecycle result is only a routing document.  It is not proof that the
+    runtime actually received a receipt-bound hermetic snapshot.  This mirror
+    reads every immutable MCP binding, then its receipt and snapshot, and
+    rejects an incomplete pair or any broken identity edge before Airflow
+    persists the paired-evaluation request.
+    """
+
+    if len(bindings) != len(MANDATORY_SERP_BENCHMARK_SUITES):
+        raise ValueError("D19 lifecycle packMaterialBindings must cover the canonical nine")
+    artifact_root = _required_str(plan, "artifact_root_path")
+    normalized_pairs: list[dict[str, Any]] = []
+    runtime_entries: list[tuple[str, str, Mapping[str, Any]]] = []
+    seen_runtime_handles: set[tuple[str, str]] = set()
+    for expected_suite_id, value in zip(MANDATORY_SERP_BENCHMARK_SUITES, bindings, strict=True):
+        if set(value) != _D19_MATERIAL_PAIR_FIELDS:
+            raise ValueError("D19 lifecycle packMaterialBindings entry fields are unsupported")
+        suite_id = _required_str(value, "suiteId")
+        if suite_id != expected_suite_id:
+            raise ValueError("D19 lifecycle packMaterialBindings must cover the canonical nine")
+        normalized_pair: dict[str, Any] = {"suiteId": suite_id}
+        for side in ("baseline", "candidate"):
+            material = _validated_d19_material_side(
+                _required_mapping(value, side),
+                suite_id=suite_id,
+                side=side,
+                artifact_root=artifact_root,
+            )
+            runtime_evidence = cast(Mapping[str, str], material["mcpRuntimeBindingEvidence"])
+            handle_identity = (runtime_evidence["s3Uri"], runtime_evidence["versionId"])
+            if handle_identity in seen_runtime_handles:
+                raise ValueError(
+                    "D19 lifecycle MCP runtime binding evidence handles must be unique"
+                )
+            seen_runtime_handles.add(handle_identity)
+            normalized_pair[side] = material
+            runtime_entries.append((suite_id, side, material))
+        normalized_pairs.append(normalized_pair)
+
+    runtime_client = s3_client or _s3_read_client(
+        *(
+            cast(Mapping[str, str], material["mcpRuntimeBindingEvidence"])["s3Uri"]
+            for _, _, material in runtime_entries
+        )
+    )
+    binding_entries: list[tuple[str, str, Mapping[str, Any], dict[str, Any]]] = []
+    for suite_id, side, material_entry in runtime_entries:
+        runtime_evidence = cast(Mapping[str, str], material_entry["mcpRuntimeBindingEvidence"])
+        binding_payload = _load_worm_json_evidence(
+            runtime_evidence,
+            field_name=f"D19 {suite_id} {side} MCP runtime binding",
+            s3_client=runtime_client,
+        )
+        binding_entries.append(
+            (
+                suite_id,
+                side,
+                material_entry,
+                _validated_d19_mcp_runtime_binding(
+                    binding_payload,
+                    material=material_entry,
+                    artifact_root=artifact_root,
+                ),
+            )
+        )
+
+    proof_client = s3_client or _s3_read_client(
+        *(
+            artifact["s3Uri"]
+            for _, _, material, binding in binding_entries
+            for artifact in (
+                cast(Mapping[str, str], material["packBuildReceiptEvidence"]),
+                cast(Mapping[str, str], binding["snapshotEvidence"]),
+            )
+        )
+    )
+    for suite_id, side, material_entry, binding_entry in binding_entries:
+        receipt = _load_worm_json_evidence(
+            cast(Mapping[str, str], material_entry["packBuildReceiptEvidence"]),
+            field_name=f"D19 {suite_id} {side} pack build receipt",
+            s3_client=proof_client,
+        )
+        _validated_d19_pack_receipt_identity(
+            receipt,
+            material=material_entry,
+            suite_id=suite_id,
+            side=side,
+        )
+        snapshot = _load_worm_json_evidence(
+            cast(Mapping[str, str], binding_entry["snapshotEvidence"]),
+            field_name=f"D19 {suite_id} {side} hermetic MCP snapshot",
+            s3_client=proof_client,
+        )
+        _validated_d19_hermetic_snapshot_identity(
+            snapshot,
+            binding=binding_entry,
+            tenant_id=_required_str(plan, "tenant_id"),
+        )
+    return normalized_pairs
+
+
+def _validated_d19_material_side(
+    value: Mapping[str, Any],
+    *,
+    suite_id: str,
+    side: str,
+    artifact_root: str,
+) -> dict[str, Any]:
+    if set(value) != _D19_MATERIAL_SIDE_FIELDS:
+        if "mcpRuntimeBindingEvidence" not in value:
+            raise ValueError("D19 lifecycle mcpRuntimeBindingEvidence is required for every side")
+        raise ValueError("D19 lifecycle pack material side fields are unsupported")
+    if _required_str(value, "suiteId") != suite_id or _required_str(value, "side") != side:
+        raise ValueError("D19 lifecycle pack material side identity is mismatched")
+    receipt_evidence = _worm_evidence_reference(value, "packBuildReceiptEvidence")
+    profile_evidence = _worm_evidence_reference(value, "packProfileEvidence")
+    runtime_evidence = _worm_evidence_reference(value, "mcpRuntimeBindingEvidence")
+    _require_worm_evidence_within_artifact_root(
+        receipt_evidence,
+        artifact_root,
+        "packBuildReceiptEvidence",
+    )
+    _require_worm_evidence_within_artifact_root(
+        runtime_evidence,
+        artifact_root,
+        "mcpRuntimeBindingEvidence",
+    )
+    normalized = {
+        "executionSubstrateSha256": _required_sha256_prefixed(value, "executionSubstrateSha256"),
+        "mcpRuntimeBindingEvidence": runtime_evidence,
+        "metricProfileSha256": _required_sha256_prefixed(value, "metricProfileSha256"),
+        "officialHarnessIdentitySha256": _required_sha256_prefixed(
+            value, "officialHarnessIdentitySha256"
+        ),
+        "packBuildReceiptEvidence": receipt_evidence,
+        "packBuildReceiptSha256": _required_sha256_prefixed(value, "packBuildReceiptSha256"),
+        "packId": str(_required_uuid(value, "packId")),
+        "packProfileEvidence": profile_evidence,
+        "packProfileSha256": _required_sha256_prefixed(value, "packProfileSha256"),
+        "packVersionId": str(_required_uuid(value, "packVersionId")),
+        "releaseManifestSha256": _required_sha256_prefixed(value, "releaseManifestSha256"),
+        "side": side,
+        "suiteId": suite_id,
+    }
+    if receipt_evidence["sha256"] != normalized["packBuildReceiptSha256"]:
+        raise ValueError("D19 lifecycle pack receipt evidence digest is mismatched")
+    if profile_evidence["sha256"] != normalized["packProfileSha256"]:
+        raise ValueError("D19 lifecycle pack profile evidence digest is mismatched")
+    return normalized
+
+
+def _validated_d19_mcp_runtime_binding(
+    payload: Mapping[str, Any],
+    *,
+    material: Mapping[str, Any],
+    artifact_root: str,
+) -> dict[str, Any]:
+    if set(payload) != _D19_MCP_RUNTIME_BINDING_FIELDS:
+        raise ValueError("D19 MCP runtime binding fields are unsupported")
+    if _required_str(payload, "contractVersion") != _D19_MCP_RUNTIME_BINDING_SCHEMA:
+        raise ValueError("D19 MCP runtime binding contract is unsupported")
+    if (
+        _required_str(payload, "mcpRuntimeContractVersion")
+        != _D19_HERMETIC_RUNTIME_CONTRACT_VERSION
+    ):
+        raise ValueError("D19 MCP runtime binding runtime contract is unsupported")
+    if _required_str(payload, "snapshotContractVersion") != _D19_HERMETIC_SNAPSHOT_CONTRACT_VERSION:
+        raise ValueError("D19 MCP runtime binding snapshot contract is unsupported")
+    receipt_evidence = _worm_evidence_reference(payload, "packBuildReceiptEvidence")
+    snapshot_evidence = _worm_evidence_reference(payload, "snapshotEvidence")
+    _require_worm_evidence_within_artifact_root(
+        snapshot_evidence,
+        artifact_root,
+        "snapshotEvidence",
+    )
+    if receipt_evidence != material["packBuildReceiptEvidence"]:
+        raise ValueError("D19 MCP runtime binding receipt evidence is mismatched")
+    if (
+        _required_sha256_prefixed(payload, "packBuildReceiptSha256")
+        != material["packBuildReceiptSha256"]
+    ):
+        raise ValueError("D19 MCP runtime binding receipt digest is mismatched")
+    if snapshot_evidence["sha256"] != _required_sha256_prefixed(payload, "packSnapshotSha256"):
+        raise ValueError("D19 MCP runtime binding snapshot digest is mismatched")
+    if receipt_evidence == snapshot_evidence:
+        raise ValueError("D19 MCP runtime binding receipt and snapshot evidence must be distinct")
+    for field_name in ("packId", "packVersionId"):
+        if str(_required_uuid(payload, field_name)) != material[field_name]:
+            raise ValueError(f"D19 MCP runtime binding {field_name} is mismatched")
+    return {
+        "packBuildReceiptEvidence": receipt_evidence,
+        "packBuildReceiptSha256": _required_sha256_prefixed(payload, "packBuildReceiptSha256"),
+        "packId": str(_required_uuid(payload, "packId")),
+        "packSnapshotId": _required_str(payload, "packSnapshotId"),
+        "packSnapshotSha256": _required_sha256_prefixed(payload, "packSnapshotSha256"),
+        "packVersionId": str(_required_uuid(payload, "packVersionId")),
+        "snapshotEvidence": snapshot_evidence,
+    }
+
+
+def _validated_d19_pack_receipt_identity(
+    payload: Mapping[str, Any],
+    *,
+    material: Mapping[str, Any],
+    suite_id: str,
+    side: str,
+) -> None:
+    if _required_str(payload, "schema") != "BenchmarkPackBuildReceipt/v1":
+        raise ValueError("D19 pack build receipt schema is unsupported")
+    if _required_str(payload, "suiteId") != suite_id:
+        raise ValueError(f"D19 {side} pack build receipt suiteId is mismatched")
+    for field_name in ("packId", "packVersionId"):
+        if str(_required_uuid(payload, field_name)) != material[field_name]:
+            raise ValueError(f"D19 {side} pack build receipt {field_name} is mismatched")
+    if _required_sha256_prefixed(payload, "profileSha256") != material["packProfileSha256"]:
+        raise ValueError(f"D19 {side} pack build receipt profile is mismatched")
+
+
+def _validated_d19_hermetic_snapshot_identity(
+    payload: Mapping[str, Any],
+    *,
+    binding: Mapping[str, Any],
+    tenant_id: str,
+) -> None:
+    if _required_str(payload, "contract_version") != _D19_HERMETIC_SNAPSHOT_CONTRACT_VERSION:
+        raise ValueError("D19 hermetic MCP snapshot contract is unsupported")
+    if _required_str(payload, "tenant_id") != tenant_id:
+        raise ValueError("D19 hermetic MCP snapshot tenant identity is mismatched")
+    if _required_str(payload, "pack_snapshot_id") != binding["packSnapshotId"]:
+        raise ValueError("D19 hermetic MCP snapshot ID is mismatched")
+    if (
+        _required_sha256_prefixed(payload, "pack_build_receipt_sha256")
+        != binding["packBuildReceiptSha256"]
+    ):
+        raise ValueError("D19 hermetic MCP snapshot receipt digest is mismatched")
+    for snapshot_field, binding_field in (
+        ("pack_id", "packId"),
+        ("pack_version_id", "packVersionId"),
+    ):
+        if str(_required_uuid(payload, snapshot_field)) != binding[binding_field]:
+            raise ValueError(f"D19 hermetic MCP snapshot {snapshot_field} is mismatched")
 
 
 def _paired_eval_catalog_evidence(
@@ -9617,6 +10265,13 @@ def _validated_d19_promotion_snapshot(
     ):
         if _required_str(promotion, field_name) != _required_str(plan, plan_field):
             raise ValueError(f"D19 promotion {field_name} does not match plan")
+    evaluation_objective_evidence = _worm_evidence_reference(
+        promotion, "evaluationObjectiveEvidence"
+    )
+    evaluation_objective = _validated_evaluation_objective_v6(
+        _required_mapping(snapshot, "evaluationObjective"),
+        expected_evidence=evaluation_objective_evidence,
+    )
     return {
         "baselineRelease": baseline,
         "candidateRelease": candidate,
@@ -9624,12 +10279,11 @@ def _validated_d19_promotion_snapshot(
         "metricCompatibilityMatrixEvidence": _worm_evidence_reference(
             promotion, "metricCompatibilityMatrixEvidence"
         ),
-        "evaluationObjectiveEvidence": _worm_evidence_reference(
-            promotion, "evaluationObjectiveEvidence"
-        ),
+        "evaluationObjectiveEvidence": evaluation_objective_evidence,
         "evaluationObjectiveAttestationEvidence": _worm_evidence_reference(
             promotion, "evaluationObjectiveAttestationEvidence"
         ),
+        "evaluationObjective": evaluation_objective,
         "evaluationReleaseContractVersion": _CI_EVALUATION_RELEASE_CONTRACT_VERSION,
         "promotionEvidence": evidence,
         "promotionId": _required_str(promotion, "promotionId"),
