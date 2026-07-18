@@ -688,6 +688,7 @@ def test_d6_history_observation_rejects_changes_between_fenced_history_reads(
         ("wrong_window", "logicalDateLt must match parent"),
         ("truncated", "complete pagination"),
         ("active_race", "active D19 runs"),
+        ("unsupported_server_version", "supported 3.x"),
         ("expired_fence", "fence must remain active"),
         ("missing_attestation", "Transit attestation"),
     ),
@@ -709,6 +710,8 @@ def test_d6_history_observation_fails_closed_and_releases_fence(
         history["pagination"]["complete"] = False
     elif mutation == "active_race":
         history["activeRunQuery"]["totalEntries"] = 1
+    elif mutation == "unsupported_server_version":
+        history["api"]["airflowVersion"] = "4.0.0"
     elif mutation == "expired_fence":
         fence["acquiredAt"] = "2026-07-17T00:00:04Z"
         fence["expiresAt"] = "2026-07-17T00:00:09Z"
@@ -5847,6 +5850,19 @@ def test_serp_nightly_dag_uses_fenced_native_d19_without_gateway_scorer() -> Non
         assert retired_surface not in source
 
 
+def test_d19_history_observer_separates_airflow_api_trust_from_credentials() -> None:
+    source = (REPO_ROOT / "dags" / "serp_nightly_regression_suite.py").read_text(encoding="utf-8")
+
+    assert 'secret_name="airflow-serp-d19-history-observer-credentials"' in source
+    assert 'name="airflow-api-internal-ca"' in source
+    assert 'k8s.V1KeyToPath(key="ca.crt", path="ca.crt")' in source
+    assert "D19_HISTORY_API_TRUST_VOLUME" in source
+    assert "_HISTORY_TRUST_ROOT" in source
+    assert "_HISTORY_CREDENTIALS_ROOT" in source
+    assert 'secret_name="airflow-serp-d19-history-observer-api"' not in source
+    assert "_HISTORY_SECRET_ROOT" not in source
+
+
 def test_every_catalog_acquisition_dag_projects_only_a_short_lived_minio_identity() -> None:
     for dag_file in (
         "serp_benchmark_improvement_wave.py",
@@ -7670,7 +7686,7 @@ def _scheduled_d6_history_client_result(
         },
         "api": {
             "apiVersion": "v2",
-            "airflowVersion": "3.1.6",
+            "airflowVersion": "3.3.0",
             "serverAuthority": "airflow-api-server.airflow.svc.cluster.local:8080",
         },
         "acceptedRunVerifications": pointers,

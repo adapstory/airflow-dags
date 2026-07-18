@@ -88,6 +88,7 @@ _PAIRED_EVALUATION_PURPOSE_TRANSIT_KEYS = {
 _BENCHMARK_CATALOG_PACK_ACTIVATION_SCHEMA = "BenchmarkCatalogPackActivation/v1"
 _MODEL_PROMOTION_DAG_ID = "serp_model_catalog_promotion"
 _D19_DAG_ID = "serp_benchmark_improvement_wave"
+_D19_AIRFLOW_SUPPORTED_SERVER_MAJOR = 3
 _D19_VERIFICATION_EVIDENCE_MAX_BYTES = 16_000_000
 _SCHEDULED_D6_DAG_ID = "serp_nightly_regression_suite"
 _SCHEDULED_D6_RECEIPT_SCHEMA = "ScheduledD6RegressionReceipt/v2"
@@ -695,6 +696,17 @@ def _normalized_scheduled_d6_airflow_run(
     }
 
 
+def _supported_d19_airflow_server_version(value: str) -> str:
+    """Accept only stable server versions in the Airflow v2 API's major-3 line."""
+
+    stable_semver = (
+        rf"{_D19_AIRFLOW_SUPPORTED_SERVER_MAJOR}\." r"(?:0|[1-9][0-9]*)\." r"(?:0|[1-9][0-9]*)"
+    )
+    if re.fullmatch(stable_semver, value) is None:
+        raise ValueError("D19 history Airflow server version is outside the supported 3.x contract")
+    return value
+
+
 def _normalized_d19_history_client_result(
     result: Mapping[str, Any],
     *,
@@ -725,11 +737,13 @@ def _normalized_d19_history_client_result(
         raise ValueError("D19 history API fields are unsupported")
     expected_api = {
         "apiVersion": "v2",
-        "airflowVersion": "3.1.6",
         "serverAuthority": "airflow-api-server.airflow.svc.cluster.local:8080",
     }
     if {field: _required_str(api, field) for field in expected_api} != expected_api:
         raise ValueError("D19 history API authority/version is unsupported")
+    expected_api["airflowVersion"] = _supported_d19_airflow_server_version(
+        _required_str(api, "airflowVersion")
+    )
     query = _required_mapping(result, "query")
     if set(query) != {"apiPath", "dagId", "logicalDateLt", "orderBy"}:
         raise ValueError("D19 history query fields are unsupported")

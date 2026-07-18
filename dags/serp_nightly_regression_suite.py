@@ -48,7 +48,8 @@ D19_HISTORY_OBSERVER_LABELS = {
     "release": "airflow",
     "tier": "airflow",
 }
-_HISTORY_SECRET_ROOT = "/var/run/secrets/adapstory/airflow-history-observer"
+_HISTORY_CREDENTIALS_ROOT = "/var/run/secrets/adapstory/airflow-history-observer-credentials"
+_HISTORY_TRUST_ROOT = "/var/run/secrets/adapstory/airflow-api-trust"
 _KUBERNETES_SECRET_ROOT = "/var/run/secrets/adapstory/kubernetes-api"
 
 NIGHTLY_EVALUATOR_EXECUTOR_CONFIG = minio_web_identity_executor_config(
@@ -65,12 +66,18 @@ NIGHTLY_EVALUATOR_EXECUTOR_CONFIG = minio_web_identity_executor_config(
 D19_HISTORY_API_CREDENTIALS_VOLUME = k8s.V1Volume(
     name="d19-history-api-credentials",
     secret=k8s.V1SecretVolumeSource(
-        secret_name="airflow-serp-d19-history-observer-api",
+        secret_name="airflow-serp-d19-history-observer-credentials",
         items=[
-            k8s.V1KeyToPath(key="ca.crt", path="ca.crt"),
             k8s.V1KeyToPath(key="password", path="password"),
             k8s.V1KeyToPath(key="username", path="username"),
         ],
+    ),
+)
+D19_HISTORY_API_TRUST_VOLUME = k8s.V1Volume(
+    name="d19-history-api-trust",
+    config_map=k8s.V1ConfigMapVolumeSource(
+        name="airflow-api-internal-ca",
+        items=[k8s.V1KeyToPath(key="ca.crt", path="ca.crt")],
     ),
 )
 D19_HISTORY_KUBERNETES_API_VOLUME = k8s.V1Volume(
@@ -111,15 +118,15 @@ D19_HISTORY_OBSERVER_EXECUTOR_CONFIG = {
                         ),
                         k8s.V1EnvVar(
                             name="ADAPSTORY_AIRFLOW_API_CA_FILE",
-                            value=f"{_HISTORY_SECRET_ROOT}/ca.crt",
+                            value=f"{_HISTORY_TRUST_ROOT}/ca.crt",
                         ),
                         k8s.V1EnvVar(
                             name="ADAPSTORY_AIRFLOW_HISTORY_OBSERVER_PASSWORD_FILE",
-                            value=f"{_HISTORY_SECRET_ROOT}/password",
+                            value=f"{_HISTORY_CREDENTIALS_ROOT}/password",
                         ),
                         k8s.V1EnvVar(
                             name="ADAPSTORY_AIRFLOW_HISTORY_OBSERVER_USERNAME_FILE",
-                            value=f"{_HISTORY_SECRET_ROOT}/username",
+                            value=f"{_HISTORY_CREDENTIALS_ROOT}/username",
                         ),
                         k8s.V1EnvVar(
                             name="ADAPSTORY_KUBERNETES_API_CA_FILE",
@@ -136,7 +143,12 @@ D19_HISTORY_OBSERVER_EXECUTOR_CONFIG = {
                         *vault_transit_volume_mounts(),
                         k8s.V1VolumeMount(
                             name="d19-history-api-credentials",
-                            mount_path=_HISTORY_SECRET_ROOT,
+                            mount_path=_HISTORY_CREDENTIALS_ROOT,
+                            read_only=True,
+                        ),
+                        k8s.V1VolumeMount(
+                            name="d19-history-api-trust",
+                            mount_path=_HISTORY_TRUST_ROOT,
                             read_only=True,
                         ),
                         k8s.V1VolumeMount(
@@ -154,6 +166,7 @@ D19_HISTORY_OBSERVER_EXECUTOR_CONFIG = {
                 *minio_web_identity_volumes(),
                 *vault_transit_volumes(),
                 D19_HISTORY_API_CREDENTIALS_VOLUME,
+                D19_HISTORY_API_TRUST_VOLUME,
                 D19_HISTORY_KUBERNETES_API_VOLUME,
                 *hardened_runtime_volumes(),
             ],

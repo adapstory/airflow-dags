@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import ssl
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -26,7 +27,7 @@ from uuid import UUID
 AIRFLOW_HISTORY_OBSERVER_USERNAME = "serp-d19-history-observer"
 AIRFLOW_HISTORY_DAG_ID = "serp_benchmark_improvement_wave"
 AIRFLOW_HISTORY_API_VERSION = "v2"
-AIRFLOW_HISTORY_SERVER_VERSION = "3.1.6"
+AIRFLOW_HISTORY_SUPPORTED_SERVER_MAJOR = 3
 AIRFLOW_HISTORY_TRUSTED_AUTHORITY = "airflow-api-server.airflow.svc.cluster.local:8080"
 AIRFLOW_HISTORY_TRUSTED_BASE_URL = f"https://{AIRFLOW_HISTORY_TRUSTED_AUTHORITY}"
 AIRFLOW_HISTORY_MAX_JWT_SECONDS = 300
@@ -183,8 +184,10 @@ class AirflowD19HistoryClient:
             version = self._authorized_json("GET", "/api/v2/version", jwt=jwt)
             if set(version) != {"git_version", "version"}:
                 raise ValueError("Airflow version response fields are unsupported")
-            if version.get("version") != AIRFLOW_HISTORY_SERVER_VERSION:
-                raise ValueError("Airflow server version does not match the observer contract")
+            _required_string(version, "git_version")
+            server_version = _supported_airflow_history_server_version(
+                _required_string(version, "version")
+            )
             runs, page_count, total_entries = self._collect_history_pages(
                 parent_logical_date=parent_date,
                 jwt=jwt,
@@ -213,7 +216,7 @@ class AirflowD19HistoryClient:
             },
             "api": {
                 "apiVersion": AIRFLOW_HISTORY_API_VERSION,
-                "airflowVersion": AIRFLOW_HISTORY_SERVER_VERSION,
+                "airflowVersion": server_version,
                 "serverAuthority": AIRFLOW_HISTORY_TRUSTED_AUTHORITY,
             },
             "acceptedRunVerifications": accepted_verifications,
@@ -631,7 +634,7 @@ class KubernetesD19HistoryFenceClient:
         return cls(api=factory(token_path=token_path, ca_path=ca_path), clock=clock)
 
     def acquire(self, *, parent_airflow_run: Mapping[str, Any]) -> dict[str, Any]:
-        """Create or CAS-replace an expired fence; an active foreign holder wins."""
+        """CAS-patch a predeclared expired fence; an active foreign holder wins."""
 
         parent = _normalized_parent_run(parent_airflow_run)
         now = _aware_utc(self._clock(), "Kubernetes fence clock")
@@ -644,25 +647,7 @@ class KubernetesD19HistoryFenceClient:
         except Exception as exc:
             if _api_error_status(exc) != 404:
                 raise ValueError("Kubernetes D19 fence read failed") from exc
-            body = _lease_body(
-                parent=parent,
-                holder=holder,
-                acquired_at=now,
-                renew_time=now,
-                transitions=1,
-            )
-            try:
-                created = self._api.create_namespaced_lease(
-                    namespace=D19_HISTORY_FENCE_NAMESPACE,
-                    body=body,
-                )
-            except Exception as create_exc:
-                if _api_error_status(create_exc) == 409:
-                    raise ValueError(
-                        "Kubernetes D19 fence acquisition lost a create race"
-                    ) from create_exc
-                raise ValueError("Kubernetes D19 fence create failed") from create_exc
-            return _fence_evidence(created, expected_parent=parent, expected_holder=holder)
+            raise ValueError("Kubernetes D19 fence must be predeclared") from exc
 
         existing = _normalized_lease(raw_existing)
         if _lease_is_active(existing, observed_at=now):
@@ -678,7 +663,7 @@ class KubernetesD19HistoryFenceClient:
                 )
             raise ValueError("Kubernetes D19 history fence is already active")
 
-        body = _lease_body(
+        body = _lease_patch(
             parent=parent,
             holder=holder,
             acquired_at=now,
@@ -687,7 +672,7 @@ class KubernetesD19HistoryFenceClient:
             resource_version=existing["resourceVersion"],
         )
         try:
-            replaced = self._api.replace_namespaced_lease(
+            patched = self._api.patch_namespaced_lease(
                 name=D19_HISTORY_FENCE_LEASE_NAME,
                 namespace=D19_HISTORY_FENCE_NAMESPACE,
                 body=body,
@@ -695,8 +680,8 @@ class KubernetesD19HistoryFenceClient:
         except Exception as exc:
             if _api_error_status(exc) == 409:
                 raise ValueError("Kubernetes D19 fence acquisition lost its CAS race") from exc
-            raise ValueError("Kubernetes D19 fence replace failed") from exc
-        evidence = _fence_evidence(replaced, expected_parent=parent, expected_holder=holder)
+            raise ValueError("Kubernetes D19 fence patch failed") from exc
+        evidence = _fence_evidence(patched, expected_parent=parent, expected_holder=holder)
         if evidence["resourceVersion"] == existing["resourceVersion"]:
             raise ValueError("Kubernetes D19 fence CAS did not advance resourceVersion")
         return evidence
@@ -741,7 +726,7 @@ class KubernetesD19HistoryFenceClient:
             )
         except Exception as exc:
             if _api_error_status(exc) == 404:
-                return
+                raise ValueError("Kubernetes D19 fence must be predeclared") from exc
             raise ValueError("Kubernetes D19 fence read failed") from exc
         if _lease_is_active(_normalized_lease(raw), observed_at=now):
             raise ValueError("active scheduled D6 fence blocks unfenced D19 admission")
@@ -757,7 +742,7 @@ class KubernetesD19HistoryFenceClient:
             )
         )
         now = _aware_utc(self._clock(), "Kubernetes fence clock")
-        body = _lease_body(
+        body = _lease_patch(
             parent={
                 "dagId": expected["parentDagId"],
                 "runId": expected["parentRunId"],
@@ -770,7 +755,7 @@ class KubernetesD19HistoryFenceClient:
         )
         try:
             released = _normalized_lease(
-                self._api.replace_namespaced_lease(
+                self._api.patch_namespaced_lease(
                     name=D19_HISTORY_FENCE_LEASE_NAME,
                     namespace=D19_HISTORY_FENCE_NAMESPACE,
                     body=body,
@@ -926,31 +911,27 @@ def _normalized_parent_run(value: Mapping[str, Any]) -> dict[str, str]:
     }
 
 
-def _lease_body(
+def _lease_patch(
     *,
     parent: Mapping[str, str],
     holder: str,
     acquired_at: datetime,
     renew_time: datetime,
     transitions: int,
-    resource_version: str | None = None,
+    resource_version: str,
 ) -> dict[str, Any]:
     if transitions < 0:
         raise ValueError("Kubernetes D19 fence leaseTransitions is invalid")
-    metadata: dict[str, Any] = {
-        "annotations": {
-            _PARENT_DAG_ANNOTATION: _required_string(parent, "dagId"),
-            _PARENT_RUN_ANNOTATION: _required_string(parent, "runId"),
-        },
-        "name": D19_HISTORY_FENCE_LEASE_NAME,
-        "namespace": D19_HISTORY_FENCE_NAMESPACE,
-    }
-    if resource_version is not None:
-        metadata["resourceVersion"] = resource_version
+    if not resource_version:
+        raise ValueError("Kubernetes D19 fence resourceVersion is required")
     return {
-        "apiVersion": "coordination.k8s.io/v1",
-        "kind": "Lease",
-        "metadata": metadata,
+        "metadata": {
+            "annotations": {
+                _PARENT_DAG_ANNOTATION: _required_string(parent, "dagId"),
+                _PARENT_RUN_ANNOTATION: _required_string(parent, "runId"),
+            },
+            "resourceVersion": resource_version,
+        },
         "spec": {
             "acquireTime": _utc_string(acquired_at),
             "holderIdentity": holder,
@@ -1327,6 +1308,17 @@ def _required_string(payload: Mapping[str, Any], field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} is required")
     return value.strip()
+
+
+def _supported_airflow_history_server_version(value: str) -> str:
+    """Validate the stable Airflow v2 API's supported server major line."""
+
+    stable_semver = (
+        rf"{AIRFLOW_HISTORY_SUPPORTED_SERVER_MAJOR}\." r"(?:0|[1-9][0-9]*)\." r"(?:0|[1-9][0-9]*)"
+    )
+    if re.fullmatch(stable_semver, value) is None:
+        raise ValueError("Airflow server version is outside the supported 3.x contract")
+    return value
 
 
 def _datetime_string(value: str, field_name: str) -> str:
