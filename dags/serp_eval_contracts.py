@@ -73,9 +73,20 @@ _METRIC_COMPATIBILITY_CONTRACT_VERSION = "serp-suite-metric-compatibility/v1"
 _CI_EVALUATION_RELEASE_CONTRACT_VERSION = "serp-ci-evaluation-release-evidence/v7"
 _EVALUATION_RELEASE_SCHEMA = "EvaluationRelease/v3"
 _EVALUATION_RELEASE_PROMOTION_SCHEMA = "EvaluationReleasePromotionReceipt/v7"
-_BENCHMARK_SUBSTRATE_SOURCE_SET_SCHEMA = "BenchmarkExecutionSubstrateSourceSet/v2"
+_BENCHMARK_SUBSTRATE_SOURCE_SET_SCHEMA = "BenchmarkExecutionSubstrateSourceSet/v3"
 _BENCHMARK_SUBSTRATE_SOURCE_SET_URI_PATTERN = (
-    r"s3://airflow-serp-evidence/serp-evals/ci-benchmark-substrates-[1-9][0-9]*/source-set\.json"
+    r"s3://airflow-serp-evidence/serp-evals/"
+    r"(ci-benchmark-substrates-[1-9][0-9]*)/source-set\.json"
+)
+_VERIFIED_BENCHMARK_SUBSTRATE_SOURCE_SET_FIELDS = frozenset(
+    {
+        "operationId",
+        "retainUntil",
+        "sourceSet",
+        "sourceSetEvidence",
+        "ds1000WheelhouseManifest",
+        "ds1000WheelhouseManifestEvidence",
+    }
 )
 _PAIRED_EVALUATION_REQUEST_SCHEMA = "PairedEvaluationRequest/v6"
 _PAIRED_EVALUATION_RECEIPT_CONTRACT_VERSION = "serp-paired-eval-receipt/v9"
@@ -2410,6 +2421,151 @@ def _benchmark_substrate_source_set_evidence(
     return evidence
 
 
+def _normalized_benchmark_execution_substrate_source_set(
+    source_set: object,
+    *,
+    field_name: str,
+    expected_suite_ids: Sequence[str],
+) -> dict[str, Any]:
+    expected = {
+        "ds1000WheelhouseManifestEvidence",
+        "schema",
+        "suites",
+        "supplyAttestationsEvidence",
+    }
+    if not isinstance(source_set, Mapping) or set(source_set) != expected:
+        raise ValueError(f"{field_name} fields are unsupported")
+    if _required_str(source_set, "schema") != _BENCHMARK_SUBSTRATE_SOURCE_SET_SCHEMA:
+        raise ValueError(f"{field_name} schema is unsupported")
+    raw_suites = source_set.get("suites")
+    if not isinstance(raw_suites, list) or len(raw_suites) != len(expected_suite_ids):
+        raise ValueError(f"{field_name} suites are incomplete")
+
+    suites: list[dict[str, Any]] = []
+    for expected_suite_id, suite in zip(expected_suite_ids, raw_suites, strict=True):
+        if not isinstance(suite, Mapping) or set(suite) != {"roles", "suiteId"}:
+            raise ValueError(f"{field_name} suite shape is unsupported")
+        if _required_str(suite, "suiteId") != expected_suite_id:
+            raise ValueError(f"{field_name} suite order is unsupported")
+        roles = suite.get("roles")
+        if not isinstance(roles, list) or not roles:
+            raise ValueError(f"{field_name} suite roles are incomplete")
+        normalized_roles: list[dict[str, Any]] = []
+        for role in roles:
+            if not isinstance(role, Mapping) or set(role) != {"evidence", "role"}:
+                raise ValueError(f"{field_name} role shape is unsupported")
+            normalized_roles.append(
+                {
+                    "evidence": _validated_compact_worm_handle(
+                        role.get("evidence"),
+                        f"{field_name} role evidence",
+                    ),
+                    "role": _required_str(role, "role"),
+                }
+            )
+        suites.append({"roles": normalized_roles, "suiteId": expected_suite_id})
+
+    return {
+        "ds1000WheelhouseManifestEvidence": _validated_compact_worm_handle(
+            source_set.get("ds1000WheelhouseManifestEvidence"),
+            f"{field_name} DS-1000 wheelhouse manifest evidence",
+        ),
+        "schema": _BENCHMARK_SUBSTRATE_SOURCE_SET_SCHEMA,
+        "suites": suites,
+        "supplyAttestationsEvidence": _validated_compact_worm_handle(
+            source_set.get("supplyAttestationsEvidence"),
+            f"{field_name} supply attestations evidence",
+        ),
+    }
+
+
+def _normalized_ds1000_wheelhouse_manifest(value: object, *, field_name: str) -> dict[str, Any]:
+    expected = {"artifacts", "pythonVersion", "schema"}
+    if not isinstance(value, Mapping) or set(value) != expected:
+        raise ValueError(f"{field_name} fields are unsupported")
+    if _required_str(value, "schema") != "Ds1000WheelhouseManifest/v1":
+        raise ValueError(f"{field_name} schema is unsupported")
+    if _required_str(value, "pythonVersion") != "3.7.10":
+        raise ValueError(f"{field_name} must bind the official DS-1000 Python ABI")
+    raw_artifacts = value.get("artifacts")
+    if not isinstance(raw_artifacts, list) or not raw_artifacts:
+        raise ValueError(f"{field_name} artifacts are incomplete")
+    artifacts: list[dict[str, Any]] = []
+    file_names: list[str] = []
+    for index, artifact in enumerate(raw_artifacts):
+        artifact_field_name = f"{field_name}.artifacts[{index}]"
+        if not isinstance(artifact, Mapping) or set(artifact) != {
+            "fileName",
+            "sha256",
+            "sizeBytes",
+        }:
+            raise ValueError(f"{artifact_field_name} fields are unsupported")
+        file_name = _required_str(artifact, "fileName")
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", file_name) is None:
+            raise ValueError(f"{artifact_field_name}.fileName is unsupported")
+        artifacts.append(
+            {
+                "fileName": file_name,
+                "sha256": _required_sha256_prefixed(artifact, "sha256"),
+                "sizeBytes": _required_positive_int(artifact, "sizeBytes"),
+            }
+        )
+        file_names.append(file_name)
+    if file_names != sorted(file_names) or len(file_names) != len(set(file_names)):
+        raise ValueError(f"{field_name} artifacts must be uniquely named and sorted")
+    return {
+        "artifacts": artifacts,
+        "pythonVersion": "3.7.10",
+        "schema": "Ds1000WheelhouseManifest/v1",
+    }
+
+
+def _validate_execution_substrate_source_set_paths(
+    source_set: Mapping[str, Any],
+    *,
+    source_root: str,
+    role_contracts: Sequence[tuple[str, str, str]],
+    field_name: str,
+) -> None:
+    wheelhouse_evidence = _validated_compact_worm_handle(
+        source_set.get("ds1000WheelhouseManifestEvidence"),
+        f"{field_name} DS-1000 wheelhouse manifest evidence",
+    )
+    if wheelhouse_evidence["s3Uri"] != f"{source_root}/wheelhouses/ds1000/manifest.json":
+        raise ValueError(f"{field_name} must use the canonical DS-1000 wheelhouse manifest object")
+    supply_evidence = _validated_compact_worm_handle(
+        source_set.get("supplyAttestationsEvidence"),
+        f"{field_name} supply attestations evidence",
+    )
+    if supply_evidence["s3Uri"] != f"{source_root}/supply-attestations.json":
+        raise ValueError(f"{field_name} must use the canonical supply-attestations object")
+    raw_suites = source_set.get("suites")
+    if not isinstance(raw_suites, list) or len(raw_suites) != len(role_contracts):
+        raise ValueError(f"{field_name} suites are incomplete")
+    for suite, (suite_id, role_name, file_name) in zip(
+        raw_suites,
+        role_contracts,
+        strict=True,
+    ):
+        if not isinstance(suite, Mapping):
+            raise ValueError(f"{field_name} suite is invalid")
+        raw_roles = suite.get("roles")
+        if not isinstance(raw_roles, list) or len(raw_roles) != 1:
+            raise ValueError(f"{field_name} roles are incomplete: {suite_id}")
+        role = raw_roles[0]
+        if not isinstance(role, Mapping) or role.get("role") != role_name:
+            raise ValueError(f"{field_name} role is invalid: {suite_id}")
+        role_evidence = _validated_compact_worm_handle(
+            role.get("evidence"),
+            f"{field_name} {suite_id}/{role_name} evidence",
+        )
+        if role_evidence["s3Uri"] != f"{source_root}/roles/{file_name}":
+            raise ValueError(
+                f"{field_name} must use the canonical source-set role object: "
+                f"{suite_id}/{role_name}"
+            )
+
+
 def _load_benchmark_substrate_source_set_evidence(
     runtime_receipt: Mapping[str, Any],
     *,
@@ -2425,30 +2581,10 @@ def _load_benchmark_substrate_source_set_evidence(
         field_name=field_name,
         s3_client=s3_client,
     )
-    expected = {"schema", "suites", "supplyAttestationsEvidence"}
-    if set(source_set) != expected:
-        raise ValueError(f"{field_name} fields are unsupported")
-    if _required_str(source_set, "schema") != _BENCHMARK_SUBSTRATE_SOURCE_SET_SCHEMA:
-        raise ValueError(f"{field_name} schema is unsupported")
-    suites = source_set.get("suites")
-    if not isinstance(suites, list) or len(suites) != len(MANDATORY_SERP_BENCHMARK_SUITES):
-        raise ValueError(f"{field_name} suites are incomplete")
-    for expected_suite_id, suite in zip(MANDATORY_SERP_BENCHMARK_SUITES, suites, strict=True):
-        if not isinstance(suite, Mapping) or set(suite) != {"roles", "suiteId"}:
-            raise ValueError(f"{field_name} suite shape is unsupported")
-        if _required_str(suite, "suiteId") != expected_suite_id:
-            raise ValueError(f"{field_name} suite order is unsupported")
-        roles = suite.get("roles")
-        if not isinstance(roles, list) or not roles:
-            raise ValueError(f"{field_name} suite roles are incomplete")
-        for role in roles:
-            if not isinstance(role, Mapping) or set(role) != {"evidence", "role"}:
-                raise ValueError(f"{field_name} role shape is unsupported")
-            _required_str(role, "role")
-            _validated_compact_worm_handle(role.get("evidence"), f"{field_name} role evidence")
-    _validated_compact_worm_handle(
-        source_set.get("supplyAttestationsEvidence"),
-        f"{field_name} supply attestations evidence",
+    _normalized_benchmark_execution_substrate_source_set(
+        source_set,
+        field_name=field_name,
+        expected_suite_ids=MANDATORY_SERP_BENCHMARK_SUITES,
     )
     return evidence
 
@@ -4837,48 +4973,157 @@ _BENCHMARK_SUBSTRATE_SOURCE_SET_ENV = "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE
 
 
 def _load_execution_substrate_source_set(
-    source_set_evidence: Mapping[str, Any],
+    verified_source_set: Mapping[str, Any],
     *,
     s3_client: Any | None = None,
 ) -> dict[str, dict[str, bytes]]:
-    """Load one exact WORM source set and every exact WORM role it declares."""
+    """Load one verified v3 WORM source set and every exact WORM role it declares."""
 
-    from dags.serp_benchmark_catalog import EXTERNAL_EXECUTION_SUBSTRATE_ROLES
-
-    source_handle = _validated_compact_worm_handle(
-        source_set_evidence, "benchmark execution substrate source set"
+    from adapstory_serp_pipeline.registry.evaluation_release_contract import (
+        BENCHMARK_EXECUTION_SUBSTRATE_ROLE_CONTRACTS,
     )
+
+    execution_suite_ids = tuple(
+        suite_id
+        for suite_id, _expected_role, _expected_file_name in (
+            BENCHMARK_EXECUTION_SUBSTRATE_ROLE_CONTRACTS
+        )
+    )
+    if (
+        not isinstance(verified_source_set, Mapping)
+        or set(verified_source_set) != _VERIFIED_BENCHMARK_SUBSTRATE_SOURCE_SET_FIELDS
+    ):
+        raise ValueError(
+            "verified benchmark execution substrate source set must define exactly "
+            f"{sorted(_VERIFIED_BENCHMARK_SUBSTRATE_SOURCE_SET_FIELDS)}"
+        )
+    source_handle = _validated_compact_worm_handle(
+        verified_source_set.get("sourceSetEvidence"),
+        "verified benchmark execution substrate source set sourceSetEvidence",
+    )
+    source_match = re.fullmatch(
+        _BENCHMARK_SUBSTRATE_SOURCE_SET_URI_PATTERN,
+        source_handle["s3Uri"],
+    )
+    if source_match is None:
+        raise ValueError(
+            "verified benchmark execution substrate source set sourceSetEvidence "
+            "must identify the canonical source-set object"
+        )
+    source_root = source_handle["s3Uri"].removesuffix("/source-set.json")
+    if _required_str(verified_source_set, "operationId") != source_match.group(1):
+        raise ValueError(
+            "verified benchmark execution substrate source set operationId is mismatched"
+        )
+    if (
+        _required_datetime_string(verified_source_set, "retainUntil")
+        != source_handle["retainUntil"]
+    ):
+        raise ValueError(
+            "verified benchmark execution substrate source set retainUntil is mismatched"
+        )
+
+    declared_source_set = _normalized_benchmark_execution_substrate_source_set(
+        verified_source_set.get("sourceSet"),
+        field_name="verified benchmark execution substrate source set sourceSet",
+        expected_suite_ids=execution_suite_ids,
+    )
+    _validate_execution_substrate_source_set_paths(
+        declared_source_set,
+        source_root=source_root,
+        role_contracts=BENCHMARK_EXECUTION_SUBSTRATE_ROLE_CONTRACTS,
+        field_name="verified benchmark execution substrate source set",
+    )
+    wheelhouse_handle = _validated_compact_worm_handle(
+        verified_source_set.get("ds1000WheelhouseManifestEvidence"),
+        "verified benchmark execution substrate source set DS-1000 wheelhouse " "manifest evidence",
+    )
+    if declared_source_set["ds1000WheelhouseManifestEvidence"] != wheelhouse_handle:
+        raise ValueError(
+            "verified benchmark execution substrate source set wheelhouse evidence "
+            "does not match sourceSet"
+        )
+    if wheelhouse_handle["s3Uri"] != f"{source_root}/wheelhouses/ds1000/manifest.json":
+        raise ValueError(
+            "verified benchmark execution substrate source set must use the canonical "
+            "DS-1000 wheelhouse manifest object"
+        )
+    declared_wheelhouse_manifest = _normalized_ds1000_wheelhouse_manifest(
+        verified_source_set.get("ds1000WheelhouseManifest"),
+        field_name="verified benchmark execution substrate source set DS-1000 wheelhouse manifest",
+    )
+
     source_client = s3_client or _s3_client(source_handle["s3Uri"])
-    source_bytes, _, _ = _read_compliance_locked_s3_bytes(
+    source_bytes, _, source_retain_until = _read_compliance_locked_s3_bytes(
         source_client,
         source_handle["s3Uri"],
         field_name="benchmark execution substrate source set",
         version_id=source_handle["versionId"],
     )
+    if source_retain_until != source_handle["retainUntil"]:
+        raise ValueError("benchmark execution substrate source set retainUntil is mismatched")
     if "sha256:" + sha256(source_bytes).hexdigest() != source_handle["sha256"]:
         raise ValueError("benchmark execution substrate source set digest is mismatched")
-    try:
-        source_set = json.loads(source_bytes)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("benchmark execution substrate source set is not valid JSON") from exc
-    if (
-        not isinstance(source_set, Mapping)
-        or set(source_set) != {"schema", "suites", "supplyAttestationsEvidence"}
-        or source_set.get("schema") != "BenchmarkExecutionSubstrateSourceSet/v2"
-    ):
-        raise ValueError("benchmark execution substrate source set shape is invalid")
+    source_set = _normalized_benchmark_execution_substrate_source_set(
+        _canonical_json_object_bytes(
+            source_bytes,
+            "benchmark execution substrate source set",
+        ),
+        field_name="benchmark execution substrate source set",
+        expected_suite_ids=execution_suite_ids,
+    )
+    if source_set != declared_source_set:
+        raise ValueError(
+            "verified benchmark execution substrate source set sourceSet does not "
+            "match sourceSetEvidence"
+        )
+
+    wheelhouse_client = s3_client or _s3_client(wheelhouse_handle["s3Uri"])
+    wheelhouse_bytes, _, wheelhouse_retain_until = _read_compliance_locked_s3_bytes(
+        wheelhouse_client,
+        wheelhouse_handle["s3Uri"],
+        field_name="DS-1000 wheelhouse manifest",
+        version_id=wheelhouse_handle["versionId"],
+    )
+    if wheelhouse_retain_until != wheelhouse_handle["retainUntil"]:
+        raise ValueError("DS-1000 wheelhouse manifest retainUntil is mismatched")
+    if "sha256:" + sha256(wheelhouse_bytes).hexdigest() != wheelhouse_handle["sha256"]:
+        raise ValueError("DS-1000 wheelhouse manifest digest is mismatched")
+    loaded_wheelhouse_manifest = _normalized_ds1000_wheelhouse_manifest(
+        _canonical_json_object_bytes(wheelhouse_bytes, "DS-1000 wheelhouse manifest"),
+        field_name="DS-1000 wheelhouse manifest",
+    )
+    if loaded_wheelhouse_manifest != declared_wheelhouse_manifest:
+        raise ValueError(
+            "verified benchmark execution substrate source set DS-1000 wheelhouse "
+            "manifest does not match its evidence"
+        )
+
+    supply_attestations_evidence = _validated_compact_worm_handle(
+        source_set.get("supplyAttestationsEvidence"),
+        "benchmark execution substrate source set supply attestations evidence",
+    )
+    if supply_attestations_evidence["s3Uri"] != f"{source_root}/supply-attestations.json":
+        raise ValueError(
+            "verified benchmark execution substrate source set must use the canonical "
+            "supply-attestations object"
+        )
     _load_benchmark_supply_attestations(
-        source_set.get("supplyAttestationsEvidence"), s3_client=s3_client
+        supply_attestations_evidence,
+        wheelhouse_evidence=wheelhouse_handle,
+        s3_client=s3_client,
     )
     raw_suites = source_set.get("suites")
     if not isinstance(raw_suites, list) or len(raw_suites) != len(
-        EXTERNAL_EXECUTION_SUBSTRATE_ROLES
+        BENCHMARK_EXECUTION_SUBSTRATE_ROLE_CONTRACTS
     ):
         raise ValueError("benchmark execution substrate source set suites are incomplete")
     result: dict[str, dict[str, bytes]] = {}
-    for index, (expected_suite_id, expected_roles) in enumerate(
-        EXTERNAL_EXECUTION_SUBSTRATE_ROLES.items()
-    ):
+    for index, (
+        expected_suite_id,
+        expected_role,
+        expected_file_name,
+    ) in enumerate(BENCHMARK_EXECUTION_SUBSTRATE_ROLE_CONTRACTS):
         suite = raw_suites[index]
         if (
             not isinstance(suite, Mapping)
@@ -4887,44 +5132,53 @@ def _load_execution_substrate_source_set(
         ):
             raise ValueError("benchmark execution substrate source set suite order is invalid")
         raw_roles = suite.get("roles")
-        if not isinstance(raw_roles, list) or len(raw_roles) != len(expected_roles):
+        if not isinstance(raw_roles, list) or len(raw_roles) != 1:
             raise ValueError(
                 f"benchmark execution substrate source roles are incomplete: {expected_suite_id}"
             )
         loaded_roles: dict[str, bytes] = {}
-        for role_index, expected_role in enumerate(expected_roles):
-            role = raw_roles[role_index]
-            if (
-                not isinstance(role, Mapping)
-                or set(role) != {"evidence", "role"}
-                or role.get("role") != expected_role
-            ):
-                raise ValueError(
-                    "benchmark execution substrate source role order is invalid: "
-                    f"{expected_suite_id}"
-                )
-            handle = _validated_compact_worm_handle(
-                role.get("evidence"),
-                f"benchmark execution substrate {expected_suite_id}/{expected_role}",
+        role = raw_roles[0]
+        if (
+            not isinstance(role, Mapping)
+            or set(role) != {"evidence", "role"}
+            or role.get("role") != expected_role
+        ):
+            raise ValueError(
+                "benchmark execution substrate source role order is invalid: "
+                f"{expected_suite_id}"
             )
-            role_client = s3_client or _s3_client(handle["s3Uri"])
-            payload, _, _ = _read_compliance_locked_s3_bytes(
-                role_client,
-                handle["s3Uri"],
-                field_name=f"benchmark execution substrate {expected_suite_id}/{expected_role}",
-                version_id=handle["versionId"],
+        handle = _validated_compact_worm_handle(
+            role.get("evidence"),
+            f"benchmark execution substrate {expected_suite_id}/{expected_role}",
+        )
+        if handle["s3Uri"] != f"{source_root}/roles/{expected_file_name}":
+            raise ValueError(
+                "benchmark execution substrate must use the canonical source-set role object: "
+                f"{expected_suite_id}/{expected_role}"
             )
-            if "sha256:" + sha256(payload).hexdigest() != handle["sha256"]:
-                raise ValueError(
-                    f"benchmark execution substrate role digest is mismatched: "
-                    f"{expected_suite_id}/{expected_role}"
-                )
-            loaded_roles[expected_role] = payload
+        role_client = s3_client or _s3_client(handle["s3Uri"])
+        payload, _, _ = _read_compliance_locked_s3_bytes(
+            role_client,
+            handle["s3Uri"],
+            field_name=f"benchmark execution substrate {expected_suite_id}/{expected_role}",
+            version_id=handle["versionId"],
+        )
+        if "sha256:" + sha256(payload).hexdigest() != handle["sha256"]:
+            raise ValueError(
+                f"benchmark execution substrate role digest is mismatched: "
+                f"{expected_suite_id}/{expected_role}"
+            )
+        loaded_roles[expected_role] = payload
         result[expected_suite_id] = loaded_roles
     return result
 
 
-def _load_benchmark_supply_attestations(evidence: object, *, s3_client: Any | None = None) -> None:
+def _load_benchmark_supply_attestations(
+    evidence: object,
+    *,
+    wheelhouse_evidence: Mapping[str, str],
+    s3_client: Any | None = None,
+) -> None:
     handle = _validated_compact_worm_handle(evidence, "benchmark substrate supply attestations")
     client = s3_client or _s3_client(handle["s3Uri"])
     payload, _, _ = _read_compliance_locked_s3_bytes(
@@ -4938,13 +5192,20 @@ def _load_benchmark_supply_attestations(evidence: object, *, s3_client: Any | No
     manifest = _canonical_json_object_bytes(payload, "benchmark substrate supply attestations")
     if (
         set(manifest) != {"ds1000", "schema", "sweBench"}
-        or manifest.get("schema") != "BenchmarkSubstrateSupplyAttestations/v1"
+        or manifest.get("schema") != "BenchmarkSubstrateSupplyAttestations/v2"
     ):
         raise ValueError("benchmark substrate supply attestations shape is invalid")
     ds1000 = manifest.get("ds1000")
     if (
         not isinstance(ds1000, Mapping)
-        or set(ds1000) != {"imageReference", "sbomEvidence", "signatureStatus"}
+        or set(ds1000)
+        != {
+            "imageReference",
+            "sbomEvidence",
+            "signatureStatus",
+            "wheelhouseManifestEvidence",
+            "wheelhouseManifestSha256",
+        }
         or ds1000.get("signatureStatus") != "signed-and-verified"
         or not isinstance(ds1000.get("imageReference"), str)
         or not re.fullmatch(
@@ -4954,6 +5215,18 @@ def _load_benchmark_supply_attestations(evidence: object, *, s3_client: Any | No
     ):
         raise ValueError("DS-1000 supply attestation is invalid")
     _validated_compact_worm_handle(ds1000.get("sbomEvidence"), "DS-1000 SBOM")
+    attested_wheelhouse_evidence = _validated_compact_worm_handle(
+        ds1000.get("wheelhouseManifestEvidence"),
+        "DS-1000 wheelhouse manifest",
+    )
+    if (
+        attested_wheelhouse_evidence != dict(wheelhouse_evidence)
+        or _required_sha256_prefixed(ds1000, "wheelhouseManifestSha256")
+        != wheelhouse_evidence["sha256"]
+    ):
+        raise ValueError(
+            "DS-1000 supply attestation must bind the exact wheelhouse manifest evidence"
+        )
 
     swe_bench = manifest.get("sweBench")
     if (

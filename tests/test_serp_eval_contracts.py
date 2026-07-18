@@ -21,6 +21,9 @@ from uuid import UUID
 
 import pytest
 from adapstory_serp_pipeline.benchmark.native_suite_scoring import suite_metric_profile
+from adapstory_serp_pipeline.registry.evaluation_release_contract import (
+    BENCHMARK_EXECUTION_SUBSTRATE_ROLE_CONTRACTS,
+)
 
 import dags.serp_eval_contracts as serp_eval_contracts_module
 from dags.serp_benchmark_catalog import (
@@ -1109,6 +1112,16 @@ def test_catalog_materializer_accepts_dedicated_dataset_evidence_plan() -> None:
 
 
 def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() -> None:
+    operation_id = "ci-benchmark-substrates-1"
+    role_file_names = {
+        (suite_id, role): file_name
+        for suite_id, role, file_name in BENCHMARK_EXECUTION_SUBSTRATE_ROLE_CONTRACTS
+    }
+    assert set(role_file_names) == {
+        (suite_id, role)
+        for suite_id, roles in EXTERNAL_EXECUTION_SUBSTRATE_ROLES.items()
+        for role in roles
+    }
     role_payloads = {
         (suite_id, role): f"sealed:{suite_id}:{role}".encode()
         for suite_id, roles in EXTERNAL_EXECUTION_SUBSTRATE_ROLES.items()
@@ -1120,7 +1133,7 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
         role_entries: list[dict[str, object]] = []
         for role in roles:
             payload = role_payloads[(suite_id, role)]
-            key = f"serp-evals/substrates/{suite_id}/{role}.json"
+            key = f"serp-evals/{operation_id}/roles/" f"{role_file_names[(suite_id, role)]}"
             version_id = f"version-{suite_id}-{role}"
             objects[(key, version_id)] = payload
             role_entries.append(
@@ -1146,15 +1159,41 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
             "versionId": f"sbom-{name}-v1",
         }
 
-    supply_attestations = {
+    wheelhouse_manifest: dict[str, Any] = {
+        "artifacts": [
+            {
+                "fileName": "pip-23.3.2-py3-none-any.whl",
+                "sha256": "sha256:" + "f" * 64,
+                "sizeBytes": 1,
+            }
+        ],
+        "pythonVersion": "3.7.10",
+        "schema": "Ds1000WheelhouseManifest/v1",
+    }
+    wheelhouse_bytes = json.dumps(
+        wheelhouse_manifest, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+    ).encode()
+    wheelhouse_key = f"serp-evals/{operation_id}/wheelhouses/ds1000/manifest.json"
+    wheelhouse_version = "ds1000-wheelhouse-manifest-version"
+    objects[(wheelhouse_key, wheelhouse_version)] = wheelhouse_bytes
+    wheelhouse_evidence = {
+        "objectLockMode": "COMPLIANCE",
+        "retainUntil": "2027-07-15T00:00:00Z",
+        "s3Uri": f"s3://airflow-serp-evidence/{wheelhouse_key}",
+        "sha256": "sha256:" + sha256(wheelhouse_bytes).hexdigest(),
+        "versionId": wheelhouse_version,
+    }
+    supply_attestations: dict[str, Any] = {
         "ds1000": {
             "imageReference": (
                 "harbor.adapstory.com/benchmark-sandboxes/ds1000@sha256:" + "d" * 64
             ),
             "sbomEvidence": sbom_handle("ds1000"),
             "signatureStatus": "signed-and-verified",
+            "wheelhouseManifestEvidence": wheelhouse_evidence,
+            "wheelhouseManifestSha256": wheelhouse_evidence["sha256"],
         },
-        "schema": "BenchmarkSubstrateSupplyAttestations/v1",
+        "schema": "BenchmarkSubstrateSupplyAttestations/v2",
         "sweBench": {
             "datasetRevision": "91aa3ed51b709be6457e12d00300a6a596d4c6a3",
             "images": [
@@ -1174,7 +1213,7 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
     supply_bytes = json.dumps(
         supply_attestations, ensure_ascii=True, separators=(",", ":"), sort_keys=True
     ).encode()
-    supply_key = "serp-evals/substrates/supply-attestations.json"
+    supply_key = f"serp-evals/{operation_id}/supply-attestations.json"
     supply_version = "supply-attestations-version"
     objects[(supply_key, supply_version)] = supply_bytes
     supply_evidence = {
@@ -1184,15 +1223,16 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
         "sha256": "sha256:" + sha256(supply_bytes).hexdigest(),
         "versionId": supply_version,
     }
-    source_set = {
-        "schema": "BenchmarkExecutionSubstrateSourceSet/v2",
+    source_set: dict[str, Any] = {
+        "ds1000WheelhouseManifestEvidence": wheelhouse_evidence,
+        "schema": "BenchmarkExecutionSubstrateSourceSet/v3",
         "suites": suite_entries,
         "supplyAttestationsEvidence": supply_evidence,
     }
     source_set_bytes = json.dumps(
         source_set, ensure_ascii=True, separators=(",", ":"), sort_keys=True
     ).encode()
-    source_key = "serp-evals/substrates/source-set.json"
+    source_key = f"serp-evals/{operation_id}/source-set.json"
     source_version = "source-set-version"
     objects[(source_key, source_version)] = source_set_bytes
     source_evidence = {
@@ -1201,6 +1241,14 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
         "s3Uri": f"s3://airflow-serp-evidence/{source_key}",
         "sha256": "sha256:" + sha256(source_set_bytes).hexdigest(),
         "versionId": source_version,
+    }
+    verified_source_set: dict[str, Any] = {
+        "operationId": operation_id,
+        "retainUntil": source_evidence["retainUntil"],
+        "sourceSet": source_set,
+        "sourceSetEvidence": source_evidence,
+        "ds1000WheelhouseManifest": wheelhouse_manifest,
+        "ds1000WheelhouseManifestEvidence": wheelhouse_evidence,
     }
 
     class Body:
@@ -1216,7 +1264,7 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
             assert (Key, VersionId) in objects
             return {
                 "ObjectLockMode": "COMPLIANCE",
-                "ObjectLockRetainUntilDate": datetime.now(UTC) + timedelta(days=365),
+                "ObjectLockRetainUntilDate": datetime(2027, 7, 15, tzinfo=UTC),
                 "VersionId": VersionId,
             }
 
@@ -1225,7 +1273,7 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
             return {"Body": Body(objects[(Key, VersionId)])}
 
     loaded = serp_eval_contracts_module._load_execution_substrate_source_set(
-        source_evidence,
+        verified_source_set,
         s3_client=FakeS3Client(),
     )
 
@@ -1233,6 +1281,146 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
         suite_id: {role: role_payloads[(suite_id, role)] for role in roles}
         for suite_id, roles in EXTERNAL_EXECUTION_SUBSTRATE_ROLES.items()
     }
+
+    noncanonical_role_path = dict(verified_source_set)
+    noncanonical_role_source_set = {
+        **source_set,
+        "suites": [
+            {
+                **suite,
+                "roles": [
+                    {
+                        **role,
+                        "evidence": {
+                            **role["evidence"],
+                            "s3Uri": (
+                                "s3://airflow-serp-evidence/serp-evals/"
+                                f"{operation_id}/roles/noncanonical.json"
+                            ),
+                        },
+                    }
+                    for role in suite["roles"]
+                ],
+            }
+            if suite["suiteId"] == "ARES"
+            else suite
+            for suite in source_set["suites"]
+        ],
+    }
+    noncanonical_role_path["sourceSet"] = noncanonical_role_source_set
+    with pytest.raises(ValueError, match="canonical source-set role object"):
+        serp_eval_contracts_module._load_execution_substrate_source_set(
+            noncanonical_role_path,
+            s3_client=FakeS3Client(),
+        )
+
+    legacy_supply_attestations = {
+        **supply_attestations,
+        "ds1000": {
+            key: value
+            for key, value in supply_attestations["ds1000"].items()
+            if key not in {"wheelhouseManifestEvidence", "wheelhouseManifestSha256"}
+        },
+        "schema": "BenchmarkSubstrateSupplyAttestations/v1",
+    }
+    legacy_supply_bytes = json.dumps(
+        legacy_supply_attestations,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    legacy_supply_key = f"serp-evals/{operation_id}/legacy-supply-attestations.json"
+    legacy_supply_version = "legacy-supply-attestations-version"
+    objects[(legacy_supply_key, legacy_supply_version)] = legacy_supply_bytes
+    with pytest.raises(ValueError, match="shape is invalid"):
+        serp_eval_contracts_module._load_benchmark_supply_attestations(
+            {
+                "objectLockMode": "COMPLIANCE",
+                "retainUntil": "2027-07-15T00:00:00Z",
+                "s3Uri": f"s3://airflow-serp-evidence/{legacy_supply_key}",
+                "sha256": "sha256:" + sha256(legacy_supply_bytes).hexdigest(),
+                "versionId": legacy_supply_version,
+            },
+            wheelhouse_evidence=wheelhouse_evidence,
+            s3_client=FakeS3Client(),
+        )
+
+    mismatched_operation = dict(verified_source_set)
+    mismatched_operation["operationId"] = "ci-benchmark-substrates-2"
+    with pytest.raises(ValueError, match="operationId"):
+        serp_eval_contracts_module._load_execution_substrate_source_set(
+            mismatched_operation,
+            s3_client=FakeS3Client(),
+        )
+
+    mismatched_retain_until = dict(verified_source_set)
+    mismatched_retain_until["retainUntil"] = "2027-07-16T00:00:00Z"
+    with pytest.raises(ValueError, match="retainUntil"):
+        serp_eval_contracts_module._load_execution_substrate_source_set(
+            mismatched_retain_until,
+            s3_client=FakeS3Client(),
+        )
+
+    with pytest.raises(ValueError, match="verified"):
+        serp_eval_contracts_module._load_execution_substrate_source_set(
+            source_evidence,
+            s3_client=FakeS3Client(),
+        )
+
+    legacy_source_set = dict(verified_source_set)
+    legacy_source_set["sourceSet"] = {
+        **source_set,
+        "schema": "BenchmarkExecutionSubstrateSourceSet/v2",
+    }
+    with pytest.raises(ValueError, match="source set"):
+        serp_eval_contracts_module._load_execution_substrate_source_set(
+            legacy_source_set,
+            s3_client=FakeS3Client(),
+        )
+
+    source_set_without_wheelhouse = dict(verified_source_set)
+    source_set_without_wheelhouse["sourceSet"] = dict(source_set)
+    source_set_without_wheelhouse["sourceSet"].pop("ds1000WheelhouseManifestEvidence")
+    with pytest.raises(ValueError, match="source set"):
+        serp_eval_contracts_module._load_execution_substrate_source_set(
+            source_set_without_wheelhouse,
+            s3_client=FakeS3Client(),
+        )
+
+    missing_wheelhouse = dict(verified_source_set)
+    missing_wheelhouse.pop("ds1000WheelhouseManifestEvidence")
+    with pytest.raises(ValueError, match="verified"):
+        serp_eval_contracts_module._load_execution_substrate_source_set(
+            missing_wheelhouse,
+            s3_client=FakeS3Client(),
+        )
+
+    mismatched_wheelhouse_evidence = dict(verified_source_set)
+    mismatched_wheelhouse_evidence["ds1000WheelhouseManifestEvidence"] = {
+        **wheelhouse_evidence,
+        "versionId": "different-wheelhouse-manifest-version",
+    }
+    with pytest.raises(ValueError, match="wheelhouse evidence"):
+        serp_eval_contracts_module._load_execution_substrate_source_set(
+            mismatched_wheelhouse_evidence,
+            s3_client=FakeS3Client(),
+        )
+
+    mismatched_wheelhouse_manifest = dict(verified_source_set)
+    mismatched_wheelhouse_manifest["ds1000WheelhouseManifest"] = {
+        **wheelhouse_manifest,
+        "artifacts": [
+            {
+                **wheelhouse_manifest["artifacts"][0],
+                "sha256": "sha256:" + "0" * 64,
+            }
+        ],
+    }
+    with pytest.raises(ValueError, match="manifest does not match"):
+        serp_eval_contracts_module._load_execution_substrate_source_set(
+            mismatched_wheelhouse_manifest,
+            s3_client=FakeS3Client(),
+        )
 
 
 def test_nightly_regression_plan_rejects_caller_supplied_suite_inputs() -> None:

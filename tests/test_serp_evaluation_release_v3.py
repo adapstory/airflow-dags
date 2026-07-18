@@ -88,7 +88,7 @@ def _release_pair(
     legacy_treatment: bool = False,
     same_treatment: bool = False,
     include_runtime_source_set: bool = True,
-    runtime_source_set_schema: str = "BenchmarkExecutionSubstrateSourceSet/v2",
+    runtime_source_set_schema: str = "BenchmarkExecutionSubstrateSourceSet/v3",
     different_runtime_source_set_handles: bool = False,
     canonical_runtime_source_set_uri: bool = True,
     runtime_source_set_extra_handle_fields: Mapping[str, str] | None = None,
@@ -107,6 +107,14 @@ def _release_pair(
         return evidence
 
     source_set_payload = {
+        "ds1000WheelhouseManifestEvidence": {
+            "objectLockMode": "COMPLIANCE",
+            "retainUntil": "2027-07-15T00:00:00Z",
+            "s3Uri": "s3://airflow-serp-evidence/serp-evals/ci-benchmark-substrates-1/"
+            "wheelhouses/ds1000/manifest.json",
+            "sha256": "sha256:" + "c" * 64,
+            "versionId": "ds1000-wheelhouse-manifest-1",
+        },
         "schema": runtime_source_set_schema,
         "suites": [
             {
@@ -820,7 +828,7 @@ def test_d17_rejects_runtime_source_set_outside_ci_benchmark_substrates_prefix()
 
 def test_d17_rejects_runtime_source_set_with_unsupported_schema() -> None:
     bundle, objects = _release_pair(
-        runtime_source_set_schema="BenchmarkExecutionSubstrateSourceSet/v1"
+        runtime_source_set_schema="BenchmarkExecutionSubstrateSourceSet/v2"
     )
     plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
 
