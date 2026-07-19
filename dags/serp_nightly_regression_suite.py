@@ -18,7 +18,7 @@ from dags.serp_d19_history_observer import (
 from dags.serp_eval_contracts import (
     build_nightly_regression_plan,
     default_nightly_regression_conf,
-    governance_notification_pending,
+    finalize_scheduled_d6_regression,
     nightly_regression_runtime_ready,
     produce_d19_run_history_observation,
     write_airflow_plan_artifact,
@@ -379,10 +379,15 @@ release_fence = PythonOperator(
     dag=dag,
 )
 
-notify_governance = PythonOperator(
-    task_id="notify_governance_eval_surfaces",
-    python_callable=governance_notification_pending,
-    op_args=["{{ ti.xcom_pull(task_ids='validate_nightly_regression_plan') }}"],
+finalize_regression = PythonOperator(
+    task_id="finalize_scheduled_d6_regression",
+    python_callable=finalize_scheduled_d6_regression,
+    op_args=[
+        "{{ ti.xcom_pull(task_ids='validate_nightly_regression_plan') }}",
+        "{{ ti.xcom_pull(task_ids='write_scheduled_d6_regression_receipt') }}",
+        "{{ ti.xcom_pull(task_ids='release_d19_history_fence') }}",
+    ],
+    trigger_rule=TriggerRule.ALL_DONE,
     executor_config=NIGHTLY_EVALUATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
@@ -396,4 +401,4 @@ notify_governance = PythonOperator(
     >> write_receipt
     >> release_fence
 )
-[write_receipt, release_fence] >> notify_governance
+[write_receipt, release_fence] >> finalize_regression

@@ -19,7 +19,6 @@ from dags.serp_eval_contracts import (
     default_public_docs_seed_refresh_conf,
     discover_public_docs_crawler_frontier,
     dispatch_public_docs_seed_refresh_handoff_from_snapshot,
-    governance_notification_from_public_docs_snapshot,
     load_public_docs_crawl_state_conf,
     submit_public_docs_bc21_pipeline_state_from_snapshot,
     write_public_docs_airflow_plan_snapshot,
@@ -308,14 +307,6 @@ trigger_d5_publish_activation = TriggerDagRunOperator(
     dag=dag,
 )
 
-notify_governance = PythonOperator(
-    task_id="notify_governance_eval_surfaces",
-    python_callable=governance_notification_from_public_docs_snapshot,
-    op_args=["{{ ti.xcom_pull(task_ids='validate_public_docs_seed_registry') }}"],
-    executor_config=PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG,
-    dag=dag,
-)
-
 (
     validate_plan
     >> write_seed_registry
@@ -326,5 +317,4 @@ notify_governance = PythonOperator(
     >> write_publish_trigger_conf
     >> prepare_d5_dispatch
     >> trigger_d5_publish_activation
-    >> notify_governance
 )

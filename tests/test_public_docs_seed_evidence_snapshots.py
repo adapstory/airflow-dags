@@ -261,7 +261,7 @@ def test_d20_dag_uses_snapshot_specific_callables_instead_of_full_plan_xcom() ->
     assert "dispatch_public_docs_seed_refresh_handoff_from_snapshot" in source
     assert "submit_public_docs_bc21_pipeline_state_from_snapshot" in source
     assert "write_public_docs_publish_activation_trigger_conf_from_snapshot" in source
-    assert "governance_notification_from_public_docs_snapshot" in source
+    assert "governance_notification_from_public_docs_snapshot" not in source
     validate_function = source.split("def validate_public_docs_seed_registry", 1)[1].split(
         "\n\ndef ", 1
     )[0]

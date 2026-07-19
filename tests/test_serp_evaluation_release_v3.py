@@ -10,6 +10,9 @@ from typing import Any
 import pytest
 import rfc8785
 from adapstory_serp_pipeline.benchmark.native_suite_scoring import suite_metric_profile
+from adapstory_serp_pipeline.registry.evaluation_release_contract import (
+    BENCHMARK_EXECUTION_SUBSTRATE_ROLE_CONTRACTS,
+)
 
 import dags.serp_eval_contracts as serp_eval_contracts
 from dags.serp_eval_contracts import (
@@ -88,7 +91,7 @@ def _release_pair(
     legacy_treatment: bool = False,
     same_treatment: bool = False,
     include_runtime_source_set: bool = True,
-    runtime_source_set_schema: str = "BenchmarkExecutionSubstrateSourceSet/v3",
+    runtime_source_set_schema: str = "BenchmarkExecutionSubstrateSourceSet/v6",
     different_runtime_source_set_handles: bool = False,
     canonical_runtime_source_set_uri: bool = True,
     runtime_source_set_extra_handle_fields: Mapping[str, str] | None = None,
@@ -106,51 +109,63 @@ def _release_pair(
         component_cache[body] = evidence
         return evidence
 
-    source_set_payload = {
-        "ds1000WheelhouseManifestEvidence": {
-            "objectLockMode": "COMPLIANCE",
-            "retainUntil": "2027-07-15T00:00:00Z",
-            "s3Uri": "s3://airflow-serp-evidence/serp-evals/ci-benchmark-substrates-1/"
-            "wheelhouses/ds1000/manifest.json",
-            "sha256": "sha256:" + "c" * 64,
-            "versionId": "ds1000-wheelhouse-manifest-1",
-        },
-        "schema": runtime_source_set_schema,
-        "suites": [
-            {
-                "roles": [
-                    {
-                        "evidence": {
-                            "objectLockMode": "COMPLIANCE",
-                            "retainUntil": "2027-07-15T00:00:00Z",
-                            "s3Uri": (
-                                "s3://airflow-serp-evidence/serp-evals/"
-                                f"ci-benchmark-substrates-1/"
-                                f"{suite_id.lower().replace(' ', '-')}/fixture.json"
-                            ),
-                            "sha256": "sha256:" + "b" * 64,
-                            "versionId": f"fixture-role-{suite_id}",
-                        },
-                        "role": "fixture",
-                    }
-                ],
-                "suiteId": suite_id,
+    def source_set_payload(substrate_id: int) -> dict[str, Any]:
+        source_root = (
+            "s3://airflow-serp-evidence/serp-evals/" f"ci-benchmark-substrates-{substrate_id}"
+        )
+
+        def source_evidence(relative_path: str) -> dict[str, str]:
+            return {
+                "objectLockMode": "COMPLIANCE",
+                "retainUntil": "2027-07-15T00:00:00Z",
+                "s3Uri": f"{source_root}/{relative_path}",
+                "sha256": "sha256:"
+                + sha256(f"{substrate_id}:{relative_path}".encode()).hexdigest(),
+                "versionId": "substrate-"
+                f"{substrate_id}-" + sha256(relative_path.encode()).hexdigest()[:16],
             }
-            for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
-        ],
-        "supplyAttestationsEvidence": {
-            "objectLockMode": "COMPLIANCE",
-            "retainUntil": "2027-07-15T00:00:00Z",
-            "s3Uri": "s3://airflow-serp-evidence/serp-evals/ci-benchmark-substrates-1/"
-            "supply-attestations.json",
-            "sha256": "sha256:" + "a" * 64,
-            "versionId": "substrate-supply-attestations-1",
-        },
-    }
+
+        return {
+            "checkoutProvenance": {
+                "buildUrl": (
+                    "https://jenkins.adapstory.com/job/serp-benchmark-sandbox-supply/"
+                    f"{substrate_id}/"
+                ),
+                "commit": "d" * 40,
+                "origin": "https://github.com/adapstory/Adapstory-GitOps.git",
+                "pipelinePath": (
+                    "infra/ci/jenkins/pipelines/serp-benchmark-sandbox-supply.jenkinsfile"
+                ),
+                "schema": "GitOpsCheckoutProvenance/v1",
+                "tree": "e" * 40,
+            },
+            "ds1000BaseImageProvenanceEvidence": source_evidence(
+                "base-images/ds1000/provenance.json"
+            ),
+            "ds1000DatasetProvenanceEvidence": source_evidence(
+                "datasets/ds1000/simplified-provenance.json"
+            ),
+            "ds1000WheelhouseManifestEvidence": source_evidence("wheelhouses/ds1000/manifest.json"),
+            "schema": runtime_source_set_schema,
+            "suites": [
+                {
+                    "roles": [
+                        {
+                            "evidence": source_evidence(f"roles/{file_name}"),
+                            "role": role,
+                        }
+                    ],
+                    "suiteId": suite_id,
+                }
+                for suite_id, role, file_name in BENCHMARK_EXECUTION_SUBSTRATE_ROLE_CONTRACTS
+            ],
+            "supplyAttestationsEvidence": source_evidence("supply-attestations.json"),
+        }
+
     source_set_evidence = {
         "baseline": _benchmark_substrate_source_set_handle(
             1,
-            source_set_payload,
+            source_set_payload(1),
             objects,
             canonical_uri=canonical_runtime_source_set_uri,
             extra_handle_fields=runtime_source_set_extra_handle_fields,
@@ -158,7 +173,7 @@ def _release_pair(
         ),
         "candidate": _benchmark_substrate_source_set_handle(
             2 if different_runtime_source_set_handles else 1,
-            source_set_payload,
+            source_set_payload(2 if different_runtime_source_set_handles else 1),
             objects,
             canonical_uri=canonical_runtime_source_set_uri,
             extra_handle_fields=runtime_source_set_extra_handle_fields,
@@ -225,7 +240,7 @@ def _release_pair(
             selected_chunks = 2 if side == "baseline" or same_treatment else index + 3
             treatment_side = "baseline" if side == "baseline" or same_treatment else "candidate"
             profile: dict[str, Any] = {
-                "schema": "SuiteEvaluationProfile/v2",
+                "schema": "SuiteEvaluationProfile/v3",
                 "suiteId": suite_id,
                 "profileId": f"serp-{side}-{slug}",
                 "profileVersion": "2026.07.1",
@@ -287,6 +302,41 @@ def _release_pair(
                     "pack-build", {"profileVersion": "native-benchmark-pack-build@2026.07.1"}
                 ),
             }
+            profile["mcpAuthorizationEvidence"] = component(
+                "mcp-authorization-control",
+                {
+                    "actorId": TENANT_ID,
+                    "capabilities": ["benchmark.execute", "benchmark.read"],
+                    "workloadIdentity": "airflow-serp-eval-runner",
+                },
+            )
+            profile["mcpRuntimeAdmissionEvidence"] = component(
+                "mcp-runtime-admission-control",
+                {
+                    "authorityId": "serp-evaluation-admission",
+                    "granularity": "tenant",
+                    "limit": 100,
+                    "reservedCapacity": 1,
+                },
+            )
+            profile["mcpPolicyVersionEvidence"] = component(
+                "mcp-policy-control",
+                {
+                    "correctivePolicyVersion": "serp-corrective-policy@2026.07.1",
+                    "queryTransformBudgetPolicyId": "serp-query-budget@2026.07.1",
+                    "queryTransformRouteId": "serp-query-route@2026.07.1",
+                },
+            )
+            profile["mcpExecutionContextEvidence"] = component(
+                f"mcp-execution-context-{side}-{slug}",
+                {
+                    "protocolVersion": "serp-mcp-runtime@2026.07.1",
+                    "transport": "streamable-http",
+                    "retrievalProfileSha256": profile["retrievalProfileEvidence"]["sha256"],
+                    "rerankerProfileSha256": profile["rerankerProfileEvidence"]["sha256"],
+                    "modelRouteSha256": profile["modelRouteEvidence"]["sha256"],
+                },
+            )
             if side == "candidate":
                 dimensions = [
                     {
@@ -329,13 +379,13 @@ def _release_pair(
         profile_set_evidence = component(
             f"profile-set-{side}",
             {
-                "schema": "SuiteEvaluationProfileSet/v2",
+                "schema": "SuiteEvaluationProfileSet/v3",
                 "profileSetId": f"serp-{side}-profile-set-2026.07.1",
                 "suiteProfiles": suite_profiles,
             },
         )
         core = {
-            "schema": "EvaluationRelease/v3",
+            "schema": "EvaluationRelease/v4",
             "activationStatus": activation_status,
             "releaseId": f"serp-{side}-release-2026.07.1",
             "runtimeEvidence": runtime_evidence[side],
@@ -421,7 +471,7 @@ def _release_pair(
     evaluation_objective_evidence = _handle("evaluation-objective", evaluation_objective, objects)
     bundle = {
         "apiVersion": "serp.adapstory.ai/v2alpha1",
-        "contractVersion": "serp-ci-evaluation-release-evidence/v7",
+        "contractVersion": "serp-ci-evaluation-release-evidence/v8",
         "kind": "EvaluationReleaseEvidence",
         "metricCompatibilityMatrixEvidence": metric_matrix_evidence,
         "evaluationObjectiveEvidence": evaluation_objective_evidence,
@@ -524,6 +574,35 @@ def _worm_object(
     return {str(field): value for field, value in decoded.items()}
 
 
+def _rewrite_worm_object(
+    objects: dict[tuple[str, str, str], bytes],
+    evidence: dict[str, str],
+    payload: Mapping[str, Any],
+) -> None:
+    body = _canonical_bytes(payload)
+    bucket = "airflow-serp-evidence"
+    key = evidence["s3Uri"].removeprefix(f"s3://{bucket}/")
+    objects[(bucket, key, evidence["versionId"])] = body
+    evidence["sha256"] = "sha256:" + sha256(body).hexdigest()
+
+
+def _rewrite_release_side(
+    bundle: dict[str, Any],
+    objects: dict[tuple[str, str, str], bytes],
+    *,
+    side: str,
+) -> None:
+    release = bundle[f"{side}Release"]
+    profile_set_evidence = release["profileSetEvidence"]
+    profile_set = _worm_object(objects, profile_set_evidence)
+    profile_set["suiteProfiles"] = release["suiteProfiles"]
+    _rewrite_worm_object(objects, profile_set_evidence, profile_set)
+    core = dict(release)
+    core.pop("releaseDigest")
+    release["releaseDigest"] = "sha256:" + sha256(_canonical_bytes(core)).hexdigest()
+    _rewrite_worm_object(objects, bundle[f"{side}ReleaseEvidence"], release)
+
+
 def _d19_conf() -> dict[str, object]:
     return {
         "actor_id": "airflow-serp-eval-runner",
@@ -553,7 +632,7 @@ def test_d17_consumes_ci_v7_bundle_and_seals_governed_v7_promotion() -> None:
     )
     assert "evaluation_release_evidence" not in plan.payload
     assert plan.payload["ci_evaluation_release_contract_version"] == (
-        "serp-ci-evaluation-release-evidence/v7"
+        "serp-ci-evaluation-release-evidence/v8"
     )
 
     releases = load_governed_model_releases(plan.to_canonical_json(), s3_client=_FakeS3(objects))
@@ -565,8 +644,8 @@ def test_d17_consumes_ci_v7_bundle_and_seals_governed_v7_promotion() -> None:
         plan.to_canonical_json(), releases, snapshot_writer=_snapshot_writer
     )
     payload = receipt["payload"]
-    assert payload["schema"] == "EvaluationReleasePromotionReceipt/v7"
-    assert payload["evaluationReleaseContractVersion"] == "serp-ci-evaluation-release-evidence/v7"
+    assert payload["schema"] == "EvaluationReleasePromotionReceipt/v8"
+    assert payload["evaluationReleaseContractVersion"] == "serp-ci-evaluation-release-evidence/v8"
     assert payload["status"] == "approved-for-evaluation"
     assert payload["baselineRelease"] == {
         "evidence": bundle["baselineReleaseEvidence"],
@@ -652,12 +731,10 @@ def test_d17_receipt_derives_one_strict_event_d6_then_native_d19_conf() -> None:
         "write_model_catalog_promotion_receipt",
         "build_d17_event_d6_trigger_conf",
         "trigger_model_promotion_regression_suite",
-        "notify_governance_eval_surfaces",
     ]
     assert [task["task_id"] for task in event_plan.payload["tasks"]] == [
         "validate_d17_event_d6_plan",
         "trigger_benchmark_improvement_wave",
-        "notify_governance_eval_surfaces",
     ]
     assert event_plan.payload["event_d6_run_id"] == event_conf["eventD6RunId"]
     assert event_plan.payload["d19_trigger_run_id"] == (
@@ -896,6 +973,68 @@ def test_d17_rejects_legacy_single_dimension_treatment_delta() -> None:
         load_governed_model_releases(plan.to_canonical_json(), s3_client=_FakeS3(objects))
 
 
+def test_d17_rejects_legacy_profile_schema_and_missing_mcp_evidence() -> None:
+    for mutation, expected_error in (
+        ("legacy-schema", "schema is unsupported"),
+        ("missing-mcp", "fields are unsupported"),
+    ):
+        bundle, objects = _release_pair()
+        profile = bundle["candidateRelease"]["suiteProfiles"][0]
+        if mutation == "legacy-schema":
+            profile["schema"] = "SuiteEvaluationProfile/v2"
+        else:
+            profile.pop("mcpAuthorizationEvidence")
+        _rewrite_release_side(bundle, objects, side="candidate")
+        plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
+
+        with pytest.raises(ValueError, match=expected_error):
+            load_governed_model_releases(plan.to_canonical_json(), s3_client=_FakeS3(objects))
+
+
+def test_d17_rejects_unbound_or_unfrozen_mcp_context() -> None:
+    bundle, objects = _release_pair()
+    candidate_profile = bundle["candidateRelease"]["suiteProfiles"][0]
+    context_evidence = candidate_profile["mcpExecutionContextEvidence"]
+    context = _worm_object(objects, context_evidence)
+    context["modelRouteSha256"] = "sha256:" + "0" * 64
+    _rewrite_worm_object(objects, context_evidence, context)
+    _rewrite_release_side(bundle, objects, side="candidate")
+    plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
+
+    with pytest.raises(ValueError, match="modelRouteSha256 is not component-bound"):
+        load_governed_model_releases(plan.to_canonical_json(), s3_client=_FakeS3(objects))
+
+    bundle, objects = _release_pair()
+    candidate_profile = bundle["candidateRelease"]["suiteProfiles"][0]
+    authorization_evidence = candidate_profile["mcpAuthorizationEvidence"]
+    authorization = _worm_object(objects, authorization_evidence)
+    authorization["workloadIdentity"] = "changed-evaluator-identity"
+    candidate_profile["mcpAuthorizationEvidence"] = _handle(
+        "candidate-mcp-authorization-control", authorization, objects
+    )
+    _rewrite_release_side(bundle, objects, side="candidate")
+    plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
+
+    with pytest.raises(ValueError, match="MCP fairness control is not frozen"):
+        load_governed_model_releases(plan.to_canonical_json(), s3_client=_FakeS3(objects))
+
+
+def test_d17_rejects_noncanonical_corrective_policy_identifier() -> None:
+    bundle, objects = _release_pair()
+    candidate_profile = bundle["candidateRelease"]["suiteProfiles"][0]
+    policy_evidence = candidate_profile["mcpPolicyVersionEvidence"]
+    policy = _worm_object(objects, policy_evidence)
+    policy["correctivePolicyVersion"] = "serp-corrective-policy/2026.07.1"
+    candidate_profile["mcpPolicyVersionEvidence"] = _handle(
+        "candidate-invalid-mcp-policy", policy, objects
+    )
+    _rewrite_release_side(bundle, objects, side="candidate")
+    plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
+
+    with pytest.raises(ValueError, match="versioned policy identifier"):
+        load_governed_model_releases(plan.to_canonical_json(), s3_client=_FakeS3(objects))
+
+
 def test_d17_rejects_component_evidence_tampering() -> None:
     bundle, objects = _release_pair()
     plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
@@ -992,9 +1131,9 @@ def test_d19_rereads_the_v7_promotion_and_both_release_manifests() -> None:
         d19_plan.to_canonical_json(), s3_client=_FakeS3(objects)
     )
 
-    assert snapshot["promotion"]["schema"] == "EvaluationReleasePromotionReceipt/v7"
+    assert snapshot["promotion"]["schema"] == "EvaluationReleasePromotionReceipt/v8"
     assert snapshot["promotion"]["evaluationReleaseContractVersion"] == (
-        "serp-ci-evaluation-release-evidence/v7"
+        "serp-ci-evaluation-release-evidence/v8"
     )
     assert (
         snapshot["promotion"]["baselineRelease"]["releaseDigest"]
@@ -1094,7 +1233,7 @@ def test_d19_rejects_duplicate_promotion_member_even_when_digest_matches() -> No
         d17_plan.to_canonical_json(), releases, snapshot_writer=_snapshot_writer
     )
     canonical_body = _canonical_bytes(receipt["payload"])
-    body = b'{"schema":"EvaluationReleasePromotionReceipt/v7",' + canonical_body[1:]
+    body = b'{"schema":"EvaluationReleasePromotionReceipt/v8",' + canonical_body[1:]
     receipt_evidence = dict(receipt["promotionEvidence"])
     receipt_evidence["sha256"] = "sha256:" + sha256(body).hexdigest()
     bucket = "airflow-serp-evidence"
@@ -1208,8 +1347,8 @@ def test_d19_builds_scoreless_reference_only_paired_request_v5(
         "promotionEvidence": plan.payload["evaluation_release_promotion_evidence"],
         "evaluationObjective": _evaluation_objective_v6_fixture(),
         "promotion": {
-            "schema": "EvaluationReleasePromotionReceipt/v7",
-            "evaluationReleaseContractVersion": "serp-ci-evaluation-release-evidence/v7",
+            "schema": "EvaluationReleasePromotionReceipt/v8",
+            "evaluationReleaseContractVersion": "serp-ci-evaluation-release-evidence/v8",
             "promotionId": "all-nine-eval-2026-07-15",
             "tenantId": TENANT_ID,
             "registryResourceId": RESOURCE_ID,

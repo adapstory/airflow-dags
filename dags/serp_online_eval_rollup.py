@@ -11,7 +11,6 @@ from dags.serp_eval_contracts import (
     build_online_eval_rollup_cli_spec,
     build_online_eval_rollup_plan,
     execute_gateway_cli_spec,
-    governance_notification_pending,
     write_airflow_plan_artifact,
     write_online_eval_rollup_plan_artifact,
 )
@@ -74,11 +73,4 @@ build_submissions = PythonOperator(
     dag=dag,
 )
 
-notify_governance = PythonOperator(
-    task_id="notify_governance_eval_surfaces",
-    python_callable=governance_notification_pending,
-    op_args=["{{ ti.xcom_pull(task_ids='validate_online_eval_rollup_plan') }}"],
-    dag=dag,
-)
-
-validate_plan >> write_rollup_plan >> build_rollup >> build_submissions >> notify_governance
+validate_plan >> write_rollup_plan >> build_rollup >> build_submissions

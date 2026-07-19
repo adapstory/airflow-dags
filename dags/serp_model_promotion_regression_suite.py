@@ -11,7 +11,6 @@ from airflow.sdk import DAG
 
 from dags.serp_eval_contracts import (
     build_d17_event_d6_plan,
-    governance_notification_pending,
     validate_d17_event_d6_airflow_run,
     write_airflow_plan_artifact,
 )
@@ -108,12 +107,4 @@ trigger_d19 = TriggerDagRunOperator(
     dag=dag,
 )
 
-notify_governance = PythonOperator(
-    task_id="notify_governance_eval_surfaces",
-    python_callable=governance_notification_pending,
-    op_args=["{{ ti.xcom_pull(task_ids='validate_d17_event_d6_plan') }}"],
-    executor_config=D17_EVENT_D6_EVALUATOR_EXECUTOR_CONFIG,
-    dag=dag,
-)
-
-validate_plan >> trigger_d19 >> notify_governance
+validate_plan >> trigger_d19

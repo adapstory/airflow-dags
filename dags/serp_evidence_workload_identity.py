@@ -380,6 +380,22 @@ def bc21_authorized_minio_executor_config(
     )
 
 
+def bc21_authorized_executor_config(
+    *,
+    service_account_name: str,
+    labels: Mapping[str, str],
+) -> dict[str, Any]:
+    """Build a BC-21-only executor identity for pointer-only API calls."""
+
+    return _evidence_executor_config(
+        service_account_name=service_account_name,
+        labels=labels,
+        env_vars=bc21_workload_env_vars(),
+        volume_mounts=bc21_workload_volume_mounts(),
+        volumes=bc21_workload_volumes(),
+    )
+
+
 def vault_transit_minio_executor_config(
     *,
     service_account_name: str,

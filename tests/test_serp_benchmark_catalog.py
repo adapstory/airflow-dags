@@ -19,6 +19,7 @@ from dags.serp_benchmark_catalog import (
     build_live_benchmark_catalog_evidence,
     mandatory_benchmark_adapters_ready,
 )
+from dags.serp_ds1000_contract import DS1000_LIBRARY_VERSIONS
 from dags.serp_eval_contracts import (
     MANDATORY_SERP_BENCHMARK_SUITES,
     _fetch_https_bytes,
@@ -265,6 +266,14 @@ def test_catalog_pins_each_upstream_dataset_to_an_immutable_revision() -> None:
     coderag = next(
         entry for entry in MANDATORY_BENCHMARK_SUITE_CATALOG if entry.suite_id == "CodeRAG-Bench"
     )
+    assert coderag.dataset_id == "xlangai/DS-1000"
+    assert coderag.dataset_revision == "b39aab71da6d23ef8d3cac59a7c5f834516ab334"
+    assert coderag.dataset_artifact_url == (
+        "https://raw.githubusercontent.com/xlang-ai/DS-1000/"
+        "b39aab71da6d23ef8d3cac59a7c5f834516ab334/data/ds1000.jsonl.gz"
+    )
+    assert coderag.harness_repository_url == "https://github.com/xlang-ai/DS-1000"
+    assert coderag.harness_revision == "b39aab71da6d23ef8d3cac59a7c5f834516ab334"
     assert coderag.supplemental_dataset_artifacts == (
         (
             "documentation-corpus",
@@ -378,7 +387,7 @@ def test_live_catalog_allows_rights_unverified_internal_runs() -> None:
     )
     assert {
         item["suite_id"] for item in suites if item["rights_status"] == "rights-unverified"
-    } == {"CodeRAG-Bench", "SWE-bench Verified", "rusBEIR"}
+    } == {"SWE-bench Verified", "rusBEIR"}
     assert {item["suite_id"] for item in suites if item["execution_status"] == "ready"} == set(
         MANDATORY_SERP_BENCHMARK_SUITES
     )
@@ -634,8 +643,10 @@ def test_live_catalog_retains_immutable_source_and_license_snapshots() -> None:
     suites = cast(list[dict[str, Any]], evidence["suites"])
 
     assert len(calls) == (
-        (len(MANDATORY_SERP_BENCHMARK_SUITES) * 6)
-        + 3
+        sum(
+            6 + len(entry.supplemental_dataset_artifacts)
+            for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+        )
         + sum(len(roles) for roles in MANDATORY_EXECUTION_SUBSTRATE_ROLES.values())
     )
     beir = next(item for item in suites if item["suite_id"] == "BEIR")
@@ -748,40 +759,44 @@ def _execution_substrate_materializer(
     if suite_id == "CodeRAG-Bench":
         payloads["execution-sandbox"] = json.dumps(
             {
+                "baseImage": {
+                    "imageReference": (
+                        "harbor.adapstory.com/dockerhub-cache/library/python@sha256:" + "2" * 64
+                    ),
+                    "platform": "linux/amd64",
+                    "schema": "Ds1000BaseImageProvenance/v1",
+                    "sourceReference": (
+                        "harbor.adapstory.com/dockerhub-cache/library/python:" "3.10-slim-bookworm"
+                    ),
+                },
+                "datasetProvenance": {
+                    "datasetPath": "data/ds1000.jsonl.gz",
+                    "ds1000Revision": "b39aab71da6d23ef8d3cac59a7c5f834516ab334",
+                    "fieldNames": [
+                        "code_context",
+                        "metadata",
+                        "prompt",
+                        "reference_code",
+                    ],
+                    "rowCount": 1000,
+                    "schema": "Ds1000SimplifiedDatasetProvenance/v1",
+                    "sha256": "sha256:" + "3" * 64,
+                },
+                "ds1000Revision": "b39aab71da6d23ef8d3cac59a7c5f834516ab334",
                 "dockerSocketMounted": False,
                 "imageDigest": "sha256:" + "1" * 64,
                 "imageReference": ("harbor.adapstory.com/serp/ds1000@sha256:" + "1" * 64),
-                "imagePurpose": "ds1000-official-execution",
+                "imagePurpose": "ds1000-simplified-official-execution",
                 "libraries": [
-                    {"name": name, "version": version}
-                    for name, version in (
-                        ("DateTime", "4.7"),
-                        ("gensim", "4.2.0"),
-                        ("matplotlib", "3.5.2"),
-                        ("numpy", "1.21.6"),
-                        ("openai", "0.23.0"),
-                        ("pandas", "1.3.5"),
-                        ("pandas-datareader", "0.10.0"),
-                        ("pathlib", "1.0.1"),
-                        ("scikit-learn", "1.0.2"),
-                        ("scipy", "1.7.3"),
-                        ("seaborn", "0.11.2"),
-                        ("statsmodels", "0.13.2"),
-                        ("tensorflow", "2.10.0"),
-                        ("tokenizers", "0.12.1"),
-                        ("torch", "1.12.1"),
-                        ("torchvision", "0.13.1"),
-                        ("tqdm", "4.64.1"),
-                        ("xgboost", "1.6.2"),
-                        ("Pillow", "9.2.0"),
-                    )
+                    {"name": name, "version": version} for name, version in DS1000_LIBRARY_VERSIONS
                 ],
                 "networkMode": "disabled",
-                "officialHarnessRevision": revision,
-                "pythonVersion": "3.7.10",
+                "officialDatasetPath": "data/ds1000.jsonl.gz",
+                "pythonVersion": "3.10",
+                "pytorchVariant": "cpuonly",
                 "readOnlyRootFilesystem": True,
-                "schema": "Ds1000SandboxImageInventory/v1",
-                "suiteId": suite_id,
+                "schema": "Ds1000SandboxImageInventory/v2",
+                "suiteId": "DS-1000",
             },
             separators=(",", ":"),
             sort_keys=True,

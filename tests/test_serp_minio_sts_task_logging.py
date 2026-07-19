@@ -253,7 +253,57 @@ def test_evidence_executor_config_is_explicitly_hardened_and_writable_only_at_ru
     _assert_hardened_runtime_pod(pod)
 
 
-def _assert_hardened_runtime_pod(pod: Any) -> None:
+def test_bc21_only_executor_has_no_minio_credentials_or_mount() -> None:
+    with _isolated_task_log_modules() as (_task_logging, workload_identity):
+        config = workload_identity.bc21_authorized_executor_config(
+            service_account_name="airflow-serp-official-measurement-publisher",
+            labels={"adapstory.com/serp-network-profile": "benchmark-aggregator"},
+        )
+
+    pod = config["pod_override"]
+    assert pod.spec is not None
+    assert pod.spec.automount_service_account_token is False
+    assert pod.spec.service_account_name == "airflow-serp-official-measurement-publisher"
+    assert pod.spec.volumes is not None
+    assert [volume.name for volume in pod.spec.volumes] == [
+        "bc21-workload-token",
+        "serp-runtime-tmp",
+        "serp-runtime-logs",
+    ]
+    assert pod.spec.containers is not None
+    container = pod.spec.containers[0]
+    assert [(item.name, item.value) for item in container.env] == [
+        (
+            "ADAPSTORY_SERP_SERVICE_ACCOUNT_TOKEN_PATH",
+            "/var/run/secrets/adapstory/bc21-workload/token",
+        )
+    ]
+    assert [
+        (mount.name, mount.mount_path, mount.read_only) for mount in container.volume_mounts
+    ] == [
+        ("bc21-workload-token", "/var/run/secrets/adapstory/bc21-workload", True),
+        ("serp-runtime-tmp", "/tmp", False),
+        ("serp-runtime-logs", "/opt/airflow/logs", False),
+    ]
+    _assert_hardened_runtime_pod(
+        pod,
+        credential_mount=(
+            "bc21-workload-token",
+            "/var/run/secrets/adapstory/bc21-workload",
+            True,
+        ),
+    )
+
+
+def _assert_hardened_runtime_pod(
+    pod: Any,
+    *,
+    credential_mount: tuple[str, str, bool] = (
+        "minio-web-identity-token",
+        "/var/run/secrets/adapstory/minio-web-identity",
+        True,
+    ),
+) -> None:
     assert pod.spec.security_context is not None
     assert pod.spec.security_context.run_as_non_root is True
     assert pod.spec.security_context.run_as_user == 50000
@@ -280,11 +330,7 @@ def _assert_hardened_runtime_pod(pod: Any) -> None:
     assert [
         (mount.name, mount.mount_path, mount.read_only) for mount in container.volume_mounts
     ] == [
-        (
-            "minio-web-identity-token",
-            "/var/run/secrets/adapstory/minio-web-identity",
-            True,
-        ),
+        credential_mount,
         ("serp-runtime-tmp", "/tmp", False),
         ("serp-runtime-logs", "/opt/airflow/logs", False),
     ]

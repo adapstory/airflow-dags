@@ -69,7 +69,7 @@ SERP eval DAG contracts:
   from D17 to D19. It never reads the scheduled-D6 environment contract and
   accepts only the versioned `D17EventD6Trigger/v1` envelope built by D17 from
   its canonical plan, authoritative D17 DagRun identity, and the exact
-  `EvaluationReleasePromotionReceipt/v7` COMPLIANCE WORM handle. Its manual
+  `EvaluationReleasePromotionReceipt/v8` COMPLIANCE WORM handle. Its manual
   trigger run ID and logical date are deterministic and must match the D17
   source identity and D17-derived `generated_at`; it then projects exactly the
   native D19 fields (tenant/resource/actor identity, artifact root, generated
@@ -104,15 +104,15 @@ SERP eval DAG contracts:
 - `serp_model_catalog_promotion` is the D17 model-governance authority. Its
   `dag_run.conf` accepts tenant/resource identity, promotion id, actor,
   generated timestamp, evidence root, and one canonical
-  `serp-ci-evaluation-release-evidence/v7` bundle. It does not accept model ids,
+  `serp-ci-evaluation-release-evidence/v8` bundle. It does not accept model ids,
   profile strings, scores, approval booleans, or separate caller-selected
-  release pointers. The DAG re-reads both `EvaluationRelease/v3` manifests by
+  release pointers. The DAG re-reads both `EvaluationRelease/v4` manifests by
   exact `VersionId` and SHA-256 under `COMPLIANCE` retention, validates their
   tenant/resource/component and fixed evaluator boundaries, requires a real
   treatment delta in the governed model, retrieval profile, or reranker
   profile, and binds the immutable metric matrix and
   `evaluationObjectiveEvidence`. It then seals the only accepted
-  `EvaluationReleasePromotionReceipt/v7`, including the exact passed
+  `EvaluationReleasePromotionReceipt/v8`, including the exact passed
   `candidateReleaseAuthority`. Runtime-image-only candidate releases
   fail closed.
   Release manifest production belongs to the signed CI/release path: the
@@ -129,7 +129,7 @@ SERP eval DAG contracts:
   `evaluation_release_promotion_evidence` pointer. It rejects every
   caller-supplied baseline/candidate/replay/model-governance selection and every
   `candidate_evaluation` score/result payload. The D19 scheduler re-reads that
-  exact `EvaluationReleasePromotionReceipt/v7` and both referenced release
+  exact `EvaluationReleasePromotionReceipt/v8` and both referenced release
   manifests before it derives the reference-only `PairedEvaluationRequest/v6`.
   D17 and D19 both resolve and validate the detached `EvaluationObjective/v6`
   object itself: its content-addressed version, fixed five-run LCB95 method,
@@ -166,6 +166,15 @@ SERP eval DAG contracts:
   publisher starts only after execution and reads the output volume read-only.
   A blocked receipt cannot emit a score, keep/discard decision, scoreboard, or
   rollout.
+- Every `BenchmarkExecutionSubstrateSourceSet/v6` binds the exact GitOps
+  checkout: lowercase 40-hex commit and tree, the canonical GitOps origin and
+  sandbox-supply Jenkinsfile path, and the canonical Jenkins build URL. Its
+  build number must equal the `ci-benchmark-substrates-<build>` operation in
+  the sealed source-set path. The DS-1000 wheelhouse is
+  `Ds1000WheelhouseManifest/v3` with all thirteen canonical direct roots,
+  including `datasets`, CPU-only `torch`, and `tqdm`; V5/V2 source-set or
+  manifest contracts, missing provenance, and extra provenance fields are
+  rejected before any evaluation can run.
 - `serp_mandatory_benchmark_dataset_evidence_snapshot` persists source, raw
   dataset, and licensing bytes for every mandatory suite before D6 can consume
   an adapter result. Hugging Face revision-pinned `resolve` artifacts are

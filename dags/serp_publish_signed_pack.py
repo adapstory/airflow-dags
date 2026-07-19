@@ -14,7 +14,6 @@ from dags.serp_eval_contracts import (
     build_public_docs_publish_activation_submit_cli_spec,
     build_public_docs_retired_pack_cleanup_cli_spec,
     execute_pipeline_cli_spec,
-    governance_notification_pending,
     write_airflow_plan_artifact,
     write_public_docs_coverage_proof_artifact,
     write_public_docs_crawl_state_artifact,
@@ -160,14 +159,6 @@ cleanup_retired_pack_versions = PythonOperator(
     dag=dag,
 )
 
-notify_governance = PythonOperator(
-    task_id="notify_governance_eval_surfaces",
-    python_callable=governance_notification_pending,
-    op_args=["{{ ti.xcom_pull(task_ids='validate_publish_signed_pack_plan') }}"],
-    executor_config=PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG,
-    dag=dag,
-)
-
 (
     validate_plan
     >> dispatch_handoff
@@ -180,7 +171,6 @@ notify_governance = PythonOperator(
     >> commit_crawl_state
     >> build_retired_pack_cleanup
     >> cleanup_retired_pack_versions
-    >> notify_governance
 )
 
 # The compensation task has both validation steps as direct parents: Airflow

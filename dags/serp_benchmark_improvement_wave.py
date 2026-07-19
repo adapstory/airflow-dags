@@ -25,16 +25,18 @@ from dags.serp_benchmark_catalog_workload import (
     benchmark_catalog_acquisition_web_identity_volumes,
 )
 from dags.serp_d19_history_observer import admit_d19_run
+from dags.serp_ds1000_contract import DS1000_EXECUTOR_COMMAND
 from dags.serp_eval_contracts import (
     MANDATORY_SERP_BENCHMARK_SUITES,
     build_benchmark_improvement_wave_plan,
-    governance_notification_pending,
     load_benchmark_pack_lifecycle_result_snapshot,
     load_materialized_benchmark_catalog_snapshot,
     load_model_catalog_promotion_snapshot,
+    publish_official_serp_mcp_measurement,
     verify_model_catalog_promotion_terminal_activation,
     write_airflow_plan_artifact,
     write_immutable_evidence_snapshot,
+    write_official_serp_mcp_measurement,
     write_paired_eval_request_artifact,
     write_paired_evaluation_verification_evidence,
 )
@@ -46,6 +48,7 @@ from dags.serp_evidence_workload_identity import (
     bc10_workload_env_vars,
     bc10_workload_volume_mounts,
     bc10_workload_volumes,
+    bc21_authorized_executor_config,
     bc21_workload_env_vars,
     bc21_workload_volume_mounts,
     bc21_workload_volumes,
@@ -75,7 +78,7 @@ D19_OFFICIAL_HARNESS_WORK_ITEMS = tuple(
 D19_CODE_SANDBOX_SUITES = frozenset({"CodeRAG-Bench", "SWE-bench Verified"})
 D19_CODE_SANDBOX_EXECUTOR_SPEC: Mapping[str, tuple[str, tuple[str, ...]]] = {
     "CodeRAG-Bench": (
-        "/usr/local/bin/python3.7",
+        DS1000_EXECUTOR_COMMAND,
         ("/sandbox/input/ds1000_executor.py",),
     ),
     "SWE-bench Verified": ("/bin/bash", ("/sandbox/input/swe_executor.sh",)),
@@ -97,6 +100,9 @@ _REPOSITORY = re.compile(
 )
 
 D19_AGGREGATOR_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-benchmark-aggregator"
+D19_OFFICIAL_MEASUREMENT_PUBLISHER_WORKLOAD_SERVICE_ACCOUNT = (
+    "airflow-serp-official-measurement-publisher"
+)
 D19_ADMISSION_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-d19-history-observer"
 D19_BUILDER_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-benchmark-builder"
 D19_MODEL_RUNNER_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-benchmark-model-runner"
@@ -104,6 +110,13 @@ D19_CODE_SANDBOX_WORKLOAD_SERVICE_ACCOUNT = "airflow-serp-benchmark-code-sandbox
 D19_AGGREGATOR_WORKLOAD_LABELS = {
     "adapstory.com/serp-evidence-workload": "true",
     "adapstory.com/serp-network-profile": "benchmark-aggregator",
+    "component": "worker",
+    "release": "airflow",
+    "tier": "airflow",
+}
+D19_OFFICIAL_MEASUREMENT_PUBLISHER_WORKLOAD_LABELS = {
+    "adapstory.com/serp-evidence-workload": "true",
+    "adapstory.com/serp-network-profile": "official-measurement-publisher",
     "component": "worker",
     "release": "airflow",
     "tier": "airflow",
@@ -311,6 +324,10 @@ D19_CODE_SANDBOX_EXECUTOR_VOLUME_MOUNTS = [
 D19_AGGREGATOR_EXECUTOR_CONFIG = minio_web_identity_executor_config(
     service_account_name=D19_AGGREGATOR_WORKLOAD_SERVICE_ACCOUNT,
     labels=D19_AGGREGATOR_WORKLOAD_LABELS,
+)
+D19_OFFICIAL_MEASUREMENT_PUBLISHER_EXECUTOR_CONFIG = bc21_authorized_executor_config(
+    service_account_name=D19_OFFICIAL_MEASUREMENT_PUBLISHER_WORKLOAD_SERVICE_ACCOUNT,
+    labels=D19_OFFICIAL_MEASUREMENT_PUBLISHER_WORKLOAD_LABELS,
 )
 D19_ATTESTOR_VOLUMES = [*D19_AGGREGATOR_VOLUMES, *vault_transit_volumes()]
 D19_ATTESTOR_VOLUME_MOUNTS = [
@@ -1724,11 +1741,36 @@ persist_paired_evaluation_verification = PythonOperator(
     dag=dag,
 )
 
-notify_governance = PythonOperator(
-    task_id="notify_governance_eval_surfaces",
-    python_callable=governance_notification_pending,
-    op_args=["{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') }}"],
+write_official_measurement = PythonOperator(
+    task_id="write_official_serp_mcp_measurement",
+    python_callable=write_official_serp_mcp_measurement,
+    op_kwargs={
+        "airflow_run": {
+            "dagId": "{{ dag.dag_id }}",
+            "logicalDate": "{{ logical_date.isoformat() }}",
+            "runId": "{{ run_id }}",
+            "runType": "{{ dag_run.run_type.value }}",
+        },
+        "plan_json": ("{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') }}"),
+        "verification_result": (
+            "{{ ti.xcom_pull(task_ids='persist_paired_evaluation_verification_evidence') }}"
+        ),
+    },
+    retries=0,
     executor_config=D19_AGGREGATOR_EXECUTOR_CONFIG,
+    dag=dag,
+)
+
+publish_official_measurement = PythonOperator(
+    task_id="publish_official_serp_mcp_measurement",
+    python_callable=publish_official_serp_mcp_measurement,
+    op_args=[
+        "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') }}",
+        "{{ ti.xcom_pull(task_ids='write_official_serp_mcp_measurement') }}",
+    ],
+    retries=2,
+    retry_delay=timedelta(seconds=30),
+    executor_config=D19_OFFICIAL_MEASUREMENT_PUBLISHER_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -1763,5 +1805,6 @@ write_assembly_plan >> assemble_paired_execution_manifest
     assemble_paired_execution_manifest
     >> run_paired_evaluation
     >> persist_paired_evaluation_verification
-    >> notify_governance
+    >> write_official_measurement
+    >> publish_official_measurement
 )

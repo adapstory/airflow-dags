@@ -15,6 +15,23 @@ from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
 
+from dags.serp_ds1000_contract import (
+    DS1000_BASE_IMAGE_PROVENANCE_SCHEMA,
+    DS1000_BASE_IMAGE_REPOSITORY,
+    DS1000_BASE_IMAGE_SOURCE_REFERENCE,
+    DS1000_DATASET_FIELD_NAMES,
+    DS1000_DATASET_PROVENANCE_SCHEMA,
+    DS1000_DATASET_ROW_COUNT,
+    DS1000_IMAGE_PURPOSE,
+    DS1000_INVENTORY_SUITE_ID,
+    DS1000_LIBRARY_VERSIONS,
+    DS1000_OFFICIAL_DATASET_PATH,
+    DS1000_PLATFORM,
+    DS1000_PYTHON_VERSION,
+    DS1000_PYTORCH_VARIANT,
+    DS1000_REVISION,
+    DS1000_SANDBOX_IMAGE_INVENTORY_SCHEMA,
+)
 from dags.serp_eval_contracts import MANDATORY_SERP_BENCHMARK_SUITES
 
 BENCHMARK_CATALOG_CONTRACT_VERSION = "serp-benchmark-catalog/v5"
@@ -26,27 +43,6 @@ _HARNESS_LICENSE_UNDECLARED = "UNDECLARED"
 _IMAGE_REFERENCE = re.compile(
     r"[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?"
     r"(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}\Z"
-)
-_DS1000_LIBRARY_VERSIONS = (
-    ("DateTime", "4.7"),
-    ("gensim", "4.2.0"),
-    ("matplotlib", "3.5.2"),
-    ("numpy", "1.21.6"),
-    ("openai", "0.23.0"),
-    ("pandas", "1.3.5"),
-    ("pandas-datareader", "0.10.0"),
-    ("pathlib", "1.0.1"),
-    ("scikit-learn", "1.0.2"),
-    ("scipy", "1.7.3"),
-    ("seaborn", "0.11.2"),
-    ("statsmodels", "0.13.2"),
-    ("tensorflow", "2.10.0"),
-    ("tokenizers", "0.12.1"),
-    ("torch", "1.12.1"),
-    ("torchvision", "0.13.1"),
-    ("tqdm", "4.64.1"),
-    ("xgboost", "1.6.2"),
-    ("Pillow", "9.2.0"),
 )
 _CORPUS_ROLE_BY_SUITE = {
     "APIBench": "api-documentation",
@@ -87,10 +83,13 @@ MANDATORY_EXECUTION_SUBSTRATE_ROLES: Mapping[str, tuple[str, ...]] = {
 }
 EXTERNAL_EXECUTION_SUBSTRATE_ROLES: Mapping[str, tuple[str, ...]] = {
     "ARES": ("judge-route",),
-    "CodeRAG-Bench": ("execution-sandbox",),
+    "DS-1000": ("execution-sandbox",),
     "RAGBench": ("metric-implementation",),
     "RepoQA": ("tree-sitter-runtime",),
     "SWE-bench Verified": ("sandbox-image-set",),
+}
+EXECUTION_SUBSTRATE_SUITE_BY_BENCHMARK_SUITE: Mapping[str, str] = {
+    "CodeRAG-Bench": "DS-1000",
 }
 if tuple(MANDATORY_EXECUTION_SUBSTRATE_ROLES) != MANDATORY_SERP_BENCHMARK_SUITES:
     raise RuntimeError("execution substrate roles must cover the canonical mandatory nine")
@@ -248,16 +247,15 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
     ),
     BenchmarkSuiteCatalogEntry(
         suite_id="CodeRAG-Bench",
-        dataset_id="code-rag-bench/ds1000",
-        dataset_revision="7a5933733e549d11b75b74d3eb52bb056ffd986c",
+        dataset_id="xlangai/DS-1000",
+        dataset_revision=DS1000_REVISION,
         dataset_source_url=(
-            "https://huggingface.co/datasets/code-rag-bench/ds1000/raw/"
-            "7a5933733e549d11b75b74d3eb52bb056ffd986c/README.md"
+            "https://raw.githubusercontent.com/xlang-ai/DS-1000/" f"{DS1000_REVISION}/README.md"
         ),
         dataset_artifact_source_id="dataset",
         dataset_artifact_url=(
-            "https://huggingface.co/datasets/code-rag-bench/ds1000/resolve/"
-            "7a5933733e549d11b75b74d3eb52bb056ffd986c/ds1000.json"
+            "https://raw.githubusercontent.com/xlang-ai/DS-1000/"
+            f"{DS1000_REVISION}/{DS1000_OFFICIAL_DATASET_PATH}"
         ),
         supplemental_dataset_artifacts=(
             (
@@ -267,29 +265,27 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
             ),
         ),
         license_evidence_url=(
-            "https://huggingface.co/api/datasets/code-rag-bench/ds1000/revision/"
-            "7a5933733e549d11b75b74d3eb52bb056ffd986c"
+            "https://raw.githubusercontent.com/xlang-ai/DS-1000/" f"{DS1000_REVISION}/LICENSE"
         ),
-        harness_repository_url="https://github.com/code-rag-bench/code-rag-bench",
-        harness_revision="f9e100ca9ed94b8f1983b356ae81966e30210cf4",
-        harness_entrypoint="generation/eval/evaluator.py",
+        harness_repository_url="https://github.com/xlang-ai/DS-1000",
+        harness_revision=DS1000_REVISION,
+        harness_entrypoint="test_ds1000.py",
         harness_source_archive_url=(
-            "https://api.github.com/repos/code-rag-bench/code-rag-bench/tarball/"
-            "f9e100ca9ed94b8f1983b356ae81966e30210cf4"
+            "https://api.github.com/repos/xlang-ai/DS-1000/tarball/" f"{DS1000_REVISION}"
         ),
         harness_license_url=(
-            "https://api.github.com/repos/code-rag-bench/code-rag-bench/git/trees/"
-            "f9e100ca9ed94b8f1983b356ae81966e30210cf4?recursive=1"
+            "https://raw.githubusercontent.com/xlang-ai/DS-1000/" f"{DS1000_REVISION}/LICENSE"
         ),
-        harness_license_id="LicenseRef-CodeRAG-Bench-Harness-Undeclared",
-        harness_license_status=_HARNESS_LICENSE_UNDECLARED,
-        harness_distribution_rule="internal-only-no-redistribution",
-        dataset_license_id="LicenseRef-CodeRAG-Bench-Rights-Unverified",
-        distribution_rule="internal-only-no-redistribution",
-        rights_status=_RIGHTS_UNVERIFIED,
+        harness_license_id="CC-BY-SA-4.0",
+        harness_license_status=_HARNESS_LICENSE_ATTESTED,
+        harness_distribution_rule="public-share-allowed",
+        dataset_license_id="CC-BY-SA-4.0",
+        distribution_rule="internal-only",
+        rights_status=_RIGHTS_ATTESTED,
         legal_boundary=(
-            "Rights are unverified: execution is internal-only, evidence is retained, and "
-            "the snapshot must never be redistributed or represented as licensed."
+            "The official simplified DS-1000 dataset and evaluator are retained at the "
+            "pinned upstream revision; CodeRAG retrieval corpus evidence remains separately "
+            "pinned and is not part of the DS-1000 harness."
         ),
     ),
     BenchmarkSuiteCatalogEntry(
@@ -655,7 +651,13 @@ def build_live_benchmark_catalog_evidence(
                         {
                             "license": harness_license_payload,
                             "source-archive": harness_source_archive_payload,
-                            **authoritative_roles.get(entry.suite_id, {}),
+                            **authoritative_roles.get(
+                                EXECUTION_SUBSTRATE_SUITE_BY_BENCHMARK_SUITE.get(
+                                    entry.suite_id,
+                                    entry.suite_id,
+                                ),
+                                {},
+                            ),
                         },
                     ),
                     entry,
@@ -885,29 +887,41 @@ def _validated_execution_substrate_materialization(
 def _validate_ds1000_sandbox_inventory(payload: bytes, entry: BenchmarkSuiteCatalogEntry) -> None:
     inventory = _json_mapping(payload, "DS-1000 sandbox image inventory")
     if set(inventory) != {
+        "baseImage",
+        "datasetProvenance",
+        "ds1000Revision",
         "dockerSocketMounted",
         "imageDigest",
         "imagePurpose",
         "imageReference",
         "libraries",
         "networkMode",
-        "officialHarnessRevision",
+        "officialDatasetPath",
         "pythonVersion",
+        "pytorchVariant",
         "readOnlyRootFilesystem",
         "schema",
         "suiteId",
     }:
         raise ValueError("DS-1000 sandbox image inventory shape is invalid")
-    if inventory.get("schema") != "Ds1000SandboxImageInventory/v1":
+    if inventory.get("schema") != DS1000_SANDBOX_IMAGE_INVENTORY_SCHEMA:
         raise ValueError("DS-1000 sandbox image inventory schema is unsupported")
-    if inventory.get("suiteId") != entry.suite_id:
-        raise ValueError("DS-1000 sandbox image inventory suite is mismatched")
-    if inventory.get("officialHarnessRevision") != entry.harness_revision:
-        raise ValueError("DS-1000 sandbox image inventory revision is mismatched")
-    if inventory.get("imagePurpose") != "ds1000-official-execution":
+    if entry.harness_revision != DS1000_REVISION:
+        raise ValueError("CodeRAG-Bench must bind the current official DS-1000 revision")
+    if inventory.get("suiteId") != DS1000_INVENTORY_SUITE_ID:
+        raise ValueError("DS-1000 sandbox inventory identity is mismatched")
+    if inventory.get("imagePurpose") != DS1000_IMAGE_PURPOSE:
         raise ValueError("DS-1000 sandbox image inventory purpose is unsupported")
-    if inventory.get("pythonVersion") != "3.7.10":
+    if inventory.get("pythonVersion") != DS1000_PYTHON_VERSION:
         raise ValueError("DS-1000 sandbox image inventory Python version is unsupported")
+    if inventory.get("pytorchVariant") != DS1000_PYTORCH_VARIANT:
+        raise ValueError("DS-1000 sandbox image inventory PyTorch variant is unsupported")
+    if inventory.get("officialDatasetPath") != DS1000_OFFICIAL_DATASET_PATH:
+        raise ValueError("DS-1000 sandbox image inventory dataset path is unsupported")
+    if inventory.get("ds1000Revision") != DS1000_REVISION:
+        raise ValueError("DS-1000 sandbox image inventory source revision is unsupported")
+    _validate_ds1000_base_image_provenance(inventory.get("baseImage"))
+    _validate_ds1000_dataset_provenance(inventory.get("datasetProvenance"))
     if (
         inventory.get("dockerSocketMounted") is not False
         or inventory.get("networkMode") != "disabled"
@@ -930,8 +944,51 @@ def _validate_ds1000_sandbox_inventory(payload: bytes, entry: BenchmarkSuiteCata
         if not isinstance(name, str) or not isinstance(version, str) or not version.strip():
             raise ValueError("DS-1000 library inventory entry is incomplete")
         observed_libraries.append((name, version))
-    if tuple(observed_libraries) != _DS1000_LIBRARY_VERSIONS:
+    if tuple(observed_libraries) != DS1000_LIBRARY_VERSIONS:
         raise ValueError("DS-1000 sandbox image inventory libraries are noncanonical")
+
+
+def _validate_ds1000_base_image_provenance(value: object) -> None:
+    if not isinstance(value, Mapping) or set(value) != {
+        "imageReference",
+        "platform",
+        "schema",
+        "sourceReference",
+    }:
+        raise ValueError("DS-1000 base image provenance shape is invalid")
+    image_reference = value.get("imageReference")
+    if (
+        value.get("schema") != DS1000_BASE_IMAGE_PROVENANCE_SCHEMA
+        or value.get("platform") != DS1000_PLATFORM
+        or value.get("sourceReference") != DS1000_BASE_IMAGE_SOURCE_REFERENCE
+        or not isinstance(image_reference, str)
+        or not re.fullmatch(
+            re.escape(DS1000_BASE_IMAGE_REPOSITORY) + r"@sha256:[0-9a-f]{64}",
+            image_reference,
+        )
+    ):
+        raise ValueError("DS-1000 base image provenance is unsupported")
+
+
+def _validate_ds1000_dataset_provenance(value: object) -> None:
+    if not isinstance(value, Mapping) or set(value) != {
+        "datasetPath",
+        "ds1000Revision",
+        "fieldNames",
+        "rowCount",
+        "schema",
+        "sha256",
+    }:
+        raise ValueError("DS-1000 dataset provenance shape is invalid")
+    if (
+        value.get("schema") != DS1000_DATASET_PROVENANCE_SCHEMA
+        or value.get("datasetPath") != DS1000_OFFICIAL_DATASET_PATH
+        or value.get("ds1000Revision") != DS1000_REVISION
+        or value.get("fieldNames") != list(DS1000_DATASET_FIELD_NAMES)
+        or value.get("rowCount") != DS1000_DATASET_ROW_COUNT
+    ):
+        raise ValueError("DS-1000 dataset provenance is unsupported")
+    _catalog_sha256(value.get("sha256"), "DS-1000 dataset provenance sha256")
 
 
 def _validate_swe_bench_sandbox_inventory(

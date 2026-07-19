@@ -10,7 +10,6 @@ from dags.serp_eval_contracts import (
     build_tenant_golden_registry_cli_spec,
     build_tenant_golden_regression_plan,
     build_tenant_golden_runner_cli_spec,
-    governance_notification_pending,
     write_airflow_plan_artifact,
 )
 
@@ -56,11 +55,4 @@ build_submissions = PythonOperator(
     dag=dag,
 )
 
-notify_governance = PythonOperator(
-    task_id="notify_governance_eval_surfaces",
-    python_callable=governance_notification_pending,
-    op_args=["{{ ti.xcom_pull(task_ids='validate_tenant_golden_regression_plan') }}"],
-    dag=dag,
-)
-
-validate_plan >> run_cases >> build_submissions >> notify_governance
+validate_plan >> run_cases >> build_submissions

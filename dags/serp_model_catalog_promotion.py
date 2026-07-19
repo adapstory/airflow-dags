@@ -1,4 +1,4 @@
-"""D17 immutable exact-nine EvaluationRelease/v3 promotion authority."""
+"""D17 immutable exact-nine EvaluationRelease/v4 promotion authority."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from airflow.sdk import DAG
 from dags.serp_eval_contracts import (
     build_d17_event_d6_trigger_conf,
     build_model_catalog_promotion_plan,
-    governance_notification_pending,
     verify_governed_model_releases_terminal_activation,
     write_airflow_plan_artifact,
     write_model_catalog_promotion_receipt,
@@ -164,19 +163,10 @@ trigger_event_d6 = TriggerDagRunOperator(
     dag=dag,
 )
 
-notify_governance = PythonOperator(
-    task_id="notify_governance_eval_surfaces",
-    python_callable=governance_notification_pending,
-    op_args=["{{ ti.xcom_pull(task_ids='validate_model_catalog_promotion_plan') }}"],
-    executor_config=D17_MODEL_GOVERNANCE_EXECUTOR_CONFIG,
-    dag=dag,
-)
-
 (
     validate_plan
     >> verify_terminal_activation
     >> write_receipt
     >> build_event_d6_conf
     >> trigger_event_d6
-    >> notify_governance
 )

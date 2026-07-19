@@ -8,6 +8,7 @@ import math
 import sys
 import types
 from collections.abc import Mapping
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from email.message import Message
 from hashlib import sha256
@@ -31,6 +32,7 @@ from dags.serp_benchmark_catalog import (
     MANDATORY_BENCHMARK_SUITE_CATALOG,
     MANDATORY_EXECUTION_SUBSTRATE_ROLES,
 )
+from dags.serp_ds1000_contract import DS1000_LIBRARY_VERSIONS
 from dags.serp_eval_contracts import (
     MANDATORY_SERP_BENCHMARK_SUITES,
     SERP_NORMALIZED_GATE_FLOOR,
@@ -484,7 +486,7 @@ def test_build_nightly_regression_plan_is_reference_only_d19_orchestrator() -> N
         "observe_triggered_d19_run",
         "write_scheduled_d6_regression_receipt",
         "release_d19_history_fence",
-        "notify_governance_eval_surfaces",
+        "finalize_scheduled_d6_regression",
     ]
     serialized = plan.to_canonical_json()
     for legacy_field in (
@@ -1175,6 +1177,100 @@ def test_catalog_materializer_accepts_dedicated_dataset_evidence_plan() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    (
+        ("schema", "GitOpsCheckoutProvenance/v0"),
+        ("commit", "A" * 40),
+        ("tree", "c" * 39),
+        ("origin", "https://github.com/example/Adapstory-GitOps.git"),
+        ("pipelinePath", "Jenkinsfile"),
+        ("buildUrl", "https://jenkins.adapstory.com/job/serp-benchmark-sandbox-supply/2/"),
+    ),
+)
+def test_benchmark_source_set_checkout_provenance_rejects_noncanonical_fields(
+    field_name: str,
+    invalid_value: str,
+) -> None:
+    checkout_provenance = {
+        "buildUrl": "https://jenkins.adapstory.com/job/serp-benchmark-sandbox-supply/1/",
+        "commit": "b" * 40,
+        "origin": "https://github.com/adapstory/Adapstory-GitOps.git",
+        "pipelinePath": "infra/ci/jenkins/pipelines/serp-benchmark-sandbox-supply.jenkinsfile",
+        "schema": "GitOpsCheckoutProvenance/v1",
+        "tree": "c" * 40,
+    }
+    checkout_provenance[field_name] = invalid_value
+
+    with pytest.raises(ValueError, match="checkout provenance"):
+        serp_eval_contracts_module._normalized_gitops_checkout_provenance(
+            checkout_provenance,
+            field_name="benchmark execution substrate source set",
+            operation_id="ci-benchmark-substrates-1",
+        )
+
+
+def test_ds1000_wheelhouse_manifest_rejects_missing_or_altered_cpu_torch_root() -> None:
+    def wheel_name(name: str, version: str) -> str:
+        if name == "torch":
+            return "torch-2.2.0+cpu-cp310-cp310-manylinux_2_17_x86_64.whl"
+        return f"{name.replace('-', '_')}-{version}-py3-none-any.whl"
+
+    manifest: dict[str, Any] = {
+        "artifacts": [
+            {
+                "fileName": file_name,
+                "sha256": "sha256:" + f"{index:064x}",
+                "sizeBytes": index + 1,
+            }
+            for index, file_name in enumerate(
+                sorted(wheel_name(name, version) for name, version in DS1000_LIBRARY_VERSIONS)
+            )
+        ],
+        "directRequirements": [
+            {"name": name, "version": version} for name, version in DS1000_LIBRARY_VERSIONS
+        ],
+        "platform": "linux/amd64",
+        "pythonVersion": "3.10",
+        "pytorchVariant": "cpuonly",
+        "schema": "Ds1000WheelhouseManifest/v3",
+    }
+
+    assert (
+        serp_eval_contracts_module._normalized_ds1000_wheelhouse_manifest(
+            manifest,
+            field_name="DS-1000 wheelhouse manifest",
+        )["directRequirements"]
+        == manifest["directRequirements"]
+    )
+
+    missing_torch = deepcopy(manifest)
+    missing_torch["directRequirements"] = [
+        requirement
+        for requirement in manifest["directRequirements"]
+        if requirement["name"] != "torch"
+    ]
+    with pytest.raises(ValueError, match="direct requirements are unsupported"):
+        serp_eval_contracts_module._normalized_ds1000_wheelhouse_manifest(
+            missing_torch,
+            field_name="DS-1000 wheelhouse manifest",
+        )
+
+    altered_torch = deepcopy(manifest)
+    altered_torch["directRequirements"] = [
+        {
+            **requirement,
+            **({"version": "2.2.0+cu121"} if requirement["name"] == "torch" else {}),
+        }
+        for requirement in manifest["directRequirements"]
+    ]
+    with pytest.raises(ValueError, match="direct requirements are unsupported"):
+        serp_eval_contracts_module._normalized_ds1000_wheelhouse_manifest(
+            altered_torch,
+            field_name="DS-1000 wheelhouse manifest",
+        )
+
+
 def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() -> None:
     operation_id = "ci-benchmark-substrates-1"
     role_file_names = {
@@ -1198,7 +1294,7 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
         for role in roles:
             payload = role_payloads[(suite_id, role)]
             key = f"serp-evals/{operation_id}/roles/" f"{role_file_names[(suite_id, role)]}"
-            version_id = f"version-{suite_id}-{role}"
+            version_id = f"version-{suite_id.casefold().replace(' ', '-')}-{role}"
             objects[(key, version_id)] = payload
             role_entries.append(
                 {
@@ -1214,25 +1310,60 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
             )
         suite_entries.append({"roles": role_entries, "suiteId": suite_id})
 
+    source_root = f"s3://airflow-serp-evidence/serp-evals/{operation_id}"
+
     def sbom_handle(name: str) -> dict[str, str]:
         return {
             "objectLockMode": "COMPLIANCE",
             "retainUntil": "2027-07-15T00:00:00Z",
-            "s3Uri": f"s3://airflow-serp-evidence/serp-evals/substrates/sboms/{name}.json",
+            "s3Uri": f"{source_root}/sboms/{name}.json",
             "sha256": "sha256:" + "e" * 64,
             "versionId": f"sbom-{name}-v1",
+        }
+
+    def swe_sbom_handle(instance_id: str) -> dict[str, str]:
+        return {
+            "objectLockMode": "COMPLIANCE",
+            "retainUntil": "2027-07-15T00:00:00Z",
+            "s3Uri": (
+                f"{source_root}/sboms/swe/" f"{sha256(instance_id.encode()).hexdigest()}.cdx.json"
+            ),
+            "sha256": "sha256:" + "e" * 64,
+            "versionId": f"sbom-swe-{instance_id}-v1",
         }
 
     wheelhouse_manifest: dict[str, Any] = {
         "artifacts": [
             {
-                "fileName": "pip-23.3.2-py3-none-any.whl",
-                "sha256": "sha256:" + "f" * 64,
-                "sizeBytes": 1,
+                "fileName": file_name,
+                "sha256": "sha256:" + f"{index:064x}",
+                "sizeBytes": index + 1,
             }
+            for index, file_name in enumerate(
+                (
+                    "datasets-2.19.1-py3-none-any.whl",
+                    "gensim-4.3.2-cp310-cp310-manylinux_2_17_x86_64.whl",
+                    "matplotlib-3.8.4-cp310-cp310-manylinux_2_17_x86_64.whl",
+                    "numpy-1.26.4-cp310-cp310-manylinux_2_17_x86_64.whl",
+                    "pandas-1.5.3-cp310-cp310-manylinux_2_17_x86_64.whl",
+                    "scikit_learn-1.4.0-cp310-cp310-manylinux_2_17_x86_64.whl",
+                    "scipy-1.12.0-cp310-cp310-manylinux_2_17_x86_64.whl",
+                    "seaborn-0.13.2-py3-none-any.whl",
+                    "statsmodels-0.14.1-cp310-cp310-manylinux_2_17_x86_64.whl",
+                    "tensorflow_cpu-2.16.1-cp310-cp310-manylinux_2_17_x86_64.whl",
+                    "torch-2.2.0+cpu-cp310-cp310-manylinux_2_17_x86_64.whl",
+                    "tqdm-4.66.4-py3-none-any.whl",
+                    "xgboost-2.0.3-cp310-cp310-manylinux_2_17_x86_64.whl",
+                )
+            )
         ],
-        "pythonVersion": "3.7.10",
-        "schema": "Ds1000WheelhouseManifest/v1",
+        "directRequirements": [
+            {"name": name, "version": version} for name, version in DS1000_LIBRARY_VERSIONS
+        ],
+        "platform": "linux/amd64",
+        "pythonVersion": "3.10",
+        "pytorchVariant": "cpuonly",
+        "schema": "Ds1000WheelhouseManifest/v3",
     }
     wheelhouse_bytes = json.dumps(
         wheelhouse_manifest, ensure_ascii=True, separators=(",", ":"), sort_keys=True
@@ -1247,17 +1378,63 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
         "sha256": "sha256:" + sha256(wheelhouse_bytes).hexdigest(),
         "versionId": wheelhouse_version,
     }
+    base_image_provenance: dict[str, Any] = {
+        "imageReference": (
+            "harbor.adapstory.com/dockerhub-cache/library/python@sha256:" + "c" * 64
+        ),
+        "platform": "linux/amd64",
+        "schema": "Ds1000BaseImageProvenance/v1",
+        "sourceReference": "harbor.adapstory.com/dockerhub-cache/library/python:3.10-slim-bookworm",
+    }
+    base_image_bytes = json.dumps(
+        base_image_provenance, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+    ).encode()
+    base_image_key = f"serp-evals/{operation_id}/base-images/ds1000/provenance.json"
+    base_image_version = "ds1000-base-image-provenance-version"
+    objects[(base_image_key, base_image_version)] = base_image_bytes
+    base_image_evidence = {
+        "objectLockMode": "COMPLIANCE",
+        "retainUntil": "2027-07-15T00:00:00Z",
+        "s3Uri": f"s3://airflow-serp-evidence/{base_image_key}",
+        "sha256": "sha256:" + sha256(base_image_bytes).hexdigest(),
+        "versionId": base_image_version,
+    }
+    dataset_provenance: dict[str, Any] = {
+        "datasetPath": "data/ds1000.jsonl.gz",
+        "ds1000Revision": "b39aab71da6d23ef8d3cac59a7c5f834516ab334",
+        "fieldNames": ["code_context", "metadata", "prompt", "reference_code"],
+        "rowCount": 1000,
+        "schema": "Ds1000SimplifiedDatasetProvenance/v1",
+        "sha256": "sha256:" + "a" * 64,
+    }
+    dataset_bytes = json.dumps(
+        dataset_provenance, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+    ).encode()
+    dataset_key = f"serp-evals/{operation_id}/datasets/ds1000/simplified-provenance.json"
+    dataset_version = "ds1000-dataset-provenance-version"
+    objects[(dataset_key, dataset_version)] = dataset_bytes
+    dataset_evidence = {
+        "objectLockMode": "COMPLIANCE",
+        "retainUntil": "2027-07-15T00:00:00Z",
+        "s3Uri": f"s3://airflow-serp-evidence/{dataset_key}",
+        "sha256": "sha256:" + sha256(dataset_bytes).hexdigest(),
+        "versionId": dataset_version,
+    }
     supply_attestations: dict[str, Any] = {
         "ds1000": {
+            "baseImageProvenanceEvidence": base_image_evidence,
+            "baseImageProvenanceSha256": base_image_evidence["sha256"],
+            "datasetProvenanceEvidence": dataset_evidence,
+            "datasetProvenanceSha256": dataset_evidence["sha256"],
             "imageReference": (
                 "harbor.adapstory.com/benchmark-sandboxes/ds1000@sha256:" + "d" * 64
             ),
-            "sbomEvidence": sbom_handle("ds1000"),
+            "sbomEvidence": sbom_handle("ds1000/image.cdx"),
             "signatureStatus": "signed-and-verified",
             "wheelhouseManifestEvidence": wheelhouse_evidence,
             "wheelhouseManifestSha256": wheelhouse_evidence["sha256"],
         },
-        "schema": "BenchmarkSubstrateSupplyAttestations/v2",
+        "schema": "BenchmarkSubstrateSupplyAttestations/v3",
         "sweBench": {
             "datasetRevision": "91aa3ed51b709be6457e12d00300a6a596d4c6a3",
             "images": [
@@ -1267,7 +1444,7 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
                         f"owner-repo-{index:03d}@sha256:{index:064x}"
                     ),
                     "instanceId": f"owner__repo-{index:03d}",
-                    "sbomEvidence": sbom_handle(f"swe-{index:03d}"),
+                    "sbomEvidence": swe_sbom_handle(f"owner__repo-{index:03d}"),
                     "signatureStatus": "signed-and-verified",
                 }
                 for index in range(500)
@@ -1287,9 +1464,52 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
         "sha256": "sha256:" + sha256(supply_bytes).hexdigest(),
         "versionId": supply_version,
     }
+    ds1000_inventory: dict[str, Any] = {
+        "baseImage": base_image_provenance,
+        "datasetProvenance": dataset_provenance,
+        "dockerSocketMounted": False,
+        "ds1000Revision": "b39aab71da6d23ef8d3cac59a7c5f834516ab334",
+        "imageDigest": "sha256:" + "d" * 64,
+        "imagePurpose": "ds1000-simplified-official-execution",
+        "imageReference": "harbor.adapstory.com/benchmark-sandboxes/ds1000@sha256:" + "d" * 64,
+        "libraries": wheelhouse_manifest["directRequirements"],
+        "networkMode": "disabled",
+        "officialDatasetPath": "data/ds1000.jsonl.gz",
+        "pythonVersion": "3.10",
+        "pytorchVariant": "cpuonly",
+        "readOnlyRootFilesystem": True,
+        "schema": "Ds1000SandboxImageInventory/v2",
+        "suiteId": "DS-1000",
+    }
+    ds1000_role_payload = json.dumps(
+        ds1000_inventory, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+    ).encode()
+    ds1000_role = ("DS-1000", "execution-sandbox")
+    role_payloads[ds1000_role] = ds1000_role_payload
+    ds1000_role_key = f"serp-evals/{operation_id}/roles/{role_file_names[ds1000_role]}"
+    ds1000_role_version = f"version-{ds1000_role[0].casefold()}-{ds1000_role[1]}"
+    objects[(ds1000_role_key, ds1000_role_version)] = ds1000_role_payload
+    for suite in suite_entries:
+        if suite["suiteId"] != "DS-1000":
+            continue
+        role = suite["roles"][0]
+        role["evidence"]["sha256"] = "sha256:" + sha256(ds1000_role_payload).hexdigest()
+        break
     source_set: dict[str, Any] = {
+        "checkoutProvenance": {
+            "buildUrl": "https://jenkins.adapstory.com/job/serp-benchmark-sandbox-supply/1/",
+            "commit": "b" * 40,
+            "origin": "https://github.com/adapstory/Adapstory-GitOps.git",
+            "pipelinePath": (
+                "infra/ci/jenkins/pipelines/serp-benchmark-sandbox-supply.jenkinsfile"
+            ),
+            "schema": "GitOpsCheckoutProvenance/v1",
+            "tree": "c" * 40,
+        },
+        "ds1000BaseImageProvenanceEvidence": base_image_evidence,
+        "ds1000DatasetProvenanceEvidence": dataset_evidence,
         "ds1000WheelhouseManifestEvidence": wheelhouse_evidence,
-        "schema": "BenchmarkExecutionSubstrateSourceSet/v3",
+        "schema": "BenchmarkExecutionSubstrateSourceSet/v6",
         "suites": suite_entries,
         "supplyAttestationsEvidence": supply_evidence,
     }
@@ -1307,12 +1527,19 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
         "versionId": source_version,
     }
     verified_source_set: dict[str, Any] = {
+        "checkoutProvenance": source_set["checkoutProvenance"],
         "operationId": operation_id,
         "retainUntil": source_evidence["retainUntil"],
         "sourceSet": source_set,
         "sourceSetEvidence": source_evidence,
+        "ds1000BaseImageProvenance": base_image_provenance,
+        "ds1000BaseImageProvenanceEvidence": base_image_evidence,
+        "ds1000DatasetProvenance": dataset_provenance,
+        "ds1000DatasetProvenanceEvidence": dataset_evidence,
         "ds1000WheelhouseManifest": wheelhouse_manifest,
         "ds1000WheelhouseManifestEvidence": wheelhouse_evidence,
+        "supplyAttestations": supply_attestations,
+        "supplyAttestationsEvidence": supply_evidence,
     }
 
     class Body:
@@ -1385,7 +1612,7 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
             for key, value in supply_attestations["ds1000"].items()
             if key not in {"wheelhouseManifestEvidence", "wheelhouseManifestSha256"}
         },
-        "schema": "BenchmarkSubstrateSupplyAttestations/v1",
+        "schema": "BenchmarkSubstrateSupplyAttestations/v2",
     }
     legacy_supply_bytes = json.dumps(
         legacy_supply_attestations,
@@ -1405,6 +1632,8 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
                 "sha256": "sha256:" + sha256(legacy_supply_bytes).hexdigest(),
                 "versionId": legacy_supply_version,
             },
+            base_image_evidence=base_image_evidence,
+            dataset_evidence=dataset_evidence,
             wheelhouse_evidence=wheelhouse_evidence,
             s3_client=FakeS3Client(),
         )
@@ -1442,6 +1671,89 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
             s3_client=FakeS3Client(),
         )
 
+    v5_source_set = dict(verified_source_set)
+    v5_source_set["sourceSet"] = {
+        **source_set,
+        "schema": "BenchmarkExecutionSubstrateSourceSet/v5",
+    }
+    with pytest.raises(ValueError, match="source set"):
+        serp_eval_contracts_module._load_execution_substrate_source_set(
+            v5_source_set,
+            s3_client=FakeS3Client(),
+        )
+
+    source_set_without_checkout_provenance = dict(verified_source_set)
+    source_set_without_checkout_provenance["sourceSet"] = dict(source_set)
+    source_set_without_checkout_provenance["sourceSet"].pop("checkoutProvenance")
+    with pytest.raises(ValueError, match="source set"):
+        serp_eval_contracts_module._load_execution_substrate_source_set(
+            source_set_without_checkout_provenance,
+            s3_client=FakeS3Client(),
+        )
+
+    malformed_checkout_provenance = dict(verified_source_set)
+    malformed_checkout_provenance["sourceSet"] = {
+        **source_set,
+        "checkoutProvenance": {
+            **source_set["checkoutProvenance"],
+            "tree": "not-a-lowercase-git-tree",
+        },
+    }
+    with pytest.raises(ValueError, match="checkout provenance"):
+        serp_eval_contracts_module._load_execution_substrate_source_set(
+            malformed_checkout_provenance,
+            s3_client=FakeS3Client(),
+        )
+
+    extra_checkout_provenance = dict(verified_source_set)
+    extra_checkout_provenance["sourceSet"] = {
+        **source_set,
+        "checkoutProvenance": {
+            **source_set["checkoutProvenance"],
+            "unexpected": "unsupported",
+        },
+    }
+    with pytest.raises(ValueError, match="checkout provenance"):
+        serp_eval_contracts_module._load_execution_substrate_source_set(
+            extra_checkout_provenance,
+            s3_client=FakeS3Client(),
+        )
+
+    mismatched_checkout_build = dict(verified_source_set)
+    mismatched_checkout_build["sourceSet"] = {
+        **source_set,
+        "checkoutProvenance": {
+            **source_set["checkoutProvenance"],
+            "buildUrl": ("https://jenkins.adapstory.com/job/serp-benchmark-sandbox-supply/2/"),
+        },
+    }
+    with pytest.raises(ValueError, match="checkout provenance build URL"):
+        serp_eval_contracts_module._load_execution_substrate_source_set(
+            mismatched_checkout_build,
+            s3_client=FakeS3Client(),
+        )
+
+    missing_verified_checkout_provenance = dict(verified_source_set)
+    missing_verified_checkout_provenance.pop("checkoutProvenance")
+    with pytest.raises(ValueError, match="must define exactly"):
+        serp_eval_contracts_module._load_execution_substrate_source_set(
+            missing_verified_checkout_provenance,
+            s3_client=FakeS3Client(),
+        )
+
+    mismatched_verified_checkout_provenance = {
+        **verified_source_set,
+        "checkoutProvenance": {
+            **source_set["checkoutProvenance"],
+            "commit": "d" * 40,
+        },
+    }
+    with pytest.raises(ValueError, match="checkout provenance does not match sourceSet"):
+        serp_eval_contracts_module._load_execution_substrate_source_set(
+            mismatched_verified_checkout_provenance,
+            s3_client=FakeS3Client(),
+        )
+
     source_set_without_wheelhouse = dict(verified_source_set)
     source_set_without_wheelhouse["sourceSet"] = dict(source_set)
     source_set_without_wheelhouse["sourceSet"].pop("ds1000WheelhouseManifestEvidence")
@@ -1475,14 +1787,68 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
         **wheelhouse_manifest,
         "artifacts": [
             {
-                **wheelhouse_manifest["artifacts"][0],
-                "sha256": "sha256:" + "0" * 64,
+                **artifact,
+                **({"sha256": "sha256:" + "f" * 64} if index == 0 else {}),
             }
+            for index, artifact in enumerate(wheelhouse_manifest["artifacts"])
         ],
     }
     with pytest.raises(ValueError, match="manifest does not match"):
         serp_eval_contracts_module._load_execution_substrate_source_set(
             mismatched_wheelhouse_manifest,
+            s3_client=FakeS3Client(),
+        )
+
+    class SupplyRetentionMismatchS3Client(FakeS3Client):
+        def head_object(self, *, Bucket: str, Key: str, VersionId: str) -> dict[str, object]:
+            result = super().head_object(Bucket=Bucket, Key=Key, VersionId=VersionId)
+            if Key == supply_key:
+                result["ObjectLockRetainUntilDate"] = datetime(2027, 7, 16, tzinfo=UTC)
+            return result
+
+    with pytest.raises(ValueError, match="supply attestations retainUntil is mismatched"):
+        serp_eval_contracts_module._load_execution_substrate_source_set(
+            verified_source_set,
+            s3_client=SupplyRetentionMismatchS3Client(),
+        )
+
+    mismatched_inventory = deepcopy(ds1000_inventory)
+    mismatched_inventory["imageDigest"] = "sha256:" + "f" * 64
+    mismatched_inventory["imageReference"] = (
+        "harbor.adapstory.com/benchmark-sandboxes/ds1000@sha256:" + "f" * 64
+    )
+    mismatched_inventory_payload = json.dumps(
+        mismatched_inventory, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+    ).encode()
+    mismatched_role_version = "ds1000-mismatched-inventory-version"
+    objects[(ds1000_role_key, mismatched_role_version)] = mismatched_inventory_payload
+    mismatched_source_set = deepcopy(source_set)
+    mismatched_role = next(
+        suite["roles"][0]
+        for suite in mismatched_source_set["suites"]
+        if suite["suiteId"] == "DS-1000"
+    )
+    mismatched_role["evidence"] = {
+        **mismatched_role["evidence"],
+        "sha256": "sha256:" + sha256(mismatched_inventory_payload).hexdigest(),
+        "versionId": mismatched_role_version,
+    }
+    mismatched_source_bytes = json.dumps(
+        mismatched_source_set, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+    ).encode()
+    mismatched_source_version = "source-set-mismatched-inventory-version"
+    objects[(source_key, mismatched_source_version)] = mismatched_source_bytes
+    mismatched_source_evidence = {
+        **source_evidence,
+        "sha256": "sha256:" + sha256(mismatched_source_bytes).hexdigest(),
+        "versionId": mismatched_source_version,
+    }
+    mismatched_inventory_source_set = deepcopy(verified_source_set)
+    mismatched_inventory_source_set["sourceSet"] = mismatched_source_set
+    mismatched_inventory_source_set["sourceSetEvidence"] = mismatched_source_evidence
+    with pytest.raises(ValueError, match="inventory image differs from supply attestations"):
+        serp_eval_contracts_module._load_execution_substrate_source_set(
+            mismatched_inventory_source_set,
             s3_client=FakeS3Client(),
         )
 
@@ -1771,7 +2137,6 @@ def test_build_online_eval_rollup_plan_materializes_d7_contract(tmp_path: Path) 
         "write_online_eval_rollup_plan",
         "build_online_eval_rollup",
         "build_online_eval_registry_submissions",
-        "notify_governance_eval_surfaces",
     ]
 
     rollup_plan_artifact = write_online_eval_rollup_plan_artifact(plan.to_canonical_json())
@@ -2556,7 +2921,6 @@ def test_build_tenant_golden_regression_plan_preserves_workflow_provenance() -> 
         "validate_tenant_golden_regression_plan",
         "run_tenant_golden_set_cases",
         "build_tenant_golden_registry_submissions",
-        "notify_governance_eval_surfaces",
     ]
 
     missing_workflow = _tenant_golden_conf()
@@ -2671,6 +3035,10 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
             "s3://airflow-serp-evidence/serp-evals/"
             f"{plan.payload['operation_id']}/benchmark-pack-lifecycle-result.json"
         ),
+        "official_serp_mcp_measurement": (
+            "s3://airflow-serp-evidence/serp-evals/"
+            f"{plan.payload['operation_id']}/official-serp-mcp-measurement.json"
+        ),
         "paired_eval_receipt": (
             "s3://airflow-serp-evidence/serp-evals/"
             f"{plan.payload['operation_id']}/paired-eval-receipt.json"
@@ -2742,7 +3110,8 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
         "assemble_paired_execution_manifest",
         "run_paired_benchmark_evaluation",
         "persist_paired_evaluation_verification_evidence",
-        "notify_governance_eval_surfaces",
+        "write_official_serp_mcp_measurement",
+        "publish_official_serp_mcp_measurement",
     ]
 
 
@@ -2851,6 +3220,323 @@ def test_d19_persists_observed_normalized_score_cells_and_identity_bound_verific
         "normalizedLcb95": 0.925,
         "normalizedMean": 0.95,
     }
+
+
+def test_d19_writes_one_deterministic_official_serp_mcp_measurement_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS", "365")
+    plan = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
+    evaluator_result, objects = _d19_evaluator_result(plan)
+    s3_client = _D19VerificationS3(objects)
+    verification = serp_eval_contracts_module.write_paired_evaluation_verification_evidence(
+        plan.to_canonical_json(),
+        evaluator_result,
+        _d19_airflow_run(),
+        s3_client=s3_client,
+    )
+    s3_client.put_object_calls.clear()
+
+    first = serp_eval_contracts_module.write_official_serp_mcp_measurement(
+        plan.to_canonical_json(),
+        verification,
+        _d19_airflow_run(),
+        s3_client=s3_client,
+    )
+    second = serp_eval_contracts_module.write_official_serp_mcp_measurement(
+        plan.to_canonical_json(),
+        verification,
+        _d19_airflow_run(),
+        s3_client=s3_client,
+    )
+
+    assert second == first
+    assert first["operationId"] == plan.payload["operation_id"]
+    assert first["measurementStatus"] == "measured"
+    measurement_evidence = first["measurementEvidence"]
+    assert (
+        measurement_evidence["s3Uri"]
+        == plan.payload["artifact_paths"]["official_serp_mcp_measurement"]
+    )
+    assert s3_client.put_object_calls == [measurement_evidence["s3Uri"]]
+    measurement = json.loads(
+        s3_client.objects[(measurement_evidence["s3Uri"], measurement_evidence["versionId"])]
+    )
+    assert measurement == {
+        "airflowRun": _d19_airflow_run(),
+        "allNineBaselineRetentionLcb95ToMean": pytest.approx(0.925 / 0.9),
+        "allNineCandidateNormalizedLcb95": 0.925,
+        "cellCount": 9,
+        "cells": measurement["cells"],
+        "generatedAt": plan.payload["generated_at"],
+        "measurementStatus": "measured",
+        "observedNormalizedScoreCellsEvidence": verification[
+            "observedNormalizedScoreCellsEvidence"
+        ],
+        "operationId": plan.payload["operation_id"],
+        "pairedEvaluationReceiptAttestationEvidence": evaluator_result[
+            "receiptAttestationEvidence"
+        ],
+        "pairedEvaluationReceiptEvidence": _d19_receipt_subject(evaluator_result),
+        "pairedEvaluationVerificationEvidence": verification[
+            "pairedEvaluationVerificationEvidence"
+        ],
+        "rejectionReasons": [],
+        "schema": "OfficialSerpMcpMeasurement/v1",
+        "signedReceiptStatus": "accepted",
+        "tenantId": TENANT_ID,
+        "threshold": 0.9,
+        "thresholdOutcome": "met",
+    }
+    assert [cell["suiteId"] for cell in measurement["cells"]] == list(
+        MANDATORY_SERP_BENCHMARK_SUITES
+    )
+
+
+def test_d19_writes_rejected_official_measurement_with_its_real_score(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS", "365")
+    plan = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
+    evaluator_result, objects = _d19_rejected_evaluator_result(plan)
+    s3_client = _D19VerificationS3(objects)
+    verification = serp_eval_contracts_module.write_paired_evaluation_verification_evidence(
+        plan.to_canonical_json(),
+        evaluator_result,
+        _d19_airflow_run(),
+        s3_client=s3_client,
+    )
+
+    result = serp_eval_contracts_module.write_official_serp_mcp_measurement(
+        plan.to_canonical_json(),
+        verification,
+        _d19_airflow_run(),
+        s3_client=s3_client,
+    )
+
+    measurement_evidence = result["measurementEvidence"]
+    measurement = json.loads(
+        s3_client.objects[(measurement_evidence["s3Uri"], measurement_evidence["versionId"])]
+    )
+    assert result["measurementStatus"] == "rejected"
+    assert measurement["measurementStatus"] == "rejected"
+    assert measurement["signedReceiptStatus"] == "rejected"
+    assert measurement["allNineCandidateNormalizedLcb95"] == 0.8
+    assert measurement["allNineBaselineRetentionLcb95ToMean"] == pytest.approx(0.8 / 0.9)
+    assert measurement["thresholdOutcome"] == "not_met"
+    assert measurement["rejectionReasons"] == [
+        "candidate-normalized-mean-not-met:APIBench:answer-quality:observed-metric-1",
+        "candidate-normalized-lcb95-not-met:APIBench:answer-quality:observed-metric-1",
+        "baseline-retention-lcb95-to-mean-not-met:APIBench:answer-quality:observed-metric-1",
+    ]
+
+
+def test_d19_official_measurement_keeps_baseline_retention_outcome_independent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS", "365")
+    plan = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
+    evaluator_result, objects = _d19_rejected_evaluator_result(
+        plan,
+        candidate_normalized_lcb95=0.89,
+    )
+    s3_client = _D19VerificationS3(objects)
+    verification = serp_eval_contracts_module.write_paired_evaluation_verification_evidence(
+        plan.to_canonical_json(),
+        evaluator_result,
+        _d19_airflow_run(),
+        s3_client=s3_client,
+    )
+
+    result = serp_eval_contracts_module.write_official_serp_mcp_measurement(
+        plan.to_canonical_json(),
+        verification,
+        _d19_airflow_run(),
+        s3_client=s3_client,
+    )
+    evidence = result["measurementEvidence"]
+    measurement = json.loads(s3_client.objects[(evidence["s3Uri"], evidence["versionId"])])
+
+    assert measurement["measurementStatus"] == "rejected"
+    assert measurement["allNineCandidateNormalizedLcb95"] == 0.89
+    assert measurement["allNineBaselineRetentionLcb95ToMean"] == pytest.approx(0.89 / 0.9)
+    assert measurement["thresholdOutcome"] == "met"
+
+
+@pytest.mark.parametrize(
+    ("tamper", "match"),
+    (
+        # These mutations model a byte-level alteration of a persisted WORM
+        # projection.  The official-measurement writer must reject at the
+        # immutable evidence boundary, before it could ever consume a changed
+        # score or pointer.  The score-cell validator has dedicated invariant
+        # tests below for well-formed but semantically invalid producer output.
+        ("null-retention", "SHA-256"),
+        ("non-finite-score", "SHA-256"),
+        ("eight-cells", "SHA-256"),
+        ("receipt-pointer-mismatch", "SHA-256"),
+        ("tampered-score-cells", "SHA-256"),
+        ("invalid-receipt-status", "receipt status is unsupported"),
+    ),
+)
+def test_d19_official_measurement_fails_closed_for_noncanonical_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tamper: str,
+    match: str,
+) -> None:
+    monkeypatch.setenv("ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS", "365")
+    plan = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
+    evaluator_result, objects = _d19_evaluator_result(plan)
+    s3_client = _D19VerificationS3(objects)
+    verification = serp_eval_contracts_module.write_paired_evaluation_verification_evidence(
+        plan.to_canonical_json(),
+        evaluator_result,
+        _d19_airflow_run(),
+        s3_client=s3_client,
+    )
+    score_evidence = verification["observedNormalizedScoreCellsEvidence"]
+    score_key = (score_evidence["s3Uri"], score_evidence["versionId"])
+
+    if tamper == "invalid-receipt-status":
+        verification["receiptStatus"] = "unknown"
+    else:
+        score_payload = json.loads(s3_client.objects[score_key])
+        if tamper == "null-retention":
+            score_payload["benchmarkScore"]["allNineBaselineRetentionLcb95ToMean"] = None
+        elif tamper == "non-finite-score":
+            score_payload["benchmarkScore"]["allNineCandidateNormalizedLcb95"] = float("nan")
+        elif tamper == "eight-cells":
+            score_payload["cells"].pop()
+        elif tamper == "receipt-pointer-mismatch":
+            score_payload["receiptEvidence"] = _d19_worm_evidence("receipts/foreign", "f")
+        elif tamper == "tampered-score-cells":
+            score_payload["summary"]["cellCount"] = 8
+        else:
+            raise AssertionError(f"unsupported tamper case: {tamper}")
+        if tamper == "non-finite-score":
+            s3_client.objects[score_key] = json.dumps(
+                score_payload,
+                allow_nan=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        else:
+            s3_client.objects[score_key] = serp_eval_contracts_module._canonical_json(
+                score_payload
+            ).encode("utf-8")
+
+    with pytest.raises(ValueError, match=match):
+        serp_eval_contracts_module.write_official_serp_mcp_measurement(
+            plan.to_canonical_json(),
+            verification,
+            _d19_airflow_run(),
+            s3_client=s3_client,
+        )
+
+
+def test_d19_official_measurement_publish_is_idempotent_and_sends_only_the_pointer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
+    measurement_evidence = {
+        **_d19_worm_evidence("official-measurement", "e"),
+        "s3Uri": plan.payload["artifact_paths"]["official_serp_mcp_measurement"],
+    }
+    artifact = {
+        "measurementEvidence": measurement_evidence,
+        "measurementStatus": "measured",
+        "operationId": plan.payload["operation_id"],
+    }
+    calls: list[dict[str, Any]] = []
+
+    def request(
+        url: str,
+        *,
+        method: str,
+        body: Mapping[str, Any] | None,
+        headers: Mapping[str, str],
+        error_label: str,
+        allow_conflict: bool = False,
+    ) -> dict[str, Any] | None:
+        calls.append(
+            {
+                "allowConflict": allow_conflict,
+                "body": dict(body or {}),
+                "errorLabel": error_label,
+                "headers": dict(headers),
+                "method": method,
+                "url": url,
+            }
+        )
+        return {"status": "accepted"}
+
+    monkeypatch.setenv(
+        "ADAPSTORY_SERP_BC21_BASE_URL",
+        "http://bc21.test.svc.cluster.local",
+    )
+    monkeypatch.setattr(serp_eval_contracts_module, "_bc21_json_request", request)
+
+    first = serp_eval_contracts_module.publish_official_serp_mcp_measurement(
+        plan.to_canonical_json(), artifact
+    )
+    second = serp_eval_contracts_module.publish_official_serp_mcp_measurement(
+        plan.to_canonical_json(), artifact
+    )
+
+    assert second == first == {"status": "accepted"}
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+    assert calls[0]["url"] == (
+        "http://bc21.test.svc.cluster.local/api/bc-21/serp/v1/governance/official-measurements"
+    )
+    assert calls[0]["method"] == "POST"
+    assert calls[0]["errorLabel"] == "official SERP/MCP measurement publication"
+    assert calls[0]["allowConflict"] is True
+    assert calls[0]["body"] == {
+        "actorId": "airflow-serp-eval-runner",
+        "measurementEvidence": measurement_evidence,
+    }
+    assert calls[0]["headers"]["X-Adapstory-Actor-Id"] == "airflow-serp-eval-runner"
+    assert calls[0]["headers"]["X-Adapstory-Tenant-Id"] == TENANT_ID
+    assert (
+        calls[0]["headers"]["X-Fingerprint"]
+        == "sha256:"
+        + sha256(
+            serp_eval_contracts_module._canonical_json(calls[0]["body"]).encode("utf-8")
+        ).hexdigest()
+    )
+    assert calls[0]["headers"]["X-Idempotency-Key"]
+
+
+@pytest.mark.parametrize("conflict_response", [None, {"status": "conflict"}])
+def test_d19_official_measurement_publish_fails_closed_for_a_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+    conflict_response: dict[str, str] | None,
+) -> None:
+    plan = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
+    artifact = {
+        "measurementEvidence": {
+            **_d19_worm_evidence("official-measurement-conflict", "f"),
+            "s3Uri": plan.payload["artifact_paths"]["official_serp_mcp_measurement"],
+        },
+        "measurementStatus": "measured",
+        "operationId": plan.payload["operation_id"],
+    }
+
+    monkeypatch.setenv(
+        "ADAPSTORY_SERP_BC21_BASE_URL",
+        "http://bc21.test.svc.cluster.local",
+    )
+    monkeypatch.setattr(
+        serp_eval_contracts_module,
+        "_bc21_json_request",
+        lambda _url, **_: conflict_response,
+    )
+
+    with pytest.raises(ValueError, match="conflict"):
+        serp_eval_contracts_module.publish_official_serp_mcp_measurement(
+            plan.to_canonical_json(), artifact
+        )
 
 
 def test_d19_materializes_observed_score_cells_for_a_rejected_evaluation() -> None:
@@ -3373,6 +4059,7 @@ def test_build_paired_benchmark_plan_exposes_only_server_owned_evaluation_paths(
         "benchmark_catalog_receipt",
         "benchmark_pack_build_result",
         "benchmark_pack_lifecycle_result",
+        "official_serp_mcp_measurement",
         "paired_evaluation_assembly_plan",
         "paired_evaluation_score_cells",
         "paired_evaluation_verification_evidence",
@@ -3458,7 +4145,6 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
         "write_public_docs_publish_activation_trigger_conf",
         "prepare_public_docs_d5_dispatch",
         "trigger_public_docs_d5_publish_activation",
-        "notify_governance_eval_surfaces",
     ]
 
     seed_registry_artifact = write_public_docs_seed_registry_artifact(plan.to_canonical_json())
@@ -4916,7 +5602,6 @@ def test_public_docs_publish_activation_plan_dispatches_d5_handoff(tmp_path: Pat
         "commit_public_docs_crawl_state",
         "build_retired_public_docs_pack_cleanup",
         "cleanup_retired_public_docs_pack_versions",
-        "notify_governance_eval_surfaces",
     ]
     assert cli_spec["status"] == "ready_for_pipeline_cli_runner"
     assert cli_spec["task_id"] == "public_docs_publish_activation_handoff"
@@ -6249,7 +6934,7 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
                 "observe_triggered_d19_run",
                 "write_scheduled_d6_regression_receipt",
                 "release_d19_history_fence",
-                "notify_governance_eval_surfaces",
+                "finalize_scheduled_d6_regression",
             ],
         ),
         (
@@ -6267,7 +6952,6 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
                 "validate_tenant_golden_regression_plan",
                 "run_tenant_golden_set_cases",
                 "build_tenant_golden_registry_submissions",
-                "notify_governance_eval_surfaces",
             ],
         ),
         (
@@ -6278,7 +6962,6 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
                 "write_online_eval_rollup_plan",
                 "build_online_eval_rollup",
                 "build_online_eval_registry_submissions",
-                "notify_governance_eval_surfaces",
             ],
         ),
         (
@@ -6290,7 +6973,6 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
                 "write_model_catalog_promotion_receipt",
                 "build_d17_event_d6_trigger_conf",
                 "trigger_model_promotion_regression_suite",
-                "notify_governance_eval_surfaces",
             ],
         ),
         (
@@ -6299,7 +6981,6 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
             [
                 "validate_d17_event_d6_plan",
                 "trigger_benchmark_improvement_wave",
-                "notify_governance_eval_surfaces",
             ],
         ),
         (
@@ -6312,7 +6993,8 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
                 "load_model_catalog_promotion",
                 "write_paired_eval_request",
                 "run_paired_benchmark_evaluation",
-                "notify_governance_eval_surfaces",
+                "write_official_serp_mcp_measurement",
+                "publish_official_serp_mcp_measurement",
             ],
         ),
         (
@@ -6331,7 +7013,6 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
                 "commit_public_docs_crawl_state",
                 "build_retired_public_docs_pack_cleanup",
                 "cleanup_retired_public_docs_pack_versions",
-                "notify_governance_eval_surfaces",
             ],
         ),
         (
@@ -6345,7 +7026,6 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
                 "submit_public_docs_bc21_pipeline_state",
                 "write_public_docs_publish_activation_trigger_conf",
                 "prepare_public_docs_d5_dispatch",
-                "notify_governance_eval_surfaces",
             ],
         ),
     ],
@@ -6371,7 +7051,8 @@ def test_serp_dag_files_declare_expected_airflow_contracts(
             "write_paired_eval_request",
             "write_paired_evaluation_assembly_plan",
             "persist_paired_evaluation_verification_evidence",
-            "notify_governance_eval_surfaces",
+            "write_official_serp_mcp_measurement",
+            "publish_official_serp_mcp_measurement",
         ]
         assert _keyword_values(tree, "KubernetesPodOperator", "task_id") == [
             "materialize_live_benchmark_catalog",
@@ -6397,7 +7078,7 @@ def test_serp_dag_files_declare_expected_airflow_contracts(
         ]
         assert 'trigger_dag_id="serp_model_promotion_regression_suite"' in source
         assert "write_receipt\n    >> build_event_d6_conf" in source
-        assert "trigger_event_d6\n    >> notify_governance" in source
+        assert "build_event_d6_conf\n    >> trigger_event_d6\n)" in source
         assert "fail_when_dag_is_paused=True" in source
     elif dag_id == "serp_model_promotion_regression_suite":
         assert _keyword_values(tree, "PythonOperator", "task_id") == [
@@ -6451,6 +7132,33 @@ def test_serp_dag_files_import_helpers_from_packaged_dags_namespace() -> None:
 
         assert "from dags.serp_eval_contracts import" in source
         assert "from serp_eval_contracts import" not in source
+
+
+def test_no_airflow_dag_keeps_the_retired_pending_governance_marker() -> None:
+    retired_markers = {
+        "governance_notification_pending",
+        "governance_notification_from_public_docs_snapshot",
+    }
+
+    for dag_path in sorted((REPO_ROOT / "dags").glob("*.py")):
+        source = dag_path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        imported = {
+            alias.asname or alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            for alias in node.names
+        }
+        defined = {
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef)
+        }
+
+        assert retired_markers.isdisjoint(imported), dag_path.name
+        assert retired_markers.isdisjoint(defined), dag_path.name
+        for marker in retired_markers:
+            assert marker not in source, dag_path.name
 
 
 def test_every_kubernetes_pod_operator_uses_the_dedicated_controller_executor_identity() -> None:
@@ -6838,6 +7546,76 @@ def test_observe_triggered_d19_run_uses_task_instance_public_metadata_api(
         "get_dr_count",
         "get_dr_count",
     ]
+
+
+def test_scheduled_d6_receipt_failure_propagates_after_fence_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    monkeypatch.delitem(sys.modules, "dags.serp_nightly_regression_suite", raising=False)
+    module = importlib.import_module("dags.serp_nightly_regression_suite")
+    plan = build_nightly_regression_plan(_scheduled_d6_conf())
+    fence = _scheduled_d6_fence(_scheduled_d6_airflow_run())
+
+    class FenceClient:
+        def __init__(self) -> None:
+            self.released: list[dict[str, Any]] = []
+
+        def release(self, value: Mapping[str, Any]) -> None:
+            self.released.append(dict(value))
+
+    fence_client = FenceClient()
+    released = module.release_d19_history_fence(
+        {"fence": fence},
+        fence_client=fence_client,
+    )
+
+    assert released == {"status": "released"}
+    assert fence_client.released == [fence]
+    assert module.release_fence.kwargs["trigger_rule"] == "all_done"
+    assert module.finalize_regression.kwargs["trigger_rule"] == "all_done"
+    assert (
+        module.finalize_regression.kwargs["python_callable"]
+        is serp_eval_contracts_module.finalize_scheduled_d6_regression
+    )
+    source = (REPO_ROOT / "dags" / "serp_nightly_regression_suite.py").read_text(encoding="utf-8")
+    assert "[write_receipt, release_fence] >> finalize_regression" in source
+    receipt_evidence = {
+        **_d19_worm_evidence("scheduled-d6-terminal", "d"),
+        "s3Uri": plan.payload["artifact_paths"]["scheduled_regression_receipt"],
+    }
+    accepted_receipt = {
+        "operationId": plan.payload["operation_id"],
+        "scheduledD6RegressionEvidence": receipt_evidence,
+        "status": "accepted",
+    }
+    assert serp_eval_contracts_module.finalize_scheduled_d6_regression(
+        plan.to_canonical_json(),
+        accepted_receipt,
+        released,
+    ) == {
+        "operationId": plan.payload["operation_id"],
+        "scheduledD6RegressionEvidence": receipt_evidence,
+        "status": "finalized",
+    }
+    with pytest.raises(ValueError, match="scheduled D6 receipt result must be accepted"):
+        serp_eval_contracts_module.finalize_scheduled_d6_regression(
+            plan.to_canonical_json(),
+            {**accepted_receipt, "status": "rejected"},
+            released,
+        )
+    with pytest.raises(ValueError, match="scheduled D6 fence release result must be released"):
+        serp_eval_contracts_module.finalize_scheduled_d6_regression(
+            plan.to_canonical_json(),
+            accepted_receipt,
+            {"status": "failed"},
+        )
+    with pytest.raises(ValueError, match="scheduled D6 receipt result is required"):
+        serp_eval_contracts_module.finalize_scheduled_d6_regression(
+            plan.to_canonical_json(),
+            None,
+            released,
+        )
 
 
 def test_d5_post_activation_failure_uses_direct_parent_rollback_compensation() -> None:
@@ -7722,7 +8500,7 @@ def test_d19_maps_ds1000_from_one_sealed_suite_specific_sandbox_work_item(
             {
                 "caseIdSha256": "sha256:" + "c" * 64,
                 "executorArgs": ["/sandbox/input/ds1000_executor.py"],
-                "executorCommand": "/usr/local/bin/python3.7",
+                "executorCommand": "/opt/ds1000-venv/bin/python",
                 "sandboxImageDigest": image_digest,
                 "sandboxImageReference": "harbor.adapstory.com/serp/ds1000@" + image_digest,
                 "sandboxWorkItemEvidence": evidence,
@@ -7753,7 +8531,7 @@ def test_d19_maps_ds1000_from_one_sealed_suite_specific_sandbox_work_item(
     assert executor["image"] == "harbor.adapstory.com/serp/ds1000@" + image_digest
     assert executor["env"] == []
     assert executor["envFrom"] == []
-    assert executor["command"] == ["/usr/local/bin/python3.7"]
+    assert executor["command"] == ["/opt/ds1000-venv/bin/python"]
     assert executor["args"] == ["/sandbox/input/ds1000_executor.py"]
     assert executor["resources"]["requests"]["ephemeral-storage"] == "8Gi"
     assert executor["resources"]["limits"]["ephemeral-storage"] == "36Gi"
@@ -7902,7 +8680,7 @@ def test_d19_sandbox_fanout_fails_closed_without_exact_inventory(
             {
                 "caseIdSha256": "sha256:" + "c" * 64,
                 "executorArgs": ["/sandbox/input/ds1000_executor.py"],
-                "executorCommand": "/usr/local/bin/python3.7",
+                "executorCommand": "/opt/ds1000-venv/bin/python",
                 "sandboxImageDigest": image_digest,
                 "sandboxImageReference": "harbor.adapstory.com/serp/ds1000@" + image_digest,
                 "sandboxWorkItemEvidence": {
@@ -8892,8 +9670,8 @@ def _d6_d17_promotion_receipt(
         "promotionId": "serp-model-promotion-2026-07-12",
         "registryResourceId": plan.payload["registry_resource_id"],
         "registryResourceType": plan.payload["registry_resource_type"],
-        "schema": "EvaluationReleasePromotionReceipt/v7",
-        "evaluationReleaseContractVersion": "serp-ci-evaluation-release-evidence/v7",
+        "schema": "EvaluationReleasePromotionReceipt/v8",
+        "evaluationReleaseContractVersion": "serp-ci-evaluation-release-evidence/v8",
         "status": "approved-for-evaluation",
         "tenantId": plan.payload["tenant_id"],
     }
@@ -9167,6 +9945,53 @@ def _d19_evaluator_result(
     )
 
 
+def _d19_rejected_evaluator_result(
+    plan: Any,
+    *,
+    candidate_normalized_lcb95: float = 0.8,
+) -> tuple[dict[str, Any], dict[tuple[str, str], bytes]]:
+    """Build a fully bound rejected D19 receipt, without inventing a score."""
+
+    evaluator_result, objects = _d19_evaluator_result(plan)
+    result = json.loads(json.dumps(evaluator_result))
+    receipt_evidence = cast(Mapping[str, Any], result["receiptEvidence"])
+    receipt_path = str(receipt_evidence["artifactPath"])
+    receipt_version = str(receipt_evidence["artifactVersionId"])
+    receipt = json.loads(objects[(receipt_path, receipt_version)])
+    paired = receipt["pairedEvaluation"]
+    first_cell = paired["metricCells"][0]
+    first_cell["candidateNormalizedLcb95"] = candidate_normalized_lcb95
+    first_cell["candidateNormalizedMean"] = candidate_normalized_lcb95
+    first_cell["meanCandidateScore"] = candidate_normalized_lcb95 * 0.9
+    paired["benchmarkScore"] = _d19_paired_benchmark_score(paired["metricCells"])
+    paired.update(
+        {
+            "rejectionReasons": [
+                "candidate-normalized-mean-not-met:APIBench:answer-quality:observed-metric-1",
+                "candidate-normalized-lcb95-not-met:APIBench:answer-quality:observed-metric-1",
+                *(
+                    [
+                        "baseline-retention-lcb95-to-mean-not-met:APIBench:answer-quality:observed-metric-1"
+                    ]
+                    if candidate_normalized_lcb95 / 0.9 < 0.9
+                    else []
+                ),
+            ],
+            "status": "rejected",
+        }
+    )
+    receipt["status"] = "rejected"
+    receipt_bytes = serp_eval_contracts_module._canonical_json(receipt).encode("utf-8")
+    digest = sha256(receipt_bytes).hexdigest()
+    objects[(receipt_path, receipt_version)] = receipt_bytes
+    receipt_evidence["artifactETag"] = digest
+    receipt_evidence["artifactSha256"] = digest
+    result["receiptStatus"] = "rejected"
+    receipt_subject = cast(Mapping[str, Any], result["receiptVerification"])["subject"]
+    receipt_subject["sha256"] = "sha256:" + digest
+    return result, objects
+
+
 def _d19_observed_paired_evaluation(operation_id: str) -> dict[str, Any]:
     cells: list[dict[str, Any]] = []
     for index, suite_id in enumerate(MANDATORY_SERP_BENCHMARK_SUITES, start=1):
@@ -9353,9 +10178,17 @@ def _d19_receipt_subject(evaluator_result: Mapping[str, Any]) -> dict[str, str]:
 class _D19VerificationS3:
     def __init__(self, objects: Mapping[tuple[str, str], bytes]) -> None:
         self.objects = dict(objects)
+        self.put_object_calls: list[str] = []
 
-    def head_object(self, *, Bucket: str, Key: str, VersionId: str) -> dict[str, object]:
+    def head_object(
+        self, *, Bucket: str, Key: str, VersionId: str | None = None
+    ) -> dict[str, object]:
         uri = f"s3://{Bucket}/{Key}"
+        if VersionId is None:
+            versions = [version_id for object_uri, version_id in self.objects if object_uri == uri]
+            if not versions:
+                raise FileNotFoundError(uri)
+            VersionId = versions[-1]
         assert (uri, VersionId) in self.objects
         return {
             "ContentLength": len(self.objects[(uri, VersionId)]),
@@ -9380,6 +10213,7 @@ class _D19VerificationS3:
         uri = f"s3://{Bucket}/{Key}"
         version_id = "verification-version-001"
         self.objects[(uri, version_id)] = Body
+        self.put_object_calls.append(uri)
         return {"ETag": sha256(Body).hexdigest(), "VersionId": version_id}
 
 
@@ -9459,40 +10293,44 @@ def _execution_substrate_materializer(
     if suite_id == "CodeRAG-Bench":
         payloads["execution-sandbox"] = json.dumps(
             {
+                "baseImage": {
+                    "imageReference": (
+                        "harbor.adapstory.com/dockerhub-cache/library/python@sha256:" + "2" * 64
+                    ),
+                    "platform": "linux/amd64",
+                    "schema": "Ds1000BaseImageProvenance/v1",
+                    "sourceReference": (
+                        "harbor.adapstory.com/dockerhub-cache/library/python:" "3.10-slim-bookworm"
+                    ),
+                },
+                "datasetProvenance": {
+                    "datasetPath": "data/ds1000.jsonl.gz",
+                    "ds1000Revision": "b39aab71da6d23ef8d3cac59a7c5f834516ab334",
+                    "fieldNames": [
+                        "code_context",
+                        "metadata",
+                        "prompt",
+                        "reference_code",
+                    ],
+                    "rowCount": 1000,
+                    "schema": "Ds1000SimplifiedDatasetProvenance/v1",
+                    "sha256": "sha256:" + "3" * 64,
+                },
+                "ds1000Revision": "b39aab71da6d23ef8d3cac59a7c5f834516ab334",
                 "dockerSocketMounted": False,
                 "imageDigest": "sha256:" + "1" * 64,
                 "imageReference": ("harbor.adapstory.com/serp/ds1000@sha256:" + "1" * 64),
-                "imagePurpose": "ds1000-official-execution",
+                "imagePurpose": "ds1000-simplified-official-execution",
                 "libraries": [
-                    {"name": name, "version": version}
-                    for name, version in (
-                        ("DateTime", "4.7"),
-                        ("gensim", "4.2.0"),
-                        ("matplotlib", "3.5.2"),
-                        ("numpy", "1.21.6"),
-                        ("openai", "0.23.0"),
-                        ("pandas", "1.3.5"),
-                        ("pandas-datareader", "0.10.0"),
-                        ("pathlib", "1.0.1"),
-                        ("scikit-learn", "1.0.2"),
-                        ("scipy", "1.7.3"),
-                        ("seaborn", "0.11.2"),
-                        ("statsmodels", "0.13.2"),
-                        ("tensorflow", "2.10.0"),
-                        ("tokenizers", "0.12.1"),
-                        ("torch", "1.12.1"),
-                        ("torchvision", "0.13.1"),
-                        ("tqdm", "4.64.1"),
-                        ("xgboost", "1.6.2"),
-                        ("Pillow", "9.2.0"),
-                    )
+                    {"name": name, "version": version} for name, version in DS1000_LIBRARY_VERSIONS
                 ],
                 "networkMode": "disabled",
-                "officialHarnessRevision": revision,
-                "pythonVersion": "3.7.10",
+                "officialDatasetPath": "data/ds1000.jsonl.gz",
+                "pythonVersion": "3.10",
+                "pytorchVariant": "cpuonly",
                 "readOnlyRootFilesystem": True,
-                "schema": "Ds1000SandboxImageInventory/v1",
-                "suiteId": suite_id,
+                "schema": "Ds1000SandboxImageInventory/v2",
+                "suiteId": "DS-1000",
             },
             separators=(",", ":"),
             sort_keys=True,
@@ -9554,8 +10392,8 @@ def _d19_promotion_snapshot(plan: Any) -> dict[str, Any]:
         "promotionEvidence": plan.payload["evaluation_release_promotion_evidence"],
         "evaluationObjective": _d19_evaluation_objective_v6(),
         "promotion": {
-            "schema": "EvaluationReleasePromotionReceipt/v7",
-            "evaluationReleaseContractVersion": "serp-ci-evaluation-release-evidence/v7",
+            "schema": "EvaluationReleasePromotionReceipt/v8",
+            "evaluationReleaseContractVersion": "serp-ci-evaluation-release-evidence/v8",
             "baselineRelease": {
                 "evidence": _d19_worm_evidence("model-releases/baseline", "d"),
                 "releaseDigest": "sha256:" + "1" * 64,

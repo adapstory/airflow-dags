@@ -32,9 +32,25 @@ from adapstory_serp_pipeline.orchestration.vault_transit_attestation import (
 from adapstory_serp_pipeline.registry.evaluation_release_contract import (
     normalize_airflow_runtime_terminal_activation,
     normalize_runtime_terminal_activation_binding,
+    require_versioned_policy_identifier,
 )
 
 from dags.public_docs_crawler import CrawlResponse, crawl_public_docs
+from dags.serp_ds1000_contract import (
+    DS1000_BASE_IMAGE_PROVENANCE_SCHEMA,
+    DS1000_BASE_IMAGE_REPOSITORY,
+    DS1000_BASE_IMAGE_SOURCE_REFERENCE,
+    DS1000_DATASET_FIELD_NAMES,
+    DS1000_DATASET_PROVENANCE_SCHEMA,
+    DS1000_DATASET_ROW_COUNT,
+    DS1000_LIBRARY_VERSIONS,
+    DS1000_OFFICIAL_DATASET_PATH,
+    DS1000_PLATFORM,
+    DS1000_PYTHON_VERSION,
+    DS1000_PYTORCH_VARIANT,
+    DS1000_REVISION,
+    DS1000_WHEELHOUSE_MANIFEST_SCHEMA,
+)
 from dags.serp_public_docs_seed_catalog import (
     PUBLIC_DOCS_NIGHTLY_SOURCE_CATALOG_PATH,
     STACK_INVENTORY_SOURCE_PATH,
@@ -70,22 +86,40 @@ _PIPELINE_CLI_CONTRACT_VERSION = "serp-airflow-pipeline-cli-bridge/v1"
 _AIRFLOW_ARTIFACT_CONTRACT_VERSION = "serp-airflow-artifact-writer/v1"
 _EVAL_CONTRACT_VERSION = "2026.07.2"
 _METRIC_COMPATIBILITY_CONTRACT_VERSION = "serp-suite-metric-compatibility/v1"
-_CI_EVALUATION_RELEASE_CONTRACT_VERSION = "serp-ci-evaluation-release-evidence/v7"
-_EVALUATION_RELEASE_SCHEMA = "EvaluationRelease/v3"
-_EVALUATION_RELEASE_PROMOTION_SCHEMA = "EvaluationReleasePromotionReceipt/v7"
-_BENCHMARK_SUBSTRATE_SOURCE_SET_SCHEMA = "BenchmarkExecutionSubstrateSourceSet/v3"
+_CI_EVALUATION_RELEASE_CONTRACT_VERSION = "serp-ci-evaluation-release-evidence/v8"
+_EVALUATION_RELEASE_SCHEMA = "EvaluationRelease/v4"
+_EVALUATION_RELEASE_PROMOTION_SCHEMA = "EvaluationReleasePromotionReceipt/v8"
+_SUITE_EVALUATION_PROFILE_SCHEMA = "SuiteEvaluationProfile/v3"
+_SUITE_EVALUATION_PROFILE_SET_SCHEMA = "SuiteEvaluationProfileSet/v3"
+_BENCHMARK_SUBSTRATE_SOURCE_SET_SCHEMA = "BenchmarkExecutionSubstrateSourceSet/v6"
+_BENCHMARK_SUBSTRATE_OPERATION_ID_PATTERN = r"ci-benchmark-substrates-([1-9][0-9]*)"
 _BENCHMARK_SUBSTRATE_SOURCE_SET_URI_PATTERN = (
     r"s3://airflow-serp-evidence/serp-evals/"
-    r"(ci-benchmark-substrates-[1-9][0-9]*)/source-set\.json"
+    rf"({_BENCHMARK_SUBSTRATE_OPERATION_ID_PATTERN})/source-set\.json"
+)
+_GITOPS_CHECKOUT_PROVENANCE_SCHEMA = "GitOpsCheckoutProvenance/v1"
+_GITOPS_CHECKOUT_PROVENANCE_ORIGIN = "https://github.com/adapstory/Adapstory-GitOps.git"
+_GITOPS_CHECKOUT_PROVENANCE_PIPELINE_PATH = (
+    "infra/ci/jenkins/pipelines/serp-benchmark-sandbox-supply.jenkinsfile"
+)
+_GITOPS_CHECKOUT_PROVENANCE_BUILD_URL_PREFIX = (
+    "https://jenkins.adapstory.com/job/serp-benchmark-sandbox-supply/"
 )
 _VERIFIED_BENCHMARK_SUBSTRATE_SOURCE_SET_FIELDS = frozenset(
     {
+        "checkoutProvenance",
+        "ds1000BaseImageProvenance",
+        "ds1000BaseImageProvenanceEvidence",
+        "ds1000DatasetProvenance",
+        "ds1000DatasetProvenanceEvidence",
         "operationId",
         "retainUntil",
         "sourceSet",
         "sourceSetEvidence",
         "ds1000WheelhouseManifest",
         "ds1000WheelhouseManifestEvidence",
+        "supplyAttestations",
+        "supplyAttestationsEvidence",
     }
 )
 _PAIRED_EVALUATION_REQUEST_SCHEMA = "PairedEvaluationRequest/v6"
@@ -107,6 +141,8 @@ _PAIRED_BENCHMARK_BASELINE_RETENTION_FORMULA = (
 )
 _MINIMUM_BASELINE_RETENTION_LCB95_TO_MEAN = 0.90
 _D19_OBSERVED_NORMALIZED_SCORE_CELLS_SCHEMA = "D19ObservedNormalizedScoreCells/v2"
+_OFFICIAL_SERP_MCP_MEASUREMENT_SCHEMA = "OfficialSerpMcpMeasurement/v1"
+_OFFICIAL_SERP_MCP_MEASUREMENT_ACTOR_ID = "airflow-serp-eval-runner"
 _PAIRED_EVALUATION_FINAL_RECEIPT_PURPOSE = "serp-paired-evaluation-final-receipt"
 _D19_RUN_HISTORY_OBSERVATION_PURPOSE = "serp-d19-run-history-observation"
 _RUNTIME_BUILD_DRAFT_ATTESTATION_PURPOSE = "serp-airflow-runtime-build-draft"
@@ -152,6 +188,33 @@ _EVALUATION_PROFILE_EVIDENCE_FIELDS = (
     "partitionManifestEvidence",
     "executionEnvelopeEvidence",
     "packBuildProfileEvidence",
+    "mcpAuthorizationEvidence",
+    "mcpRuntimeAdmissionEvidence",
+    "mcpExecutionContextEvidence",
+    "mcpPolicyVersionEvidence",
+)
+_MCP_FROZEN_PROFILE_EVIDENCE_FIELDS = (
+    "mcpAuthorizationEvidence",
+    "mcpRuntimeAdmissionEvidence",
+    "mcpPolicyVersionEvidence",
+)
+_MCP_EXECUTION_CONTEXT_EVIDENCE_FIELD = "mcpExecutionContextEvidence"
+_MCP_EXECUTION_CONTEXT_STATIC_FIELDS = frozenset({"protocolVersion", "transport"})
+_MCP_EXECUTION_CONTEXT_BINDING_FIELDS = {
+    "retrievalProfileSha256": "retrievalProfileEvidence",
+    "rerankerProfileSha256": "rerankerProfileEvidence",
+    "modelRouteSha256": "modelRouteEvidence",
+}
+_MCP_AUTHORIZATION_FIELDS = frozenset({"actorId", "capabilities", "workloadIdentity"})
+_MCP_RUNTIME_ADMISSION_FIELDS = frozenset(
+    {"authorityId", "granularity", "limit", "reservedCapacity"}
+)
+_MCP_POLICY_VERSION_FIELDS = frozenset(
+    {
+        "correctivePolicyVersion",
+        "queryTransformBudgetPolicyId",
+        "queryTransformRouteId",
+    }
 )
 _EVALUATION_TREATMENT_EVIDENCE_FIELDS = {
     "retrievalProfile": "retrievalProfileEvidence",
@@ -585,7 +648,7 @@ def build_nightly_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
                 "observe_triggered_d19_run",
                 "write_scheduled_d6_regression_receipt",
                 "release_d19_history_fence",
-                "notify_governance_eval_surfaces",
+                "finalize_scheduled_d6_regression",
             )
         ),
         "tenant_id": str(tenant_id),
@@ -1463,6 +1526,54 @@ def write_scheduled_d6_regression_receipt(
     }
 
 
+def finalize_scheduled_d6_regression(
+    plan_json: Mapping[str, Any] | str | None,
+    receipt_result: Mapping[str, Any] | str | None,
+    fence_release_result: Mapping[str, Any] | str | None,
+) -> dict[str, Any]:
+    """Make D6 success contingent on both its WORM receipt and fence cleanup.
+
+    This intentionally has no I/O.  It is the ``ALL_DONE`` terminal task so a
+    failed receipt cannot be hidden by the successful fence-release cleanup.
+    """
+
+    if plan_json is None:
+        raise ValueError("scheduled D6 plan is required")
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != _SCHEDULED_D6_DAG_ID:
+        raise ValueError("plan dag_id does not match scheduled D6 finalizer")
+    operation_id = _required_str(plan, "operation_id")
+    artifact_paths = _required_artifact_paths(plan, ("scheduled_regression_receipt",))
+
+    if receipt_result is None:
+        raise ValueError("scheduled D6 receipt result is required")
+    receipt = _json_object(receipt_result, "scheduled D6 receipt result")
+    _reject_raw_secrets(receipt)
+    if set(receipt) != {"operationId", "scheduledD6RegressionEvidence", "status"}:
+        raise ValueError("scheduled D6 receipt result fields are unsupported")
+    if _required_str(receipt, "operationId") != operation_id:
+        raise ValueError("scheduled D6 receipt result operationId does not match plan")
+    if _required_str(receipt, "status") != "accepted":
+        raise ValueError("scheduled D6 receipt result must be accepted")
+    receipt_evidence = _worm_evidence_reference(receipt, "scheduledD6RegressionEvidence")
+    if receipt_evidence["s3Uri"] != artifact_paths["scheduled_regression_receipt"]:
+        raise ValueError("scheduled D6 receipt evidence path does not match plan")
+
+    if fence_release_result is None:
+        raise ValueError("scheduled D6 fence release result is required")
+    fence_release = _json_object(fence_release_result, "scheduled D6 fence release result")
+    _reject_raw_secrets(fence_release)
+    if fence_release != {"status": "released"}:
+        raise ValueError("scheduled D6 fence release result must be released")
+
+    return {
+        "operationId": operation_id,
+        "scheduledD6RegressionEvidence": receipt_evidence,
+        "status": "finalized",
+    }
+
+
 def _aware_datetime(clock: Callable[[], datetime], field_name: str) -> datetime:
     value = clock()
     if value.tzinfo is None or value.utcoffset() is None:
@@ -1875,7 +1986,6 @@ def build_tenant_golden_regression_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
                 "validate_tenant_golden_regression_plan",
                 "run_tenant_golden_set_cases",
                 "build_tenant_golden_registry_submissions",
-                "notify_governance_eval_surfaces",
             )
         ),
         "tenant_id": str(tenant_id),
@@ -1939,7 +2049,6 @@ def build_online_eval_rollup_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
                 "write_online_eval_rollup_plan",
                 "build_online_eval_rollup",
                 "build_online_eval_registry_submissions",
-                "notify_governance_eval_surfaces",
             )
         ),
         "tenant_id": str(tenant_id),
@@ -2041,7 +2150,6 @@ def build_model_catalog_promotion_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
                     "write_model_catalog_promotion_receipt",
                     "build_d17_event_d6_trigger_conf",
                     "trigger_model_promotion_regression_suite",
-                    "notify_governance_eval_surfaces",
                 )
             ),
             "tenant_id": str(tenant_id),
@@ -2184,7 +2292,6 @@ def build_d17_event_d6_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
                 (
                     "validate_d17_event_d6_plan",
                     "trigger_benchmark_improvement_wave",
-                    "notify_governance_eval_surfaces",
                 )
             ),
             "tenant_id": tenant_id,
@@ -2339,6 +2446,10 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
                     "paired_evaluation_verification_evidence",
                     "paired-evaluation-verification-evidence.json",
                 ),
+                (
+                    "official_serp_mcp_measurement",
+                    "official-serp-mcp-measurement.json",
+                ),
                 ("benchmark_pack_build_result", "benchmark-pack-build-result.json"),
                 (
                     "benchmark_pack_lifecycle_result",
@@ -2376,7 +2487,8 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
                 "assemble_paired_execution_manifest",
                 "run_paired_benchmark_evaluation",
                 "persist_paired_evaluation_verification_evidence",
-                "notify_governance_eval_surfaces",
+                "write_official_serp_mcp_measurement",
+                "publish_official_serp_mcp_measurement",
             )
         ),
         "tenant_id": str(tenant_id),
@@ -2443,19 +2555,69 @@ def _benchmark_substrate_source_set_evidence(
     payload: Mapping[str, Any], field_name: str
 ) -> dict[str, str]:
     evidence = _worm_evidence_reference(payload, field_name)
-    s3_uri = evidence["s3Uri"]
-    if not re.fullmatch(_BENCHMARK_SUBSTRATE_SOURCE_SET_URI_PATTERN, s3_uri):
-        raise ValueError(f"{field_name}.s3Uri must be a ci-benchmark-substrates source-set object")
+    _benchmark_substrate_source_set_operation_id(evidence, field_name=field_name)
     return evidence
+
+
+def _benchmark_substrate_source_set_operation_id(
+    evidence: Mapping[str, str], *, field_name: str
+) -> str:
+    source_match = re.fullmatch(_BENCHMARK_SUBSTRATE_SOURCE_SET_URI_PATTERN, evidence["s3Uri"])
+    if source_match is None:
+        raise ValueError(f"{field_name}.s3Uri must be a ci-benchmark-substrates source-set object")
+    return source_match.group(1)
+
+
+def _normalized_gitops_checkout_provenance(
+    value: object,
+    *,
+    field_name: str,
+    operation_id: str,
+) -> dict[str, str]:
+    expected = {"buildUrl", "commit", "origin", "pipelinePath", "schema", "tree"}
+    if not isinstance(value, Mapping) or set(value) != expected:
+        raise ValueError(f"{field_name} checkout provenance fields are unsupported")
+
+    operation_match = re.fullmatch(_BENCHMARK_SUBSTRATE_OPERATION_ID_PATTERN, operation_id)
+    if operation_match is None:
+        raise ValueError(f"{field_name} checkout provenance operationId is unsupported")
+    build_number = operation_match.group(1)
+    commit = _required_str(value, "commit")
+    tree = _required_str(value, "tree")
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise ValueError(f"{field_name} checkout provenance commit is unsupported")
+    if re.fullmatch(r"[0-9a-f]{40}", tree) is None:
+        raise ValueError(f"{field_name} checkout provenance tree is unsupported")
+    if _required_str(value, "schema") != _GITOPS_CHECKOUT_PROVENANCE_SCHEMA:
+        raise ValueError(f"{field_name} checkout provenance schema is unsupported")
+    if _required_str(value, "origin") != _GITOPS_CHECKOUT_PROVENANCE_ORIGIN:
+        raise ValueError(f"{field_name} checkout provenance origin is unsupported")
+    if _required_str(value, "pipelinePath") != _GITOPS_CHECKOUT_PROVENANCE_PIPELINE_PATH:
+        raise ValueError(f"{field_name} checkout provenance pipeline path is unsupported")
+    expected_build_url = _GITOPS_CHECKOUT_PROVENANCE_BUILD_URL_PREFIX + build_number + "/"
+    if _required_str(value, "buildUrl") != expected_build_url:
+        raise ValueError(f"{field_name} checkout provenance build URL is unsupported")
+    return {
+        "buildUrl": expected_build_url,
+        "commit": commit,
+        "origin": _GITOPS_CHECKOUT_PROVENANCE_ORIGIN,
+        "pipelinePath": _GITOPS_CHECKOUT_PROVENANCE_PIPELINE_PATH,
+        "schema": _GITOPS_CHECKOUT_PROVENANCE_SCHEMA,
+        "tree": tree,
+    }
 
 
 def _normalized_benchmark_execution_substrate_source_set(
     source_set: object,
     *,
     field_name: str,
-    expected_suite_ids: Sequence[str],
+    operation_id: str,
+    role_contracts: Sequence[tuple[str, str, str]],
 ) -> dict[str, Any]:
     expected = {
+        "checkoutProvenance",
+        "ds1000BaseImageProvenanceEvidence",
+        "ds1000DatasetProvenanceEvidence",
         "ds1000WheelhouseManifestEvidence",
         "schema",
         "suites",
@@ -2466,34 +2628,56 @@ def _normalized_benchmark_execution_substrate_source_set(
     if _required_str(source_set, "schema") != _BENCHMARK_SUBSTRATE_SOURCE_SET_SCHEMA:
         raise ValueError(f"{field_name} schema is unsupported")
     raw_suites = source_set.get("suites")
-    if not isinstance(raw_suites, list) or len(raw_suites) != len(expected_suite_ids):
+    if not isinstance(raw_suites, list) or len(raw_suites) != len(role_contracts):
         raise ValueError(f"{field_name} suites are incomplete")
 
     suites: list[dict[str, Any]] = []
-    for expected_suite_id, suite in zip(expected_suite_ids, raw_suites, strict=True):
+    for (expected_suite_id, expected_role, _expected_file_name), suite in zip(
+        role_contracts,
+        raw_suites,
+        strict=True,
+    ):
         if not isinstance(suite, Mapping) or set(suite) != {"roles", "suiteId"}:
             raise ValueError(f"{field_name} suite shape is unsupported")
         if _required_str(suite, "suiteId") != expected_suite_id:
             raise ValueError(f"{field_name} suite order is unsupported")
         roles = suite.get("roles")
-        if not isinstance(roles, list) or not roles:
+        if not isinstance(roles, list) or len(roles) != 1:
             raise ValueError(f"{field_name} suite roles are incomplete")
-        normalized_roles: list[dict[str, Any]] = []
-        for role in roles:
-            if not isinstance(role, Mapping) or set(role) != {"evidence", "role"}:
-                raise ValueError(f"{field_name} role shape is unsupported")
-            normalized_roles.append(
-                {
-                    "evidence": _validated_compact_worm_handle(
-                        role.get("evidence"),
-                        f"{field_name} role evidence",
-                    ),
-                    "role": _required_str(role, "role"),
-                }
-            )
-        suites.append({"roles": normalized_roles, "suiteId": expected_suite_id})
+        role = roles[0]
+        if not isinstance(role, Mapping) or set(role) != {"evidence", "role"}:
+            raise ValueError(f"{field_name} role shape is unsupported")
+        if _required_str(role, "role") != expected_role:
+            raise ValueError(f"{field_name} role is unsupported")
+        suites.append(
+            {
+                "roles": [
+                    {
+                        "evidence": _validated_compact_worm_handle(
+                            role.get("evidence"),
+                            f"{field_name} {expected_suite_id}/{expected_role} evidence",
+                        ),
+                        "role": expected_role,
+                    }
+                ],
+                "suiteId": expected_suite_id,
+            }
+        )
 
     return {
+        "checkoutProvenance": _normalized_gitops_checkout_provenance(
+            source_set.get("checkoutProvenance"),
+            field_name=field_name,
+            operation_id=operation_id,
+        ),
+        "ds1000BaseImageProvenanceEvidence": _validated_compact_worm_handle(
+            source_set.get("ds1000BaseImageProvenanceEvidence"),
+            f"{field_name} DS-1000 base image provenance evidence",
+        ),
+        "ds1000DatasetProvenanceEvidence": _validated_compact_worm_handle(
+            source_set.get("ds1000DatasetProvenanceEvidence"),
+            f"{field_name} DS-1000 dataset provenance evidence",
+        ),
         "ds1000WheelhouseManifestEvidence": _validated_compact_worm_handle(
             source_set.get("ds1000WheelhouseManifestEvidence"),
             f"{field_name} DS-1000 wheelhouse manifest evidence",
@@ -2508,13 +2692,28 @@ def _normalized_benchmark_execution_substrate_source_set(
 
 
 def _normalized_ds1000_wheelhouse_manifest(value: object, *, field_name: str) -> dict[str, Any]:
-    expected = {"artifacts", "pythonVersion", "schema"}
+    expected = {
+        "artifacts",
+        "directRequirements",
+        "platform",
+        "pythonVersion",
+        "pytorchVariant",
+        "schema",
+    }
     if not isinstance(value, Mapping) or set(value) != expected:
         raise ValueError(f"{field_name} fields are unsupported")
-    if _required_str(value, "schema") != "Ds1000WheelhouseManifest/v1":
+    if _required_str(value, "schema") != DS1000_WHEELHOUSE_MANIFEST_SCHEMA:
         raise ValueError(f"{field_name} schema is unsupported")
-    if _required_str(value, "pythonVersion") != "3.7.10":
+    if _required_str(value, "pythonVersion") != DS1000_PYTHON_VERSION:
         raise ValueError(f"{field_name} must bind the official DS-1000 Python ABI")
+    if _required_str(value, "platform") != DS1000_PLATFORM:
+        raise ValueError(f"{field_name} must bind the official DS-1000 platform")
+    if _required_str(value, "pytorchVariant") != DS1000_PYTORCH_VARIANT:
+        raise ValueError(f"{field_name} must bind the CPU-only PyTorch runtime")
+    if value.get("directRequirements") != [
+        {"name": name, "version": version} for name, version in DS1000_LIBRARY_VERSIONS
+    ]:
+        raise ValueError(f"{field_name} direct requirements are unsupported")
     raw_artifacts = value.get("artifacts")
     if not isinstance(raw_artifacts, list) or not raw_artifacts:
         raise ValueError(f"{field_name} artifacts are incomplete")
@@ -2541,10 +2740,81 @@ def _normalized_ds1000_wheelhouse_manifest(value: object, *, field_name: str) ->
         file_names.append(file_name)
     if file_names != sorted(file_names) or len(file_names) != len(set(file_names)):
         raise ValueError(f"{field_name} artifacts must be uniquely named and sorted")
+    normalized_artifact_names = {
+        re.sub(r"[-_.]+", "_", file_name).lower() for file_name in file_names
+    }
+    for distribution, version in DS1000_LIBRARY_VERSIONS:
+        expected_prefix = re.sub(r"[-_.]+", "_", f"{distribution}-{version}").lower()
+        if not any(name.startswith(expected_prefix + "_") for name in normalized_artifact_names):
+            raise ValueError(f"{field_name} must include every canonical direct library wheel")
+    torch_prefix = re.sub(r"[-_.]+", "_", "torch-2.2.0+cpu").lower()
+    if not any(
+        name.startswith(torch_prefix + "_") and "_cp310_cp310_" in name
+        for name in normalized_artifact_names
+    ):
+        raise ValueError(f"{field_name} must include the CPython 3.10 CPU-only PyTorch wheel")
     return {
         "artifacts": artifacts,
-        "pythonVersion": "3.7.10",
-        "schema": "Ds1000WheelhouseManifest/v1",
+        "directRequirements": [
+            {"name": name, "version": version} for name, version in DS1000_LIBRARY_VERSIONS
+        ],
+        "platform": DS1000_PLATFORM,
+        "pythonVersion": DS1000_PYTHON_VERSION,
+        "pytorchVariant": DS1000_PYTORCH_VARIANT,
+        "schema": DS1000_WHEELHOUSE_MANIFEST_SCHEMA,
+    }
+
+
+def _normalized_ds1000_base_image_provenance(value: object, *, field_name: str) -> dict[str, str]:
+    expected = {"imageReference", "platform", "schema", "sourceReference"}
+    if not isinstance(value, Mapping) or set(value) != expected:
+        raise ValueError(f"{field_name} fields are unsupported")
+    image_reference = _required_str(value, "imageReference")
+    if (
+        _required_str(value, "schema") != DS1000_BASE_IMAGE_PROVENANCE_SCHEMA
+        or _required_str(value, "platform") != DS1000_PLATFORM
+        or _required_str(value, "sourceReference") != DS1000_BASE_IMAGE_SOURCE_REFERENCE
+        or re.fullmatch(
+            re.escape(DS1000_BASE_IMAGE_REPOSITORY) + r"@sha256:[0-9a-f]{64}",
+            image_reference,
+        )
+        is None
+    ):
+        raise ValueError(f"{field_name} is unsupported")
+    return {
+        "imageReference": image_reference,
+        "platform": DS1000_PLATFORM,
+        "schema": DS1000_BASE_IMAGE_PROVENANCE_SCHEMA,
+        "sourceReference": DS1000_BASE_IMAGE_SOURCE_REFERENCE,
+    }
+
+
+def _normalized_ds1000_dataset_provenance(value: object, *, field_name: str) -> dict[str, Any]:
+    expected = {
+        "datasetPath",
+        "ds1000Revision",
+        "fieldNames",
+        "rowCount",
+        "schema",
+        "sha256",
+    }
+    if not isinstance(value, Mapping) or set(value) != expected:
+        raise ValueError(f"{field_name} fields are unsupported")
+    if (
+        _required_str(value, "schema") != DS1000_DATASET_PROVENANCE_SCHEMA
+        or _required_str(value, "datasetPath") != DS1000_OFFICIAL_DATASET_PATH
+        or _required_str(value, "ds1000Revision") != DS1000_REVISION
+        or value.get("fieldNames") != list(DS1000_DATASET_FIELD_NAMES)
+        or value.get("rowCount") != DS1000_DATASET_ROW_COUNT
+    ):
+        raise ValueError(f"{field_name} is unsupported")
+    return {
+        "datasetPath": DS1000_OFFICIAL_DATASET_PATH,
+        "ds1000Revision": DS1000_REVISION,
+        "fieldNames": list(DS1000_DATASET_FIELD_NAMES),
+        "rowCount": DS1000_DATASET_ROW_COUNT,
+        "schema": DS1000_DATASET_PROVENANCE_SCHEMA,
+        "sha256": _required_sha256_prefixed(value, "sha256"),
     }
 
 
@@ -2555,6 +2825,20 @@ def _validate_execution_substrate_source_set_paths(
     role_contracts: Sequence[tuple[str, str, str]],
     field_name: str,
 ) -> None:
+    base_image_evidence = _validated_compact_worm_handle(
+        source_set.get("ds1000BaseImageProvenanceEvidence"),
+        f"{field_name} DS-1000 base image provenance evidence",
+    )
+    if base_image_evidence["s3Uri"] != f"{source_root}/base-images/ds1000/provenance.json":
+        raise ValueError(
+            f"{field_name} must use the canonical DS-1000 base image provenance object"
+        )
+    dataset_evidence = _validated_compact_worm_handle(
+        source_set.get("ds1000DatasetProvenanceEvidence"),
+        f"{field_name} DS-1000 dataset provenance evidence",
+    )
+    if dataset_evidence["s3Uri"] != f"{source_root}/datasets/ds1000/simplified-provenance.json":
+        raise ValueError(f"{field_name} must use the canonical DS-1000 dataset provenance object")
     wheelhouse_evidence = _validated_compact_worm_handle(
         source_set.get("ds1000WheelhouseManifestEvidence"),
         f"{field_name} DS-1000 wheelhouse manifest evidence",
@@ -2600,9 +2884,17 @@ def _load_benchmark_substrate_source_set_evidence(
     field_name: str,
     s3_client: Any,
 ) -> dict[str, str]:
+    from adapstory_serp_pipeline.registry.evaluation_release_contract import (
+        BENCHMARK_EXECUTION_SUBSTRATE_ROLE_CONTRACTS,
+    )
+
     evidence = _benchmark_substrate_source_set_evidence(
         runtime_receipt,
         "benchmarkSubstrateSourceSetEvidence",
+    )
+    operation_id = _benchmark_substrate_source_set_operation_id(
+        evidence,
+        field_name="benchmarkSubstrateSourceSetEvidence",
     )
     source_set = _load_worm_json_evidence(
         evidence,
@@ -2612,7 +2904,8 @@ def _load_benchmark_substrate_source_set_evidence(
     _normalized_benchmark_execution_substrate_source_set(
         source_set,
         field_name=field_name,
-        expected_suite_ids=MANDATORY_SERP_BENCHMARK_SUITES,
+        operation_id=operation_id,
+        role_contracts=BENCHMARK_EXECUTION_SUBSTRATE_ROLE_CONTRACTS,
     )
     return evidence
 
@@ -2906,7 +3199,7 @@ def load_governed_model_releases(
     candidate = _load_governed_evaluation_release(
         candidate_evidence, field_name="candidate_release_evidence", s3_client=client
     )
-    _validate_evaluation_release_pair(baseline["release"], candidate["release"])
+    _validate_evaluation_release_pair(baseline["release"], candidate["release"], s3_client=client)
     evaluation_objective = _validated_evaluation_objective_v6(
         _load_worm_json_evidence(
             evaluation_objective_evidence,
@@ -2969,7 +3262,7 @@ def write_model_catalog_promotion_receipt(
         raise ValueError("D17 baseline release evidence does not match plan")
     if candidate["evidence"] != _worm_evidence_reference(plan, "candidate_release_evidence"):
         raise ValueError("D17 candidate release evidence does not match plan")
-    _validate_evaluation_release_pair(baseline["release"], candidate["release"])
+    _validate_evaluation_release_pair(baseline["release"], candidate["release"], s3_client=None)
     payload = _model_promotion_receipt_payload(plan, baseline, candidate)
     writer = snapshot_writer or write_immutable_evidence_snapshot
     snapshot = writer(
@@ -3033,7 +3326,9 @@ def load_model_catalog_promotion_snapshot(
         ):
             raise ValueError(f"D17 {role} digest no longer matches its immutable manifest")
     _validate_evaluation_release_pair(
-        actual_releases["baselineRelease"], actual_releases["candidateRelease"]
+        actual_releases["baselineRelease"],
+        actual_releases["candidateRelease"],
+        s3_client=release_client,
     )
     expected_candidate_authority = {
         **_normalized_evaluation_release_authority(
@@ -3323,7 +3618,7 @@ def _normalize_evaluation_release(
     )
     if set(profile_set) != {"schema", "profileSetId", "suiteProfiles"}:
         raise ValueError(f"{field_name} profile set fields are unsupported")
-    if _required_str(profile_set, "schema") != "SuiteEvaluationProfileSet/v2":
+    if _required_str(profile_set, "schema") != _SUITE_EVALUATION_PROFILE_SET_SCHEMA:
         raise ValueError(f"{field_name} profile set schema is unsupported")
     if _canonical_json(
         {"suiteProfiles": _required_object_list(profile_set, "suiteProfiles")}
@@ -3367,10 +3662,10 @@ def _normalize_suite_evaluation_profile(
     }
     if set(payload) not in (base_fields, base_fields | {"treatmentDelta"}):
         raise ValueError(f"{field_name} fields are unsupported")
-    if _required_str(payload, "schema") != "SuiteEvaluationProfile/v2":
+    if _required_str(payload, "schema") != _SUITE_EVALUATION_PROFILE_SCHEMA:
         raise ValueError(f"{field_name} schema is unsupported")
     normalized: dict[str, Any] = {
-        "schema": "SuiteEvaluationProfile/v2",
+        "schema": _SUITE_EVALUATION_PROFILE_SCHEMA,
         "suiteId": _required_str(payload, "suiteId"),
         "profileId": _required_str(payload, "profileId"),
         "profileVersion": _required_str(payload, "profileVersion"),
@@ -3393,6 +3688,11 @@ def _normalize_suite_evaluation_profile(
         raise ValueError(f"{field_name} official scorer revision must be a full Git SHA")
     for scorer_field in ("repositoryUrl", "entrypoint", "profile"):
         _required_str(scorer, scorer_field)
+    _validate_mcp_profile_components(
+        component_payloads,
+        normalized,
+        field_name=field_name,
+    )
     if "treatmentDelta" in payload:
         treatment = _required_mapping(payload, "treatmentDelta")
         if set(treatment) != {"dimensions"}:
@@ -3422,6 +3722,68 @@ def _normalize_suite_evaluation_profile(
             raise ValueError(f"{field_name} treatmentDelta dimensions are not canonical")
         normalized["treatmentDelta"] = {"dimensions": normalized_dimensions}
     return normalized
+
+
+def _validate_mcp_profile_components(
+    component_payloads: Mapping[str, Mapping[str, Any]],
+    component_evidence: Mapping[str, Mapping[str, str]],
+    *,
+    field_name: str,
+) -> None:
+    """Validate the exact, WORM-read MCP controls bound to one suite profile."""
+
+    authorization = component_payloads["mcpAuthorizationEvidence"]
+    if set(authorization) != _MCP_AUTHORIZATION_FIELDS:
+        raise ValueError(f"{field_name} MCP authorization fields are unsupported")
+    try:
+        UUID(_required_str(authorization, "actorId"))
+    except ValueError as exc:
+        raise ValueError(f"{field_name} MCP authorization actorId is unsupported") from exc
+    capabilities = _required_str_list(authorization, "capabilities")
+    if (
+        not capabilities
+        or capabilities != sorted(capabilities)
+        or len(set(capabilities)) != len(capabilities)
+    ):
+        raise ValueError(f"{field_name} MCP authorization capabilities are unsupported")
+    _required_str(authorization, "workloadIdentity")
+
+    admission = component_payloads["mcpRuntimeAdmissionEvidence"]
+    if set(admission) != _MCP_RUNTIME_ADMISSION_FIELDS:
+        raise ValueError(f"{field_name} MCP runtime admission fields are unsupported")
+    _required_str(admission, "authorityId")
+    _required_str(admission, "granularity")
+    for value_name in ("limit", "reservedCapacity"):
+        value = admission.get(value_name)
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"{field_name} MCP runtime admission {value_name} is unsupported")
+
+    policy = component_payloads["mcpPolicyVersionEvidence"]
+    if set(policy) != _MCP_POLICY_VERSION_FIELDS:
+        raise ValueError(f"{field_name} MCP policy fields are unsupported")
+    require_versioned_policy_identifier(
+        _required_str(policy, "correctivePolicyVersion"),
+        field_name=f"{field_name} MCP correctivePolicyVersion",
+    )
+    for value_name in ("queryTransformBudgetPolicyId", "queryTransformRouteId"):
+        _required_str(policy, value_name)
+
+    context = component_payloads[_MCP_EXECUTION_CONTEXT_EVIDENCE_FIELD]
+    expected_context_fields = _MCP_EXECUTION_CONTEXT_STATIC_FIELDS | frozenset(
+        _MCP_EXECUTION_CONTEXT_BINDING_FIELDS
+    )
+    if set(context) != expected_context_fields:
+        raise ValueError(f"{field_name} MCP execution context fields are unsupported")
+    for value_name in sorted(_MCP_EXECUTION_CONTEXT_STATIC_FIELDS):
+        _required_str(context, value_name)
+    for binding_name, evidence_name in _MCP_EXECUTION_CONTEXT_BINDING_FIELDS.items():
+        if (
+            _required_sha256_prefixed(context, binding_name)
+            != component_evidence[evidence_name]["sha256"]
+        ):
+            raise ValueError(
+                f"{field_name} MCP execution context {binding_name} is not component-bound"
+            )
 
 
 def _reject_placeholder_profile_values(value: object, field_name: str) -> None:
@@ -3463,7 +3825,10 @@ def _validated_evaluation_release_binding(
 
 
 def _validate_evaluation_release_pair(
-    baseline: Mapping[str, Any], candidate: Mapping[str, Any]
+    baseline: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    *,
+    s3_client: Any | None,
 ) -> None:
     if (
         _required_mapping(baseline, "releaseAuthority")
@@ -3507,14 +3872,80 @@ def _validate_evaluation_release_pair(
             if treatment_field is None:
                 raise ValueError(f"candidate {suite_id} treatment dimension is unsupported")
             treatment_fields.add(treatment_field)
+        if s3_client is not None:
+            _validate_mcp_profile_pair(
+                baseline_profile,
+                candidate_profile,
+                suite_id=suite_id,
+                s3_client=s3_client,
+            )
         changed_evidence_fields = {
             field
             for field in _EVALUATION_PROFILE_EVIDENCE_FIELDS
             if _worm_evidence_reference(baseline_profile, field)
             != _worm_evidence_reference(candidate_profile, field)
         }
-        if not treatment_fields or changed_evidence_fields != treatment_fields:
+        expected_changed_evidence_fields = treatment_fields | {
+            _MCP_EXECUTION_CONTEXT_EVIDENCE_FIELD
+        }
+        if not treatment_fields or changed_evidence_fields != expected_changed_evidence_fields:
             raise ValueError(f"candidate {suite_id} must have genuine treatment component deltas")
+
+
+def _mcp_profile_component_payloads(
+    profile: Mapping[str, Any],
+    *,
+    field_name: str,
+    s3_client: Any,
+) -> tuple[dict[str, Mapping[str, Any]], dict[str, dict[str, str]]]:
+    evidence_fields = (
+        *_MCP_FROZEN_PROFILE_EVIDENCE_FIELDS,
+        _MCP_EXECUTION_CONTEXT_EVIDENCE_FIELD,
+        *_MCP_EXECUTION_CONTEXT_BINDING_FIELDS.values(),
+    )
+    evidence = {name: _worm_evidence_reference(profile, name) for name in evidence_fields}
+    components = {
+        name: _load_worm_json_evidence(
+            handle,
+            field_name=f"{field_name}.{name}",
+            s3_client=s3_client,
+        )
+        for name, handle in evidence.items()
+    }
+    _validate_mcp_profile_components(
+        components,
+        evidence,
+        field_name=field_name,
+    )
+    return components, evidence
+
+
+def _validate_mcp_profile_pair(
+    baseline_profile: Mapping[str, Any],
+    candidate_profile: Mapping[str, Any],
+    *,
+    suite_id: str,
+    s3_client: Any,
+) -> None:
+    baseline_components, _baseline_evidence = _mcp_profile_component_payloads(
+        baseline_profile,
+        field_name=f"baseline {suite_id} profile",
+        s3_client=s3_client,
+    )
+    candidate_components, _candidate_evidence = _mcp_profile_component_payloads(
+        candidate_profile,
+        field_name=f"candidate {suite_id} profile",
+        s3_client=s3_client,
+    )
+    for field_name in _MCP_FROZEN_PROFILE_EVIDENCE_FIELDS:
+        if baseline_components[field_name] != candidate_components[field_name]:
+            raise ValueError(f"candidate {suite_id} MCP fairness control is not frozen")
+    baseline_context = baseline_components[_MCP_EXECUTION_CONTEXT_EVIDENCE_FIELD]
+    candidate_context = candidate_components[_MCP_EXECUTION_CONTEXT_EVIDENCE_FIELD]
+    if {name: baseline_context[name] for name in _MCP_EXECUTION_CONTEXT_STATIC_FIELDS} != {
+        name: candidate_context[name] for name in _MCP_EXECUTION_CONTEXT_STATIC_FIELDS
+    }:
+        raise ValueError(f"candidate {suite_id} MCP execution context controls are not frozen")
 
 
 def _model_promotion_receipt_payload(
@@ -3908,7 +4339,6 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
                 "commit_public_docs_crawl_state",
                 "build_retired_public_docs_pack_cleanup",
                 "cleanup_retired_public_docs_pack_versions",
-                "notify_governance_eval_surfaces",
             )
         ),
         "tenant_id": str(tenant_id),
@@ -4066,7 +4496,6 @@ def build_public_docs_seed_refresh_plan(
                 "write_public_docs_publish_activation_trigger_conf",
                 "prepare_public_docs_d5_dispatch",
                 "trigger_public_docs_d5_publish_activation",
-                "notify_governance_eval_surfaces",
             )
         ),
         "tenant_id": str(tenant_id),
@@ -5005,18 +5434,13 @@ def _load_execution_substrate_source_set(
     *,
     s3_client: Any | None = None,
 ) -> dict[str, dict[str, bytes]]:
-    """Load one verified v3 WORM source set and every exact WORM role it declares."""
+    """Load one verified v6 WORM source set and every exact WORM role it declares."""
 
     from adapstory_serp_pipeline.registry.evaluation_release_contract import (
         BENCHMARK_EXECUTION_SUBSTRATE_ROLE_CONTRACTS,
+        validate_ds1000_supply_inventory_binding,
     )
 
-    execution_suite_ids = tuple(
-        suite_id
-        for suite_id, _expected_role, _expected_file_name in (
-            BENCHMARK_EXECUTION_SUBSTRATE_ROLE_CONTRACTS
-        )
-    )
     if (
         not isinstance(verified_source_set, Mapping)
         or set(verified_source_set) != _VERIFIED_BENCHMARK_SUBSTRATE_SOURCE_SET_FIELDS
@@ -5039,7 +5463,8 @@ def _load_execution_substrate_source_set(
             "must identify the canonical source-set object"
         )
     source_root = source_handle["s3Uri"].removesuffix("/source-set.json")
-    if _required_str(verified_source_set, "operationId") != source_match.group(1):
+    operation_id = _required_str(verified_source_set, "operationId")
+    if operation_id != source_match.group(1):
         raise ValueError(
             "verified benchmark execution substrate source set operationId is mismatched"
         )
@@ -5054,13 +5479,62 @@ def _load_execution_substrate_source_set(
     declared_source_set = _normalized_benchmark_execution_substrate_source_set(
         verified_source_set.get("sourceSet"),
         field_name="verified benchmark execution substrate source set sourceSet",
-        expected_suite_ids=execution_suite_ids,
+        operation_id=operation_id,
+        role_contracts=BENCHMARK_EXECUTION_SUBSTRATE_ROLE_CONTRACTS,
     )
     _validate_execution_substrate_source_set_paths(
         declared_source_set,
         source_root=source_root,
         role_contracts=BENCHMARK_EXECUTION_SUBSTRATE_ROLE_CONTRACTS,
         field_name="verified benchmark execution substrate source set",
+    )
+    verified_checkout_provenance = _normalized_gitops_checkout_provenance(
+        verified_source_set.get("checkoutProvenance"),
+        field_name="verified benchmark execution substrate source set",
+        operation_id=operation_id,
+    )
+    if verified_checkout_provenance != declared_source_set["checkoutProvenance"]:
+        raise ValueError(
+            "verified benchmark execution substrate source set checkout provenance "
+            "does not match sourceSet"
+        )
+    base_image_handle = _validated_compact_worm_handle(
+        verified_source_set.get("ds1000BaseImageProvenanceEvidence"),
+        "verified benchmark execution substrate source set DS-1000 base image provenance evidence",
+    )
+    if declared_source_set["ds1000BaseImageProvenanceEvidence"] != base_image_handle:
+        raise ValueError(
+            "verified benchmark execution substrate source set base image provenance evidence "
+            "does not match sourceSet"
+        )
+    if base_image_handle["s3Uri"] != f"{source_root}/base-images/ds1000/provenance.json":
+        raise ValueError(
+            "verified benchmark execution substrate source set must use the canonical "
+            "DS-1000 base image provenance object"
+        )
+    declared_base_image_provenance = _normalized_ds1000_base_image_provenance(
+        verified_source_set.get("ds1000BaseImageProvenance"),
+        field_name=(
+            "verified benchmark execution substrate source set DS-1000 base image " "provenance"
+        ),
+    )
+    dataset_handle = _validated_compact_worm_handle(
+        verified_source_set.get("ds1000DatasetProvenanceEvidence"),
+        "verified benchmark execution substrate source set DS-1000 dataset provenance evidence",
+    )
+    if declared_source_set["ds1000DatasetProvenanceEvidence"] != dataset_handle:
+        raise ValueError(
+            "verified benchmark execution substrate source set dataset provenance evidence "
+            "does not match sourceSet"
+        )
+    if dataset_handle["s3Uri"] != f"{source_root}/datasets/ds1000/simplified-provenance.json":
+        raise ValueError(
+            "verified benchmark execution substrate source set must use the canonical "
+            "DS-1000 dataset provenance object"
+        )
+    declared_dataset_provenance = _normalized_ds1000_dataset_provenance(
+        verified_source_set.get("ds1000DatasetProvenance"),
+        field_name="verified benchmark execution substrate source set DS-1000 dataset provenance",
     )
     wheelhouse_handle = _validated_compact_worm_handle(
         verified_source_set.get("ds1000WheelhouseManifestEvidence"),
@@ -5098,12 +5572,55 @@ def _load_execution_substrate_source_set(
             "benchmark execution substrate source set",
         ),
         field_name="benchmark execution substrate source set",
-        expected_suite_ids=execution_suite_ids,
+        operation_id=operation_id,
+        role_contracts=BENCHMARK_EXECUTION_SUBSTRATE_ROLE_CONTRACTS,
     )
     if source_set != declared_source_set:
         raise ValueError(
             "verified benchmark execution substrate source set sourceSet does not "
             "match sourceSetEvidence"
+        )
+
+    base_image_client = s3_client or _s3_client(base_image_handle["s3Uri"])
+    base_image_bytes, _, base_image_retain_until = _read_compliance_locked_s3_bytes(
+        base_image_client,
+        base_image_handle["s3Uri"],
+        field_name="DS-1000 base image provenance",
+        version_id=base_image_handle["versionId"],
+    )
+    if base_image_retain_until != base_image_handle["retainUntil"]:
+        raise ValueError("DS-1000 base image provenance retainUntil is mismatched")
+    if "sha256:" + sha256(base_image_bytes).hexdigest() != base_image_handle["sha256"]:
+        raise ValueError("DS-1000 base image provenance digest is mismatched")
+    loaded_base_image_provenance = _normalized_ds1000_base_image_provenance(
+        _canonical_json_object_bytes(base_image_bytes, "DS-1000 base image provenance"),
+        field_name="DS-1000 base image provenance",
+    )
+    if loaded_base_image_provenance != declared_base_image_provenance:
+        raise ValueError(
+            "verified benchmark execution substrate source set base image provenance "
+            "does not match its evidence"
+        )
+
+    dataset_client = s3_client or _s3_client(dataset_handle["s3Uri"])
+    dataset_bytes, _, dataset_retain_until = _read_compliance_locked_s3_bytes(
+        dataset_client,
+        dataset_handle["s3Uri"],
+        field_name="DS-1000 dataset provenance",
+        version_id=dataset_handle["versionId"],
+    )
+    if dataset_retain_until != dataset_handle["retainUntil"]:
+        raise ValueError("DS-1000 dataset provenance retainUntil is mismatched")
+    if "sha256:" + sha256(dataset_bytes).hexdigest() != dataset_handle["sha256"]:
+        raise ValueError("DS-1000 dataset provenance digest is mismatched")
+    loaded_dataset_provenance = _normalized_ds1000_dataset_provenance(
+        _canonical_json_object_bytes(dataset_bytes, "DS-1000 dataset provenance"),
+        field_name="DS-1000 dataset provenance",
+    )
+    if loaded_dataset_provenance != declared_dataset_provenance:
+        raise ValueError(
+            "verified benchmark execution substrate source set dataset provenance "
+            "does not match its evidence"
         )
 
     wheelhouse_client = s3_client or _s3_client(wheelhouse_handle["s3Uri"])
@@ -5136,11 +5653,35 @@ def _load_execution_substrate_source_set(
             "verified benchmark execution substrate source set must use the canonical "
             "supply-attestations object"
         )
-    _load_benchmark_supply_attestations(
+    verified_supply_attestations_evidence = _validated_compact_worm_handle(
+        verified_source_set.get("supplyAttestationsEvidence"),
+        "verified benchmark execution substrate source set supply attestations evidence",
+    )
+    if verified_supply_attestations_evidence != supply_attestations_evidence:
+        raise ValueError(
+            "verified benchmark execution substrate source set supply attestations evidence "
+            "does not match sourceSet"
+        )
+    declared_supply_attestations = _load_benchmark_supply_attestations(
         supply_attestations_evidence,
+        base_image_evidence=base_image_handle,
+        dataset_evidence=dataset_handle,
         wheelhouse_evidence=wheelhouse_handle,
         s3_client=s3_client,
     )
+    verified_supply_attestations = _normalize_benchmark_supply_attestations(
+        verified_source_set.get("supplyAttestations"),
+        base_image_evidence=base_image_handle,
+        dataset_evidence=dataset_handle,
+        wheelhouse_evidence=wheelhouse_handle,
+        source_root=source_root,
+        field_name="verified benchmark execution substrate source set supply attestations",
+    )
+    if verified_supply_attestations != declared_supply_attestations:
+        raise ValueError(
+            "verified benchmark execution substrate source set supply attestations "
+            "do not match their evidence"
+        )
     raw_suites = source_set.get("suites")
     if not isinstance(raw_suites, list) or len(raw_suites) != len(
         BENCHMARK_EXECUTION_SUBSTRATE_ROLE_CONTRACTS
@@ -5196,6 +5737,16 @@ def _load_execution_substrate_source_set(
                 f"benchmark execution substrate role digest is mismatched: "
                 f"{expected_suite_id}/{expected_role}"
             )
+        if expected_suite_id == "DS-1000":
+            inventory = _canonical_json_object_bytes(
+                payload,
+                "DS-1000 execution sandbox inventory",
+            )
+            validate_ds1000_supply_inventory_binding(
+                verified_source_set,
+                inventory,
+                field_name="DS-1000 execution sandbox inventory",
+            )
         loaded_roles[expected_role] = payload
         result[expected_suite_id] = loaded_roles
     return result
@@ -5204,30 +5755,59 @@ def _load_execution_substrate_source_set(
 def _load_benchmark_supply_attestations(
     evidence: object,
     *,
+    base_image_evidence: Mapping[str, str],
+    dataset_evidence: Mapping[str, str],
     wheelhouse_evidence: Mapping[str, str],
     s3_client: Any | None = None,
-) -> None:
+) -> dict[str, Any]:
     handle = _validated_compact_worm_handle(evidence, "benchmark substrate supply attestations")
+    source_root = handle["s3Uri"].removesuffix("/supply-attestations.json")
     client = s3_client or _s3_client(handle["s3Uri"])
-    payload, _, _ = _read_compliance_locked_s3_bytes(
+    payload, _, retain_until = _read_compliance_locked_s3_bytes(
         client,
         handle["s3Uri"],
         field_name="benchmark substrate supply attestations",
         version_id=handle["versionId"],
     )
+    if retain_until != handle["retainUntil"]:
+        raise ValueError("benchmark substrate supply attestations retainUntil is mismatched")
     if "sha256:" + sha256(payload).hexdigest() != handle["sha256"]:
         raise ValueError("benchmark substrate supply attestations digest is mismatched")
     manifest = _canonical_json_object_bytes(payload, "benchmark substrate supply attestations")
+    return _normalize_benchmark_supply_attestations(
+        manifest,
+        base_image_evidence=base_image_evidence,
+        dataset_evidence=dataset_evidence,
+        wheelhouse_evidence=wheelhouse_evidence,
+        source_root=source_root,
+        field_name="benchmark substrate supply attestations",
+    )
+
+
+def _normalize_benchmark_supply_attestations(
+    manifest: object,
+    *,
+    base_image_evidence: Mapping[str, str],
+    dataset_evidence: Mapping[str, str],
+    wheelhouse_evidence: Mapping[str, str],
+    source_root: str,
+    field_name: str,
+) -> dict[str, Any]:
     if (
-        set(manifest) != {"ds1000", "schema", "sweBench"}
-        or manifest.get("schema") != "BenchmarkSubstrateSupplyAttestations/v2"
+        not isinstance(manifest, Mapping)
+        or set(manifest) != {"ds1000", "schema", "sweBench"}
+        or manifest.get("schema") != "BenchmarkSubstrateSupplyAttestations/v3"
     ):
-        raise ValueError("benchmark substrate supply attestations shape is invalid")
+        raise ValueError(f"{field_name} shape is invalid")
     ds1000 = manifest.get("ds1000")
     if (
         not isinstance(ds1000, Mapping)
         or set(ds1000)
         != {
+            "baseImageProvenanceEvidence",
+            "baseImageProvenanceSha256",
+            "datasetProvenanceEvidence",
+            "datasetProvenanceSha256",
             "imageReference",
             "sbomEvidence",
             "signatureStatus",
@@ -5241,19 +5821,36 @@ def _load_benchmark_supply_attestations(
             ds1000["imageReference"],
         )
     ):
-        raise ValueError("DS-1000 supply attestation is invalid")
-    _validated_compact_worm_handle(ds1000.get("sbomEvidence"), "DS-1000 SBOM")
+        raise ValueError(f"{field_name} DS-1000 supply attestation is invalid")
+    sbom_evidence = _validated_compact_worm_handle(ds1000.get("sbomEvidence"), "DS-1000 SBOM")
+    if sbom_evidence["s3Uri"] != f"{source_root}/sboms/ds1000/image.cdx.json":
+        raise ValueError(f"{field_name} DS-1000 SBOM evidence is noncanonical")
+    attested_base_image_evidence = _validated_compact_worm_handle(
+        ds1000.get("baseImageProvenanceEvidence"),
+        "DS-1000 base image provenance",
+    )
+    attested_dataset_evidence = _validated_compact_worm_handle(
+        ds1000.get("datasetProvenanceEvidence"),
+        "DS-1000 dataset provenance",
+    )
     attested_wheelhouse_evidence = _validated_compact_worm_handle(
         ds1000.get("wheelhouseManifestEvidence"),
         "DS-1000 wheelhouse manifest",
     )
     if (
-        attested_wheelhouse_evidence != dict(wheelhouse_evidence)
+        attested_base_image_evidence != dict(base_image_evidence)
+        or _required_sha256_prefixed(ds1000, "baseImageProvenanceSha256")
+        != base_image_evidence["sha256"]
+        or attested_dataset_evidence != dict(dataset_evidence)
+        or _required_sha256_prefixed(ds1000, "datasetProvenanceSha256")
+        != dataset_evidence["sha256"]
+        or attested_wheelhouse_evidence != dict(wheelhouse_evidence)
         or _required_sha256_prefixed(ds1000, "wheelhouseManifestSha256")
         != wheelhouse_evidence["sha256"]
     ):
         raise ValueError(
-            "DS-1000 supply attestation must bind the exact wheelhouse manifest evidence"
+            f"{field_name} DS-1000 supply attestation must bind the exact base image, "
+            "dataset, and wheelhouse manifest evidence"
         )
 
     swe_bench = manifest.get("sweBench")
@@ -5265,7 +5862,7 @@ def _load_benchmark_supply_attestations(
         or not isinstance(swe_bench.get("images"), list)
         or len(swe_bench["images"]) != 500
     ):
-        raise ValueError("SWE-bench supply attestations are incomplete")
+        raise ValueError(f"{field_name} SWE-bench supply attestations are incomplete")
     instance_ids: list[str] = []
     for image in swe_bench["images"]:
         if (
@@ -5286,14 +5883,32 @@ def _load_benchmark_supply_attestations(
                 image["imageReference"],
             )
         ):
-            raise ValueError("SWE-bench supply attestation is invalid")
+            raise ValueError(f"{field_name} SWE-bench supply attestation is invalid")
         _validated_compact_worm_handle(
             image.get("sbomEvidence"),
             f"SWE-bench {image['instanceId']} SBOM",
         )
         instance_ids.append(image["instanceId"])
     if instance_ids != sorted(instance_ids) or len(set(instance_ids)) != 500:
-        raise ValueError("SWE-bench supply attestation identities are invalid")
+        raise ValueError(f"{field_name} SWE-bench supply attestation identities are invalid")
+    return {
+        "ds1000": {
+            "baseImageProvenanceEvidence": attested_base_image_evidence,
+            "baseImageProvenanceSha256": base_image_evidence["sha256"],
+            "datasetProvenanceEvidence": attested_dataset_evidence,
+            "datasetProvenanceSha256": dataset_evidence["sha256"],
+            "imageReference": _required_str(ds1000, "imageReference"),
+            "sbomEvidence": sbom_evidence,
+            "signatureStatus": "signed-and-verified",
+            "wheelhouseManifestEvidence": attested_wheelhouse_evidence,
+            "wheelhouseManifestSha256": wheelhouse_evidence["sha256"],
+        },
+        "schema": "BenchmarkSubstrateSupplyAttestations/v3",
+        "sweBench": {
+            "datasetRevision": _required_str(swe_bench, "datasetRevision"),
+            "images": [dict(image) for image in swe_bench["images"]],
+        },
+    }
 
 
 def _validated_compact_worm_handle(value: object, field_name: str) -> dict[str, str]:
@@ -7629,6 +8244,255 @@ def write_paired_evaluation_verification_evidence(
     }
 
 
+def write_official_serp_mcp_measurement(
+    plan_json: Mapping[str, Any] | str,
+    verification_result: Mapping[str, Any] | str,
+    airflow_run: Mapping[str, Any] | str,
+    *,
+    s3_client: Any | None = None,
+) -> dict[str, Any]:
+    """Persist one D19-backed official measurement with exact WORM provenance."""
+
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != _D19_DAG_ID:
+        raise ValueError("plan dag_id does not match official measurement writer")
+    artifact_paths = _required_artifact_paths(
+        plan,
+        (
+            "official_serp_mcp_measurement",
+            "paired_evaluation_score_cells",
+            "paired_evaluation_verification_evidence",
+        ),
+    )
+    operation_id = _required_str(plan, "operation_id")
+    tenant_id = _required_str(plan, "tenant_id")
+    normalized_airflow_run = _normalized_d19_airflow_run(airflow_run)
+
+    verification = _json_object(verification_result, "verification_result")
+    expected_fields = {
+        "airflowRun",
+        "observedNormalizedScoreCellsEvidence",
+        "pairedEvaluationVerificationEvidence",
+        "receiptStatus",
+        "requestId",
+    }
+    if set(verification) != expected_fields:
+        raise ValueError("official measurement verification result fields are unsupported")
+    if _required_str(verification, "requestId") != operation_id:
+        raise ValueError("official measurement requestId does not match operationId")
+    if _normalized_d19_airflow_run(_required_mapping(verification, "airflowRun")) != (
+        normalized_airflow_run
+    ):
+        raise ValueError("official measurement airflowRun does not match the D19 run")
+    receipt_status = _required_str(verification, "receiptStatus")
+    if receipt_status not in {"accepted", "rejected"}:
+        raise ValueError("official measurement receipt status is unsupported")
+
+    verification_evidence = _worm_evidence_reference(
+        verification,
+        "pairedEvaluationVerificationEvidence",
+    )
+    if verification_evidence["s3Uri"] != artifact_paths["paired_evaluation_verification_evidence"]:
+        raise ValueError("official measurement verification evidence path does not match plan")
+    score_cells_evidence = _worm_evidence_reference(
+        verification,
+        "observedNormalizedScoreCellsEvidence",
+    )
+    if score_cells_evidence["s3Uri"] != artifact_paths["paired_evaluation_score_cells"]:
+        raise ValueError("official measurement score-cell evidence path does not match plan")
+
+    client = s3_client or _s3_client(
+        verification_evidence["s3Uri"],
+        score_cells_evidence["s3Uri"],
+        artifact_paths["official_serp_mcp_measurement"],
+    )
+    persisted_verification = _load_worm_json_evidence(
+        verification_evidence,
+        field_name="paired evaluation verification evidence",
+        s3_client=client,
+    )
+    if _required_str(persisted_verification, "schema") != (
+        _PAIRED_EVALUATION_VERIFICATION_EVIDENCE_SCHEMA
+    ):
+        raise ValueError("official measurement verification evidence schema is unsupported")
+    if (
+        _required_str(persisted_verification, "requestId") != operation_id
+        or _required_str(persisted_verification, "operationId") != operation_id
+    ):
+        raise ValueError("official measurement verification evidence operation does not match")
+    if _normalized_d19_airflow_run(_required_mapping(persisted_verification, "airflowRun")) != (
+        normalized_airflow_run
+    ):
+        raise ValueError("official measurement verification evidence airflowRun does not match")
+    if _worm_evidence_reference(
+        persisted_verification,
+        "observedNormalizedScoreCellsEvidence",
+    ) != dict(score_cells_evidence):
+        raise ValueError(
+            "official measurement verification evidence score-cell pointer does not match"
+        )
+
+    receipt_pointer = _required_mapping(persisted_verification, "receiptPointer")
+    if set(receipt_pointer) != {
+        "receiptAttestationEvidence",
+        "receiptEvidence",
+        "receiptStatus",
+        "receiptVerification",
+    }:
+        raise ValueError("official measurement receipt pointer fields are unsupported")
+    if _required_str(receipt_pointer, "receiptStatus") != receipt_status:
+        raise ValueError("official measurement receipt status does not match verification pointer")
+    receipt_evidence = _worm_evidence_reference(receipt_pointer, "receiptEvidence")
+    receipt_attestation_evidence = _worm_evidence_reference(
+        receipt_pointer,
+        "receiptAttestationEvidence",
+    )
+    score_cells_payload = _normalized_observed_normalized_score_cells_evidence(
+        _load_worm_json_evidence(
+            score_cells_evidence,
+            field_name="D19 observed normalized score cells",
+            s3_client=client,
+        ),
+        expected_operation_id=operation_id,
+        expected_receipt_evidence=receipt_evidence,
+        expected_receipt_attestation_evidence=receipt_attestation_evidence,
+        expected_receipt_status=receipt_status,
+    )
+    benchmark_score = _required_mapping(score_cells_payload, "benchmarkScore")
+    candidate_score = _required_number(benchmark_score, "allNineCandidateNormalizedLcb95")
+    baseline_retention = _required_number(
+        benchmark_score,
+        "allNineBaselineRetentionLcb95ToMean",
+    )
+    cells = [dict(cell) for cell in _required_object_list(score_cells_payload, "cells")]
+    if len(cells) != len(MANDATORY_SERP_BENCHMARK_SUITES):
+        raise ValueError("official measurement requires exactly nine cells")
+    summary = _required_mapping(score_cells_payload, "summary")
+    if _required_non_negative_int(summary, "cellCount") != len(cells):
+        raise ValueError("official measurement summary cellCount does not match canonical cells")
+    rejection_reasons = _required_str_list_allow_empty(summary, "rejectionReasons")
+    # This outcome answers the published product question: whether the
+    # candidate retained at least 90% of baseline.  Candidate-floor admission
+    # is already represented by the signed D19 receipt status and must not be
+    # silently conflated with this independent retention threshold.
+    threshold_outcome = (
+        "met" if baseline_retention >= _MINIMUM_BASELINE_RETENTION_LCB95_TO_MEAN else "not_met"
+    )
+    payload = {
+        "airflowRun": normalized_airflow_run,
+        "allNineBaselineRetentionLcb95ToMean": baseline_retention,
+        "allNineCandidateNormalizedLcb95": candidate_score,
+        "cellCount": len(cells),
+        "cells": cells,
+        "generatedAt": _required_str(plan, "generated_at"),
+        "measurementStatus": "measured" if receipt_status == "accepted" else "rejected",
+        "observedNormalizedScoreCellsEvidence": dict(score_cells_evidence),
+        "operationId": operation_id,
+        "pairedEvaluationReceiptAttestationEvidence": dict(receipt_attestation_evidence),
+        "pairedEvaluationReceiptEvidence": dict(receipt_evidence),
+        "pairedEvaluationVerificationEvidence": dict(verification_evidence),
+        "rejectionReasons": rejection_reasons,
+        "schema": _OFFICIAL_SERP_MCP_MEASUREMENT_SCHEMA,
+        "signedReceiptStatus": receipt_status,
+        "tenantId": tenant_id,
+        "threshold": SERP_NORMALIZED_GATE_FLOOR,
+        "thresholdOutcome": threshold_outcome,
+    }
+    measurement_path = artifact_paths["official_serp_mcp_measurement"]
+    written = _write_or_reuse_canonical_worm_json_snapshot(
+        measurement_path,
+        artifact_type="official_serp_mcp_measurement",
+        operation_id=operation_id,
+        payload=payload,
+        field_name="official SERP/MCP measurement",
+        s3_client=client,
+    )
+    measurement_evidence = _written_worm_evidence_reference(
+        written,
+        measurement_path,
+        "official SERP/MCP measurement",
+    )
+    return {
+        "measurementEvidence": measurement_evidence,
+        "measurementStatus": _required_str(payload, "measurementStatus"),
+        "operationId": operation_id,
+    }
+
+
+def publish_official_serp_mcp_measurement(
+    plan_json: Mapping[str, Any] | str,
+    measurement_result: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    """POST the official measurement pointer to BC-21 using deterministic identity."""
+
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != _D19_DAG_ID:
+        raise ValueError("plan dag_id does not match official measurement publisher")
+    artifact_paths = _required_artifact_paths(plan, ("official_serp_mcp_measurement",))
+    result = _json_object(measurement_result, "measurement_result")
+    if set(result) != {"measurementEvidence", "measurementStatus", "operationId"}:
+        raise ValueError("official measurement result fields are unsupported")
+    operation_id = _required_str(plan, "operation_id")
+    if _required_str(result, "operationId") != operation_id:
+        raise ValueError("official measurement operationId does not match plan")
+    measurement_status = _required_str(result, "measurementStatus")
+    if measurement_status not in {"measured", "rejected"}:
+        raise ValueError("official measurement status is unsupported")
+    measurement_evidence = _worm_evidence_reference(result, "measurementEvidence")
+    if measurement_evidence["s3Uri"] != artifact_paths["official_serp_mcp_measurement"]:
+        raise ValueError("official measurement evidence path does not match plan")
+
+    body = {
+        "actorId": _OFFICIAL_SERP_MCP_MEASUREMENT_ACTOR_ID,
+        "measurementEvidence": dict(measurement_evidence),
+    }
+    fingerprint = "sha256:" + sha256(_canonical_json(body).encode("utf-8")).hexdigest()
+    idempotency_key = str(
+        uuid5(
+            _BENCHMARK_NAMESPACE,
+            "|".join(
+                (
+                    "official-serp-mcp-measurement",
+                    _required_str(plan, "tenant_id"),
+                    operation_id,
+                    measurement_evidence["sha256"],
+                )
+            ),
+        )
+    )
+    # The destination is deployment-owned, not an input to the immutable D19
+    # plan.  Keeping it out of the plan prevents a benchmark trigger from
+    # steering a trusted pointer publication to an arbitrary endpoint.
+    response_payload = _bc21_json_request(
+        _required_bc21_base_url({"bc21_base_url": os.environ.get(_BC21_BASE_URL_ENV)}).rstrip("/")
+        + "/api/bc-21/serp/v1/governance/official-measurements",
+        method="POST",
+        body=body,
+        headers={
+            "X-Adapstory-Actor-Id": _OFFICIAL_SERP_MCP_MEASUREMENT_ACTOR_ID,
+            "X-Adapstory-Tenant-Id": _required_str(plan, "tenant_id"),
+            "X-Fingerprint": fingerprint,
+            "X-Idempotency-Key": idempotency_key,
+        },
+        error_label="official SERP/MCP measurement publication",
+        allow_conflict=True,
+    )
+    if response_payload is None:
+        raise ValueError(
+            "official SERP/MCP measurement publication conflict requires operator reconciliation"
+        )
+    status = _required_str(response_payload, "status")
+    if status == "conflict":
+        raise ValueError(
+            "official SERP/MCP measurement publication conflict requires operator reconciliation"
+        )
+    if status not in {"accepted", "already_exists"}:
+        raise ValueError("official measurement publication response status is unsupported")
+    return dict(response_payload)
+
+
 def _paired_evaluation_receipt_worm_evidence(
     result: Mapping[str, Any],
     *,
@@ -8258,6 +9122,76 @@ def _normalized_observed_normalized_score_cells_evidence(
     }
 
 
+def _write_or_reuse_canonical_worm_json_snapshot(
+    artifact_path: str,
+    *,
+    artifact_type: str,
+    operation_id: str,
+    payload: Mapping[str, Any],
+    field_name: str,
+    s3_client: Any,
+) -> dict[str, Any]:
+    """Write once per logical path or reuse the current identical WORM version."""
+
+    payload_bytes = _canonical_json(payload).encode("utf-8")
+    existing = _read_current_compliance_locked_s3_object_if_exists(
+        s3_client,
+        artifact_path,
+        field_name=field_name,
+    )
+    if existing is not None:
+        current_bytes, current_version_id, current_retain_until = existing
+        _canonical_json_object_bytes(current_bytes, f"{field_name} current version")
+        if current_bytes != payload_bytes:
+            raise ValueError(
+                f"{field_name} current version does not match requested canonical payload"
+            )
+        return {
+            "artifactETag": sha256(current_bytes).hexdigest(),
+            "artifactPath": artifact_path,
+            "artifactSha256": sha256(current_bytes).hexdigest(),
+            "artifactType": artifact_type,
+            "artifactVersionId": current_version_id,
+            "contractVersion": _AIRFLOW_ARTIFACT_CONTRACT_VERSION,
+            "objectLockMode": "COMPLIANCE",
+            "operationId": operation_id,
+            "retainUntil": current_retain_until,
+            "retentionDays": _required_positive_int_env(_EVIDENCE_RETENTION_DAYS_ENV),
+            "status": "written",
+        }
+    return write_immutable_evidence_snapshot(
+        artifact_path,
+        artifact_type=artifact_type,
+        operation_id=operation_id,
+        payload=payload,
+        s3_client=s3_client,
+    )
+
+
+def _read_current_compliance_locked_s3_object_if_exists(
+    s3_client: Any,
+    artifact_path: str,
+    *,
+    field_name: str,
+) -> tuple[bytes, str, str] | None:
+    try:
+        return _read_compliance_locked_s3_bytes(
+            s3_client,
+            artifact_path,
+            field_name=field_name,
+        )
+    except FileNotFoundError:
+        return None
+    except KeyError:
+        return None
+    except AssertionError:
+        return None
+    except Exception as exc:
+        if _is_s3_missing_object(exc):
+            return None
+        raise
+
+
 def _normalized_observed_score_cell_evidence(
     raw: Mapping[str, Any],
     *,
@@ -8539,22 +9473,6 @@ def registry_submission_pending(plan_json: str) -> dict[str, str]:
         "plan_sha256": sha256(_canonical_json(plan).encode("utf-8")).hexdigest(),
         "status": "pending_bc21_submission",
     }
-
-
-def governance_notification_pending(plan_json: str) -> dict[str, str]:
-    plan = _json_object(plan_json, "plan_json")
-    return {
-        "dag_id": _required_str(plan, "dag_id"),
-        "operation_id": _required_str(plan, "operation_id"),
-        "status": "pending_governance_notification",
-    }
-
-
-def governance_notification_from_public_docs_snapshot(
-    plan_handle: Mapping[str, Any] | str,
-) -> dict[str, str]:
-    plan = load_public_docs_airflow_plan_snapshot(plan_handle)
-    return governance_notification_pending(_canonical_json(plan))
 
 
 def dispatch_public_docs_seed_refresh_handoff_from_snapshot(
