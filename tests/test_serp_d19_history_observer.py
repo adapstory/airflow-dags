@@ -74,6 +74,8 @@ def test_history_client_uses_one_short_lived_dedicated_jwt_and_complete_v2_pagin
             "observedEntries": 3,
             "pageCount": 2,
             "pageLimit": 2,
+            "strategy": "complete",
+            "tailStartOffset": 0,
             "totalEntries": 3,
         },
         "query": {
@@ -136,8 +138,88 @@ def test_history_client_uses_one_short_lived_dedicated_jwt_and_complete_v2_pagin
     assert not responses
 
 
+def test_history_client_collects_only_the_newest_three_runs_with_bounded_tail_pages(
+    tmp_path: Path,
+) -> None:
+    """A long pre-window history must not force D6 to enumerate every old run."""
+
+    config = _history_config(tmp_path, page_limit=2)
+    jwt = _jwt(
+        sub=AIRFLOW_HISTORY_OBSERVER_USERNAME,
+        issued_at=1_768_435_200,
+        expires_at=1_768_435_500,
+    )
+    calls: list[dict[str, Any]] = []
+    responses: list[dict[str, Any]] = [
+        {"access_token": jwt, "token_type": "bearer"},
+        {"git_version": "airflow-3.3.0", "version": "3.3.0"},
+        {
+            "dag_runs": [_api_run(index) for index in range(1, 3)],
+            "total_entries": 7,
+        },
+        {
+            "dag_runs": [_api_run(index) for index in range(5, 7)],
+            "total_entries": 7,
+        },
+        {"dag_runs": [_api_run(7)], "total_entries": 7},
+        {"dag_runs": [], "total_entries": 0},
+        *[_xcom_response(index) for index in range(5, 8)],
+    ]
+
+    def transport(**request: Any) -> dict[str, Any]:
+        calls.append(request)
+        return responses.pop(0)
+
+    result = AirflowD19HistoryClient(
+        config,
+        transport=transport,
+        clock=lambda: datetime(2026, 1, 15, tzinfo=UTC),
+    ).collect(parent_logical_date="2026-08-01T00:00:00Z")
+
+    assert result["runs"] == [_normalized_run(index) for index in range(5, 8)]
+    assert result["acceptedRunVerifications"] == [
+        _verification_pointer(index) for index in range(5, 8)
+    ]
+    assert result["pagination"] == {
+        "complete": False,
+        "observedEntries": 3,
+        "pageCount": 2,
+        "pageLimit": 2,
+        "strategy": "bounded-tail",
+        "tailStartOffset": 4,
+        "totalEntries": 7,
+    }
+    history_queries = [
+        parse_qs(urlparse(call["url"]).query, strict_parsing=True)
+        for call in calls
+        if urlparse(call["url"]).path.endswith("/dagRuns")
+        and "state" not in parse_qs(urlparse(call["url"]).query, strict_parsing=True)
+    ]
+    assert history_queries == [
+        {
+            "limit": ["2"],
+            "logical_date_lt": ["2026-08-01T00:00:00Z"],
+            "offset": ["0"],
+            "order_by": ["logical_date", "run_id"],
+        },
+        {
+            "limit": ["2"],
+            "logical_date_lt": ["2026-08-01T00:00:00Z"],
+            "offset": ["4"],
+            "order_by": ["logical_date", "run_id"],
+        },
+        {
+            "limit": ["2"],
+            "logical_date_lt": ["2026-08-01T00:00:00Z"],
+            "offset": ["6"],
+            "order_by": ["logical_date", "run_id"],
+        },
+    ]
+    assert not responses
+
+
 def test_history_client_never_reuses_a_jwt_across_observations(tmp_path: Path) -> None:
-    config = _history_config(tmp_path)
+    config = _history_config(tmp_path, page_limit=3)
     tokens = [
         _jwt(sub=AIRFLOW_HISTORY_OBSERVER_USERNAME, issued_at=100, expires_at=300),
         _jwt(sub=AIRFLOW_HISTORY_OBSERVER_USERNAME, issued_at=301, expires_at=501),
@@ -335,7 +417,7 @@ def test_history_client_rejects_unsupported_airflow_server_versions(
 
     with pytest.raises(ValueError, match="supported 3.x"):
         AirflowD19HistoryClient(
-            _history_config(tmp_path),
+            _history_config(tmp_path, page_limit=3),
             transport=lambda **_: responses.pop(0),
             clock=lambda: datetime(2026, 1, 15, tzinfo=UTC),
         ).collect(parent_logical_date=PARENT_LOGICAL_DATE)
@@ -385,7 +467,7 @@ def test_history_client_fails_closed_on_non_contiguous_or_replayed_streak(
 
     with pytest.raises(ValueError, match=match):
         AirflowD19HistoryClient(
-            _history_config(tmp_path),
+            _history_config(tmp_path, page_limit=3),
             transport=lambda **_: scripted.pop(0),
             clock=lambda: datetime(2026, 1, 15, tzinfo=UTC),
         ).collect(parent_logical_date=PARENT_LOGICAL_DATE)

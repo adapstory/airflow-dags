@@ -136,10 +136,12 @@ _D17_EVENT_D6_TRIGGER_SCHEMA = "D17EventD6Trigger/v1"
 _D17_EVENT_D6_RUN_ID_PREFIX = "event_d6__"
 _D17_EVENT_D19_RUN_ID_PREFIX = "event_d6_d19__"
 _SCHEDULED_D6_RECEIPT_SCHEMA = "ScheduledD6RegressionReceipt/v2"
-_D19_RUN_HISTORY_OBSERVATION_SCHEMA = "D19RunHistoryObservation/v1"
+_D19_RUN_HISTORY_OBSERVATION_SCHEMA = "D19RunHistoryObservation/v2"
 _D19_RUN_HISTORY_OBSERVER_SERVICE_ACCOUNT = "airflow-serp-d19-history-observer"
 _D19_RUN_HISTORY_OBSERVER_NAMESPACE = "airflow"
 _SCHEDULED_D6_PRIOR_STREAK_LENGTH = 3
+_D19_HISTORY_PAGINATION_COMPLETE = "complete"
+_D19_HISTORY_PAGINATION_BOUNDED_TAIL = "bounded-tail"
 _EVALUATION_PROFILE_EVIDENCE_FIELDS = (
     "evaluatorRunnerEvidence",
     "officialScorerEvidence",
@@ -823,20 +825,44 @@ def _normalized_d19_history_client_result(
         "observedEntries",
         "pageCount",
         "pageLimit",
+        "strategy",
+        "tailStartOffset",
         "totalEntries",
     }:
         raise ValueError("D19 history pagination fields are unsupported")
-    if pagination.get("complete") is not True:
-        raise ValueError("D19 history requires complete pagination")
     observed_entries = _required_non_negative_int(pagination, "observedEntries")
     total_entries = _required_non_negative_int(pagination, "totalEntries")
     page_count = _required_non_negative_int(pagination, "pageCount")
     page_limit = _required_positive_int(pagination, "pageLimit")
+    strategy = _required_str(pagination, "strategy")
+    tail_start_offset = _required_non_negative_int(pagination, "tailStartOffset")
     if page_limit > 500:
         raise ValueError("D19 history pageLimit exceeds the supported bound")
-    expected_pages = (total_entries + page_limit - 1) // page_limit
-    if observed_entries != len(runs) or total_entries != len(runs) or page_count != expected_pages:
-        raise ValueError("D19 history requires complete pagination with matching totals")
+    if strategy == _D19_HISTORY_PAGINATION_COMPLETE:
+        if pagination.get("complete") is not True:
+            raise ValueError("D19 history requires complete pagination")
+        expected_pages = (total_entries + page_limit - 1) // page_limit
+        if (
+            observed_entries != len(runs)
+            or total_entries != len(runs)
+            or page_count != expected_pages
+            or tail_start_offset != 0
+        ):
+            raise ValueError("D19 history requires complete pagination with matching totals")
+    elif strategy == _D19_HISTORY_PAGINATION_BOUNDED_TAIL:
+        if pagination.get("complete") is not False:
+            raise ValueError("D19 bounded-tail pagination must be incomplete")
+        if observed_entries != _SCHEDULED_D6_PRIOR_STREAK_LENGTH or len(runs) != observed_entries:
+            raise ValueError("D19 bounded tail must observe exactly three runs")
+        if total_entries <= observed_entries:
+            raise ValueError("D19 bounded tail requires unobserved older history")
+        if tail_start_offset != total_entries - observed_entries:
+            raise ValueError("D19 bounded tail must start at the exact newest streak offset")
+        expected_pages = (observed_entries + page_limit - 1) // page_limit
+        if page_count != expected_pages:
+            raise ValueError("D19 bounded tail pageCount does not match observed runs")
+    else:
+        raise ValueError("D19 history pagination strategy is unsupported")
     verification_pointer_query = _normalized_d19_verification_pointer_query(
         _required_mapping(result, "verificationPointerQuery")
     )
@@ -854,10 +880,12 @@ def _normalized_d19_history_client_result(
         },
         "api": expected_api,
         "pagination": {
-            "complete": True,
+            "complete": pagination["complete"],
             "observedEntries": observed_entries,
             "pageCount": page_count,
             "pageLimit": page_limit,
+            "strategy": strategy,
+            "tailStartOffset": tail_start_offset,
             "totalEntries": total_entries,
         },
         "query": expected_query,

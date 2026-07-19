@@ -617,7 +617,7 @@ def test_d6_history_observation_is_runtime_fresh_fenced_worm_and_transit_atteste
             "namespace": "airflow",
             "serviceAccount": "airflow-serp-d19-history-observer",
         },
-        "schema": "D19RunHistoryObservation/v1",
+        "schema": "D19RunHistoryObservation/v2",
     }
     assert (
         writes[0]["artifact_path"] == plan.payload["artifact_paths"]["d19_run_history_observation"]
@@ -625,6 +625,70 @@ def test_d6_history_observation_is_runtime_fresh_fenced_worm_and_transit_atteste
     assert writes[0]["artifact_type"] == "d19_run_history_observation"
     assert fence_client.required == [_scheduled_d6_fence(parent_run)]
     assert fence_client.released == []
+
+
+def test_d6_history_consumer_accepts_a_truthful_bounded_tail_snapshot() -> None:
+    """The D6 consumer needs only the exact newest accepted manual run streak."""
+
+    parent_run = _scheduled_d6_airflow_run()
+    history = _scheduled_d6_history_client_result(parent_run)
+    history["pagination"] = {
+        "complete": False,
+        "observedEntries": 3,
+        "pageCount": 2,
+        "pageLimit": 2,
+        "strategy": "bounded-tail",
+        "tailStartOffset": 7,
+        "totalEntries": 10,
+    }
+
+    normalized = serp_eval_contracts_module._normalized_d19_history_client_result(
+        history,
+        parent_airflow_run=parent_run,
+        artifact_root_path="s3://airflow-serp-evidence/serp-evals",
+    )
+
+    assert normalized["runs"] == _scheduled_d6_prior_runs()
+    assert normalized["acceptedRunVerifications"] == history["acceptedRunVerifications"]
+    assert normalized["pagination"] == history["pagination"]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    (
+        ("complete", "bounded-tail pagination must be incomplete"),
+        ("observed_entries", "bounded tail must observe exactly three runs"),
+        ("tail_start", "bounded tail must start at the exact newest streak offset"),
+    ),
+)
+def test_d6_history_consumer_rejects_misleading_bounded_tail_metadata(
+    mutation: str,
+    match: str,
+) -> None:
+    parent_run = _scheduled_d6_airflow_run()
+    history = _scheduled_d6_history_client_result(parent_run)
+    history["pagination"] = {
+        "complete": False,
+        "observedEntries": 3,
+        "pageCount": 2,
+        "pageLimit": 2,
+        "strategy": "bounded-tail",
+        "tailStartOffset": 7,
+        "totalEntries": 10,
+    }
+    if mutation == "complete":
+        history["pagination"]["complete"] = True
+    elif mutation == "observed_entries":
+        history["pagination"]["observedEntries"] = 2
+    elif mutation == "tail_start":
+        history["pagination"]["tailStartOffset"] = 6
+
+    with pytest.raises(ValueError, match=match):
+        serp_eval_contracts_module._normalized_d19_history_client_result(
+            history,
+            parent_airflow_run=parent_run,
+            artifact_root_path="s3://airflow-serp-evidence/serp-evals",
+        )
 
 
 @pytest.mark.parametrize("race", ("inserted_terminal_run", "terminal_state_transition"))
@@ -8293,6 +8357,8 @@ def _scheduled_d6_history_client_result(
             "observedEntries": len(history_runs),
             "pageCount": 1 if history_runs else 0,
             "pageLimit": 100,
+            "strategy": "complete",
+            "tailStartOffset": 0,
             "totalEntries": len(history_runs),
         },
         "query": {
@@ -8508,7 +8574,7 @@ def _scheduled_d6_receipt_fixture(
             "namespace": "airflow",
             "serviceAccount": "airflow-serp-d19-history-observer",
         },
-        "schema": "D19RunHistoryObservation/v1",
+        "schema": "D19RunHistoryObservation/v2",
     }
     history_handle = {
         "objectLockMode": "COMPLIANCE",

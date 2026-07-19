@@ -173,7 +173,7 @@ class AirflowD19HistoryClient:
         return cls(config, transport=transport, clock=clock)
 
     def collect(self, *, parent_logical_date: str) -> dict[str, Any]:
-        """Exchange one JWT and return one complete, bounded D19 history view."""
+        """Exchange one JWT and return a bounded, fail-closed D19 history view."""
 
         parent_date = _datetime_string(parent_logical_date, "parent_logical_date")
         now = self._clock()
@@ -188,14 +188,11 @@ class AirflowD19HistoryClient:
             server_version = _supported_airflow_history_server_version(
                 _required_string(version, "version")
             )
-            runs, page_count, total_entries = self._collect_history_pages(
+            normalized_runs, pagination = self._collect_relevant_history(
                 parent_logical_date=parent_date,
                 jwt=jwt,
             )
             self._assert_no_active_runs(jwt=jwt)
-            normalized_runs = [
-                _normalized_dag_run(run, parent_logical_date=parent_date) for run in runs
-            ]
             identities = [(run["logicalDate"], run["runId"]) for run in normalized_runs]
             if identities != sorted(identities):
                 raise ValueError("Airflow history response is not in canonical order")
@@ -220,13 +217,7 @@ class AirflowD19HistoryClient:
                 "serverAuthority": AIRFLOW_HISTORY_TRUSTED_AUTHORITY,
             },
             "acceptedRunVerifications": accepted_verifications,
-            "pagination": {
-                "complete": True,
-                "observedEntries": len(normalized_runs),
-                "pageCount": page_count,
-                "pageLimit": self._config.page_limit,
-                "totalEntries": total_entries,
-            },
+            "pagination": pagination,
             "query": {
                 "apiPath": f"/api/v2/dags/{AIRFLOW_HISTORY_DAG_ID}/dagRuns",
                 "dagId": AIRFLOW_HISTORY_DAG_ID,
@@ -273,47 +264,162 @@ class AirflowD19HistoryClient:
         _validate_bounded_jwt(token, now=now)
         return token
 
-    def _collect_history_pages(
+    def _collect_relevant_history(
         self,
         *,
         parent_logical_date: str,
         jwt: str,
-    ) -> tuple[list[Mapping[str, Any]], int, int]:
-        observed: list[Mapping[str, Any]] = []
-        expected_total: int | None = None
-        page_count = 0
-        for page_index in range(self._config.max_pages):
-            query = build_d19_history_query(
+    ) -> tuple[list[dict[str, str]], dict[str, Any]]:
+        """Read a complete short history or only its exact newest three-run tail.
+
+        The first bounded page establishes the server's total under the fixed
+        logical-date/order boundary.  For a long history, the resulting total
+        selects the exact tail offset, and only enough consecutive pages to
+        recover the D6 streak are read.  A short history falls back to a full
+        scan so its ``complete`` representation remains truthful.
+        """
+
+        page_limit = min(
+            self._config.page_limit,
+            AIRFLOW_HISTORY_REQUIRED_ACCEPTED_RUNS,
+        )
+        first_page, total_entries = self._history_page(
+            parent_logical_date=parent_logical_date,
+            jwt=jwt,
+            offset=0,
+            limit=page_limit,
+        )
+        if total_entries <= AIRFLOW_HISTORY_REQUIRED_ACCEPTED_RUNS:
+            runs, page_count = self._collect_complete_history_pages(
                 parent_logical_date=parent_logical_date,
-                offset=page_index * self._config.page_limit,
-                limit=self._config.page_limit,
-            )
-            response = self._authorized_json(
-                "GET",
-                f"/api/v2/dags/{AIRFLOW_HISTORY_DAG_ID}/dagRuns?{urlencode(query, doseq=True)}",
                 jwt=jwt,
+                first_page=first_page,
+                total_entries=total_entries,
+                page_limit=page_limit,
             )
-            page, total = _dag_run_page(response)
-            if expected_total is None:
-                expected_total = total
-            elif total != expected_total:
+            return runs, {
+                "complete": True,
+                "observedEntries": len(runs),
+                "pageCount": page_count,
+                "pageLimit": page_limit,
+                "strategy": "complete",
+                "tailStartOffset": 0,
+                "totalEntries": total_entries,
+            }
+
+        tail_start_offset = total_entries - AIRFLOW_HISTORY_REQUIRED_ACCEPTED_RUNS
+        runs, page_count = self._collect_bounded_tail_pages(
+            parent_logical_date=parent_logical_date,
+            jwt=jwt,
+            total_entries=total_entries,
+            tail_start_offset=tail_start_offset,
+            page_limit=page_limit,
+        )
+        return runs, {
+            "complete": False,
+            "observedEntries": len(runs),
+            "pageCount": page_count,
+            "pageLimit": page_limit,
+            "strategy": "bounded-tail",
+            "tailStartOffset": tail_start_offset,
+            "totalEntries": total_entries,
+        }
+
+    def _collect_complete_history_pages(
+        self,
+        *,
+        parent_logical_date: str,
+        jwt: str,
+        first_page: list[dict[str, str]],
+        total_entries: int,
+        page_limit: int,
+    ) -> tuple[list[dict[str, str]], int]:
+        """Use the first total-count page to complete a short-history scan."""
+
+        if total_entries == 0:
+            return [], 0
+        observed = list(first_page)
+        page_count = 1
+        while len(observed) < total_entries:
+            if page_count >= self._config.max_pages:
+                raise ValueError("Airflow history requires complete pagination within max_pages")
+            page, observed_total = self._history_page(
+                parent_logical_date=parent_logical_date,
+                jwt=jwt,
+                offset=len(observed),
+                limit=page_limit,
+            )
+            if observed_total != total_entries:
                 raise ValueError("Airflow history requires complete pagination with one total")
-            if not page:
-                if len(observed) != total:
-                    raise ValueError("Airflow history requires complete pagination")
-                break
             observed.extend(page)
             page_count += 1
-            if len(observed) > total:
-                raise ValueError("Airflow history pagination exceeds total_entries")
-            if len(observed) == total:
-                break
-        else:
-            raise ValueError("Airflow history requires complete pagination within max_pages")
-        assert expected_total is not None
-        if len(observed) != expected_total:
+        if len(observed) != total_entries:
             raise ValueError("Airflow history requires complete pagination")
-        return observed, page_count, expected_total
+        return observed, page_count
+
+    def _collect_bounded_tail_pages(
+        self,
+        *,
+        parent_logical_date: str,
+        jwt: str,
+        total_entries: int,
+        tail_start_offset: int,
+        page_limit: int,
+    ) -> tuple[list[dict[str, str]], int]:
+        """Read the exact newest streak, extending only when one page is insufficient."""
+
+        observed: list[dict[str, str]] = []
+        page_count = 0
+        while len(observed) < AIRFLOW_HISTORY_REQUIRED_ACCEPTED_RUNS:
+            if page_count >= self._config.max_pages:
+                raise ValueError(
+                    "Airflow history requires bounded-tail pagination within max_pages"
+                )
+            page, observed_total = self._history_page(
+                parent_logical_date=parent_logical_date,
+                jwt=jwt,
+                offset=tail_start_offset + len(observed),
+                limit=page_limit,
+            )
+            if observed_total != total_entries:
+                raise ValueError("Airflow history requires bounded-tail pagination with one total")
+            observed.extend(page)
+            page_count += 1
+        if len(observed) != AIRFLOW_HISTORY_REQUIRED_ACCEPTED_RUNS:
+            raise ValueError("Airflow history requires an exact bounded-tail streak")
+        return observed, page_count
+
+    def _history_page(
+        self,
+        *,
+        parent_logical_date: str,
+        jwt: str,
+        offset: int,
+        limit: int,
+    ) -> tuple[list[dict[str, str]], int]:
+        query = build_d19_history_query(
+            parent_logical_date=parent_logical_date,
+            offset=offset,
+            limit=limit,
+        )
+        response = self._authorized_json(
+            "GET",
+            f"/api/v2/dags/{AIRFLOW_HISTORY_DAG_ID}/dagRuns?{urlencode(query, doseq=True)}",
+            jwt=jwt,
+        )
+        raw_page, total_entries = _dag_run_page(response)
+        expected_page_size = min(limit, max(total_entries - offset, 0))
+        if len(raw_page) != expected_page_size:
+            raise ValueError("Airflow history requires complete pagination")
+        page = [
+            _normalized_dag_run(run, parent_logical_date=parent_logical_date) for run in raw_page
+        ]
+        identities = [(run["logicalDate"], run["runId"]) for run in page]
+        if identities != sorted(identities):
+            raise ValueError("Airflow history response is not in canonical order")
+        if len(set(identities)) != len(identities):
+            raise ValueError("Airflow history response contains duplicate run identities")
+        return page, total_entries
 
     def _assert_no_active_runs(self, *, jwt: str) -> None:
         query = {
