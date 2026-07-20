@@ -91,7 +91,7 @@ def _release_pair(
     legacy_treatment: bool = False,
     same_treatment: bool = False,
     include_runtime_source_set: bool = True,
-    runtime_source_set_schema: str = "BenchmarkExecutionSubstrateSourceSet/v6",
+    runtime_source_set_schema: str = "BenchmarkExecutionSubstrateSourceSet/v7",
     different_runtime_source_set_handles: bool = False,
     canonical_runtime_source_set_uri: bool = True,
     runtime_source_set_extra_handle_fields: Mapping[str, str] | None = None,
@@ -145,7 +145,9 @@ def _release_pair(
             "ds1000DatasetProvenanceEvidence": source_evidence(
                 "datasets/ds1000/simplified-provenance.json"
             ),
-            "ds1000WheelhouseManifestEvidence": source_evidence("wheelhouses/ds1000/manifest.json"),
+            "ds1000WheelhouseResolutionEvidence": source_evidence(
+                "wheelhouses/ds1000/resolution.json"
+            ),
             "schema": runtime_source_set_schema,
             "suites": [
                 {
@@ -193,6 +195,7 @@ def _release_pair(
             "configMediaType": "application/vnd.oci.image.config.v1+json",
             "airflowDagsRef": "a" * 40,
             "serpMcpGatewayRef": "b" * 40,
+            "serpPipelineContractSourceBundleSha256": "sha256:" + "8" * 64,
             "serpPipelineRef": "c" * 40,
             "serpContextBenchmarkRef": "d" * 40,
             "jenkinsBuildUrl": f"https://jenkins.adapstory.com/job/infra-build/{build}/",
@@ -210,6 +213,7 @@ def _release_pair(
             "runtimeBuildDraftSha256": draft_evidence["sha256"],
             "gitopsCommit": "f" * 40,
             "jenkinsBuildUrl": draft["jenkinsBuildUrl"],
+            "serpPipelineContractSourceBundleSha256": "sha256:" + "8" * 64,
             "terminalResult": "SUCCESS",
             "writtenAt": "2026-07-15T05:00:00Z",
         }

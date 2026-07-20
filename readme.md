@@ -166,14 +166,16 @@ SERP eval DAG contracts:
   publisher starts only after execution and reads the output volume read-only.
   A blocked receipt cannot emit a score, keep/discard decision, scoreboard, or
   rollout.
-- Every `BenchmarkExecutionSubstrateSourceSet/v6` binds the exact GitOps
+- Every `BenchmarkExecutionSubstrateSourceSet/v7` binds the exact GitOps
   checkout: lowercase 40-hex commit and tree, the canonical GitOps origin and
   sandbox-supply Jenkinsfile path, and the canonical Jenkins build URL. Its
   build number must equal the `ci-benchmark-substrates-<build>` operation in
-  the sealed source-set path. The DS-1000 wheelhouse is
-  `Ds1000WheelhouseManifest/v3` with all thirteen canonical direct roots,
-  including `datasets`, CPU-only `torch`, and `tqdm`; V5/V2 source-set or
-  manifest contracts, missing provenance, and extra provenance fields are
+  the sealed source-set path. The DS-1000 wheelhouse is bound through
+  `Ds1000WheelhouseResolution/v1` to a cache entry and
+  `Ds1000WheelhouseManifest/v4` with cache identity, cache key, all thirteen
+  canonical direct roots, and the `kiwisolver==1.4.5` resolver-constraint
+  wheel; V6/V5/V2 source-set or manifest contracts, missing provenance, and
+  extra provenance fields are
   rejected before any evaluation can run.
 - `serp_mandatory_benchmark_dataset_evidence_snapshot` persists source, raw
   dataset, and licensing bytes for every mandatory suite before D6 can consume

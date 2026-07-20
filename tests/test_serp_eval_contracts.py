@@ -89,6 +89,46 @@ REGISTRY_RESOURCE_ID = "018f5e13-2d73-7a77-a052-8d1bcbf96541"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _canonical_sha256(value: object) -> str:
+    return "sha256:" + sha256(
+        serp_eval_contracts_module._canonical_json(value).encode("utf-8")
+    ).hexdigest()
+
+
+def _complete_v4_wheelhouse_manifest(
+    manifest: dict[str, Any],
+    *,
+    base_image_provenance_sha256: str = "sha256:" + "b" * 64,
+) -> dict[str, Any]:
+    artifacts = manifest["artifacts"]
+    assert isinstance(artifacts, list)
+    if not any(str(artifact["fileName"]).startswith("kiwisolver-1.4.5-") for artifact in artifacts):
+        artifacts.append(
+            {
+                "fileName": "kiwisolver-1.4.5-cp310-cp310-manylinux2010_x86_64.whl",
+                "sha256": "sha256:" + "f" * 64,
+                "sizeBytes": 172045,
+            }
+        )
+        artifacts.sort(key=lambda artifact: str(artifact["fileName"]))
+    cache_identity = {
+        "abi": "cp310",
+        "baseImageProvenanceSha256": base_image_provenance_sha256,
+        "cachePolicy": "ds1000-wheelhouse-cache/v1",
+        "implementation": "cp",
+        "platform": "linux/amd64",
+        "pythonVersion": "3.10",
+        "pytorchCpuIndexUrl": "https://download.pytorch.org/whl/cpu",
+        "requirementsInputSha256": "sha256:" + "1" * 64,
+        "requirementsLockSha256": "sha256:" + "2" * 64,
+        "resolverConstraintsSha256": "sha256:" + "3" * 64,
+    }
+    manifest["cacheIdentity"] = cache_identity
+    manifest["cacheKey"] = _canonical_sha256(cache_identity).removeprefix("sha256:")
+    manifest["schema"] = "Ds1000WheelhouseManifest/v4"
+    return manifest
+
+
 def test_public_docs_crawler_preserves_http_status_when_error_body_times_out(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1233,8 +1273,9 @@ def test_ds1000_wheelhouse_manifest_rejects_missing_or_altered_cpu_torch_root() 
         "platform": "linux/amd64",
         "pythonVersion": "3.10",
         "pytorchVariant": "cpuonly",
-        "schema": "Ds1000WheelhouseManifest/v3",
+        "schema": "Ds1000WheelhouseManifest/v4",
     }
+    _complete_v4_wheelhouse_manifest(manifest)
 
     assert (
         serp_eval_contracts_module._normalized_ds1000_wheelhouse_manifest(
@@ -1311,6 +1352,14 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
         suite_entries.append({"roles": role_entries, "suiteId": suite_id})
 
     source_root = f"s3://airflow-serp-evidence/serp-evals/{operation_id}"
+    base_image_provenance: dict[str, Any] = {
+        "imageReference": (
+            "harbor.adapstory.com/dockerhub-cache/library/python@sha256:" + "c" * 64
+        ),
+        "platform": "linux/amd64",
+        "schema": "Ds1000BaseImageProvenance/v1",
+        "sourceReference": "harbor.adapstory.com/dockerhub-cache/library/python:3.10-slim-bookworm",
+    }
 
     def sbom_handle(name: str) -> dict[str, str]:
         return {
@@ -1363,28 +1412,43 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
         "platform": "linux/amd64",
         "pythonVersion": "3.10",
         "pytorchVariant": "cpuonly",
-        "schema": "Ds1000WheelhouseManifest/v3",
+        "schema": "Ds1000WheelhouseManifest/v4",
     }
-    wheelhouse_bytes = json.dumps(
-        wheelhouse_manifest, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+    _complete_v4_wheelhouse_manifest(
+        wheelhouse_manifest,
+        base_image_provenance_sha256=_canonical_sha256(base_image_provenance),
+    )
+    wheelhouse_resolution: dict[str, Any] = {
+        "cacheEntryEvidence": {
+            "objectLockMode": "COMPLIANCE",
+            "retainUntil": "2027-07-15T00:00:00Z",
+            "s3Uri": (
+                "s3://airflow-serp-evidence/serp-evals/ds1000-wheelhouse-cache/v1/"
+                f"{wheelhouse_manifest['cacheKey']}/entry.json"
+            ),
+            "sha256": "sha256:" + "9" * 64,
+            "versionId": "ds1000-wheelhouse-cache-entry-version",
+        },
+        "cacheIdentity": deepcopy(wheelhouse_manifest["cacheIdentity"]),
+        "cacheKey": wheelhouse_manifest["cacheKey"],
+        "manifestSha256": _canonical_sha256(wheelhouse_manifest),
+        "operationId": operation_id,
+        "schema": "Ds1000WheelhouseResolution/v1",
+    }
+    wheelhouse_resolution_bytes = json.dumps(
+        wheelhouse_resolution, ensure_ascii=True, separators=(",", ":"), sort_keys=True
     ).encode()
-    wheelhouse_key = f"serp-evals/{operation_id}/wheelhouses/ds1000/manifest.json"
-    wheelhouse_version = "ds1000-wheelhouse-manifest-version"
-    objects[(wheelhouse_key, wheelhouse_version)] = wheelhouse_bytes
-    wheelhouse_evidence = {
+    wheelhouse_resolution_key = f"serp-evals/{operation_id}/wheelhouses/ds1000/resolution.json"
+    wheelhouse_resolution_version = "ds1000-wheelhouse-resolution-version"
+    objects[
+        (wheelhouse_resolution_key, wheelhouse_resolution_version)
+    ] = wheelhouse_resolution_bytes
+    wheelhouse_resolution_evidence = {
         "objectLockMode": "COMPLIANCE",
         "retainUntil": "2027-07-15T00:00:00Z",
-        "s3Uri": f"s3://airflow-serp-evidence/{wheelhouse_key}",
-        "sha256": "sha256:" + sha256(wheelhouse_bytes).hexdigest(),
-        "versionId": wheelhouse_version,
-    }
-    base_image_provenance: dict[str, Any] = {
-        "imageReference": (
-            "harbor.adapstory.com/dockerhub-cache/library/python@sha256:" + "c" * 64
-        ),
-        "platform": "linux/amd64",
-        "schema": "Ds1000BaseImageProvenance/v1",
-        "sourceReference": "harbor.adapstory.com/dockerhub-cache/library/python:3.10-slim-bookworm",
+        "s3Uri": f"s3://airflow-serp-evidence/{wheelhouse_resolution_key}",
+        "sha256": "sha256:" + sha256(wheelhouse_resolution_bytes).hexdigest(),
+        "versionId": wheelhouse_resolution_version,
     }
     base_image_bytes = json.dumps(
         base_image_provenance, ensure_ascii=True, separators=(",", ":"), sort_keys=True
@@ -1431,10 +1495,11 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
             ),
             "sbomEvidence": sbom_handle("ds1000/image.cdx"),
             "signatureStatus": "signed-and-verified",
-            "wheelhouseManifestEvidence": wheelhouse_evidence,
-            "wheelhouseManifestSha256": wheelhouse_evidence["sha256"],
-        },
-        "schema": "BenchmarkSubstrateSupplyAttestations/v3",
+                "wheelhouseManifestSha256": _canonical_sha256(wheelhouse_manifest),
+                "wheelhouseResolutionEvidence": wheelhouse_resolution_evidence,
+                "wheelhouseResolutionSha256": wheelhouse_resolution_evidence["sha256"],
+            },
+            "schema": "BenchmarkSubstrateSupplyAttestations/v4",
         "sweBench": {
             "datasetRevision": "91aa3ed51b709be6457e12d00300a6a596d4c6a3",
             "images": [
@@ -1508,8 +1573,8 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
         },
         "ds1000BaseImageProvenanceEvidence": base_image_evidence,
         "ds1000DatasetProvenanceEvidence": dataset_evidence,
-        "ds1000WheelhouseManifestEvidence": wheelhouse_evidence,
-        "schema": "BenchmarkExecutionSubstrateSourceSet/v6",
+            "ds1000WheelhouseResolutionEvidence": wheelhouse_resolution_evidence,
+            "schema": "BenchmarkExecutionSubstrateSourceSet/v7",
         "suites": suite_entries,
         "supplyAttestationsEvidence": supply_evidence,
     }
@@ -1534,10 +1599,11 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
         "sourceSetEvidence": source_evidence,
         "ds1000BaseImageProvenance": base_image_provenance,
         "ds1000BaseImageProvenanceEvidence": base_image_evidence,
-        "ds1000DatasetProvenance": dataset_provenance,
-        "ds1000DatasetProvenanceEvidence": dataset_evidence,
-        "ds1000WheelhouseManifest": wheelhouse_manifest,
-        "ds1000WheelhouseManifestEvidence": wheelhouse_evidence,
+            "ds1000DatasetProvenance": dataset_provenance,
+            "ds1000DatasetProvenanceEvidence": dataset_evidence,
+            "ds1000WheelhouseManifest": wheelhouse_manifest,
+            "ds1000WheelhouseResolution": wheelhouse_resolution,
+            "ds1000WheelhouseResolutionEvidence": wheelhouse_resolution_evidence,
         "supplyAttestations": supply_attestations,
         "supplyAttestationsEvidence": supply_evidence,
     }
@@ -1610,7 +1676,7 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
         "ds1000": {
             key: value
             for key, value in supply_attestations["ds1000"].items()
-            if key not in {"wheelhouseManifestEvidence", "wheelhouseManifestSha256"}
+            if key not in {"wheelhouseResolutionEvidence", "wheelhouseResolutionSha256"}
         },
         "schema": "BenchmarkSubstrateSupplyAttestations/v2",
     }
@@ -1634,7 +1700,9 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
             },
             base_image_evidence=base_image_evidence,
             dataset_evidence=dataset_evidence,
-            wheelhouse_evidence=wheelhouse_evidence,
+            wheelhouse_manifest=wheelhouse_manifest,
+            wheelhouse_resolution=wheelhouse_resolution,
+            wheelhouse_resolution_evidence=wheelhouse_resolution_evidence,
             s3_client=FakeS3Client(),
         )
 
@@ -1756,7 +1824,7 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
 
     source_set_without_wheelhouse = dict(verified_source_set)
     source_set_without_wheelhouse["sourceSet"] = dict(source_set)
-    source_set_without_wheelhouse["sourceSet"].pop("ds1000WheelhouseManifestEvidence")
+    source_set_without_wheelhouse["sourceSet"].pop("ds1000WheelhouseResolutionEvidence")
     with pytest.raises(ValueError, match="source set"):
         serp_eval_contracts_module._load_execution_substrate_source_set(
             source_set_without_wheelhouse,
@@ -1764,7 +1832,7 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
         )
 
     missing_wheelhouse = dict(verified_source_set)
-    missing_wheelhouse.pop("ds1000WheelhouseManifestEvidence")
+    missing_wheelhouse.pop("ds1000WheelhouseResolutionEvidence")
     with pytest.raises(ValueError, match="verified"):
         serp_eval_contracts_module._load_execution_substrate_source_set(
             missing_wheelhouse,
@@ -1772,11 +1840,11 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
         )
 
     mismatched_wheelhouse_evidence = dict(verified_source_set)
-    mismatched_wheelhouse_evidence["ds1000WheelhouseManifestEvidence"] = {
-        **wheelhouse_evidence,
-        "versionId": "different-wheelhouse-manifest-version",
+    mismatched_wheelhouse_evidence["ds1000WheelhouseResolutionEvidence"] = {
+        **wheelhouse_resolution_evidence,
+        "versionId": "different-wheelhouse-resolution-version",
     }
-    with pytest.raises(ValueError, match="wheelhouse evidence"):
+    with pytest.raises(ValueError, match="wheelhouse resolution evidence"):
         serp_eval_contracts_module._load_execution_substrate_source_set(
             mismatched_wheelhouse_evidence,
             s3_client=FakeS3Client(),
@@ -1793,7 +1861,7 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
             for index, artifact in enumerate(wheelhouse_manifest["artifacts"])
         ],
     }
-    with pytest.raises(ValueError, match="manifest does not match"):
+    with pytest.raises(ValueError, match="canonical manifest identity"):
         serp_eval_contracts_module._load_execution_substrate_source_set(
             mismatched_wheelhouse_manifest,
             s3_client=FakeS3Client(),

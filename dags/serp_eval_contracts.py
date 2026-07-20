@@ -91,7 +91,7 @@ _EVALUATION_RELEASE_SCHEMA = "EvaluationRelease/v4"
 _EVALUATION_RELEASE_PROMOTION_SCHEMA = "EvaluationReleasePromotionReceipt/v8"
 _SUITE_EVALUATION_PROFILE_SCHEMA = "SuiteEvaluationProfile/v3"
 _SUITE_EVALUATION_PROFILE_SET_SCHEMA = "SuiteEvaluationProfileSet/v3"
-_BENCHMARK_SUBSTRATE_SOURCE_SET_SCHEMA = "BenchmarkExecutionSubstrateSourceSet/v6"
+_BENCHMARK_SUBSTRATE_SOURCE_SET_SCHEMA = "BenchmarkExecutionSubstrateSourceSet/v7"
 _BENCHMARK_SUBSTRATE_OPERATION_ID_PATTERN = r"ci-benchmark-substrates-([1-9][0-9]*)"
 _BENCHMARK_SUBSTRATE_SOURCE_SET_URI_PATTERN = (
     r"s3://airflow-serp-evidence/serp-evals/"
@@ -117,7 +117,8 @@ _VERIFIED_BENCHMARK_SUBSTRATE_SOURCE_SET_FIELDS = frozenset(
         "sourceSet",
         "sourceSetEvidence",
         "ds1000WheelhouseManifest",
-        "ds1000WheelhouseManifestEvidence",
+        "ds1000WheelhouseResolution",
+        "ds1000WheelhouseResolutionEvidence",
         "supplyAttestations",
         "supplyAttestationsEvidence",
     }
@@ -2618,7 +2619,7 @@ def _normalized_benchmark_execution_substrate_source_set(
         "checkoutProvenance",
         "ds1000BaseImageProvenanceEvidence",
         "ds1000DatasetProvenanceEvidence",
-        "ds1000WheelhouseManifestEvidence",
+        "ds1000WheelhouseResolutionEvidence",
         "schema",
         "suites",
         "supplyAttestationsEvidence",
@@ -2678,9 +2679,9 @@ def _normalized_benchmark_execution_substrate_source_set(
             source_set.get("ds1000DatasetProvenanceEvidence"),
             f"{field_name} DS-1000 dataset provenance evidence",
         ),
-        "ds1000WheelhouseManifestEvidence": _validated_compact_worm_handle(
-            source_set.get("ds1000WheelhouseManifestEvidence"),
-            f"{field_name} DS-1000 wheelhouse manifest evidence",
+        "ds1000WheelhouseResolutionEvidence": _validated_compact_worm_handle(
+            source_set.get("ds1000WheelhouseResolutionEvidence"),
+            f"{field_name} DS-1000 wheelhouse resolution evidence",
         ),
         "schema": _BENCHMARK_SUBSTRATE_SOURCE_SET_SCHEMA,
         "suites": suites,
@@ -2694,6 +2695,8 @@ def _normalized_benchmark_execution_substrate_source_set(
 def _normalized_ds1000_wheelhouse_manifest(value: object, *, field_name: str) -> dict[str, Any]:
     expected = {
         "artifacts",
+        "cacheIdentity",
+        "cacheKey",
         "directRequirements",
         "platform",
         "pythonVersion",
@@ -2710,6 +2713,48 @@ def _normalized_ds1000_wheelhouse_manifest(value: object, *, field_name: str) ->
         raise ValueError(f"{field_name} must bind the official DS-1000 platform")
     if _required_str(value, "pytorchVariant") != DS1000_PYTORCH_VARIANT:
         raise ValueError(f"{field_name} must bind the CPU-only PyTorch runtime")
+    expected_cache_identity_fields = {
+        "abi",
+        "baseImageProvenanceSha256",
+        "cachePolicy",
+        "implementation",
+        "platform",
+        "pythonVersion",
+        "pytorchCpuIndexUrl",
+        "requirementsInputSha256",
+        "requirementsLockSha256",
+        "resolverConstraintsSha256",
+    }
+    cache_identity = value.get("cacheIdentity")
+    if (
+        not isinstance(cache_identity, Mapping)
+        or set(cache_identity) != expected_cache_identity_fields
+    ):
+        raise ValueError(f"{field_name} cacheIdentity fields are unsupported")
+    normalized_cache_identity = {
+        key: _required_str(cache_identity, key) for key in sorted(expected_cache_identity_fields)
+    }
+    if (
+        normalized_cache_identity["abi"] != "cp310"
+        or normalized_cache_identity["cachePolicy"] != "ds1000-wheelhouse-cache/v1"
+        or normalized_cache_identity["implementation"] != "cp"
+        or normalized_cache_identity["platform"] != DS1000_PLATFORM
+        or normalized_cache_identity["pythonVersion"] != DS1000_PYTHON_VERSION
+        or normalized_cache_identity["pytorchCpuIndexUrl"] != "https://download.pytorch.org/whl/cpu"
+    ):
+        raise ValueError(f"{field_name} cacheIdentity is unsupported")
+    for digest_field in (
+        "baseImageProvenanceSha256",
+        "requirementsInputSha256",
+        "requirementsLockSha256",
+        "resolverConstraintsSha256",
+    ):
+        _required_sha256_prefixed(normalized_cache_identity, digest_field)
+    cache_key = _required_str(value, "cacheKey")
+    if not re.fullmatch(r"[0-9a-f]{64}", cache_key):
+        raise ValueError(f"{field_name} cacheKey is unsupported")
+    if cache_key != sha256(_canonical_json(normalized_cache_identity).encode("utf-8")).hexdigest():
+        raise ValueError(f"{field_name} cacheKey does not match cacheIdentity")
     if value.get("directRequirements") != [
         {"name": name, "version": version} for name, version in DS1000_LIBRARY_VERSIONS
     ]:
@@ -2753,8 +2798,16 @@ def _normalized_ds1000_wheelhouse_manifest(value: object, *, field_name: str) ->
         for name in normalized_artifact_names
     ):
         raise ValueError(f"{field_name} must include the CPython 3.10 CPU-only PyTorch wheel")
+    kiwisolver_prefix = re.sub(r"[-_.]+", "_", "kiwisolver-1.4.5").lower()
+    if not any(
+        name.startswith(kiwisolver_prefix + "_") and "_cp310_cp310_" in name
+        for name in normalized_artifact_names
+    ):
+        raise ValueError(f"{field_name} must include the CPython 3.10 kiwisolver wheel")
     return {
         "artifacts": artifacts,
+        "cacheIdentity": normalized_cache_identity,
+        "cacheKey": cache_key,
         "directRequirements": [
             {"name": name, "version": version} for name, version in DS1000_LIBRARY_VERSIONS
         ],
@@ -2763,6 +2816,61 @@ def _normalized_ds1000_wheelhouse_manifest(value: object, *, field_name: str) ->
         "pytorchVariant": DS1000_PYTORCH_VARIANT,
         "schema": DS1000_WHEELHOUSE_MANIFEST_SCHEMA,
     }
+
+
+def _normalized_ds1000_wheelhouse_resolution(
+    value: object,
+    *,
+    wheelhouse_manifest: Mapping[str, Any],
+    resolution_evidence: Mapping[str, str],
+    operation_id: str,
+    field_name: str,
+) -> dict[str, Any]:
+    expected = {
+        "cacheEntryEvidence",
+        "cacheIdentity",
+        "cacheKey",
+        "manifestSha256",
+        "operationId",
+        "schema",
+    }
+    if not isinstance(value, Mapping) or set(value) != expected:
+        raise ValueError(f"{field_name} fields are unsupported")
+    cache_key = _required_str(wheelhouse_manifest, "cacheKey")
+    cache_entry_evidence = _validated_compact_worm_handle(
+        value.get("cacheEntryEvidence"),
+        f"{field_name} cache entry evidence",
+    )
+    if (
+        cache_entry_evidence["s3Uri"]
+        != f"s3://airflow-serp-evidence/serp-evals/ds1000-wheelhouse-cache/v1/{cache_key}/entry.json"
+    ):
+        raise ValueError(f"{field_name} cache entry evidence is noncanonical")
+    expected_manifest_sha256 = (
+        "sha256:" + sha256(_canonical_json(wheelhouse_manifest).encode("utf-8")).hexdigest()
+    )
+    if (
+        _required_str(value, "schema") != "Ds1000WheelhouseResolution/v1"
+        or _required_str(value, "operationId") != operation_id
+        or value.get("cacheIdentity") != wheelhouse_manifest.get("cacheIdentity")
+        or _required_str(value, "cacheKey") != cache_key
+        or _required_sha256_prefixed(value, "manifestSha256") != expected_manifest_sha256
+    ):
+        raise ValueError(f"{field_name} does not bind the canonical manifest identity")
+    normalized = {
+        "cacheEntryEvidence": cache_entry_evidence,
+        "cacheIdentity": dict(cast(Mapping[str, Any], wheelhouse_manifest["cacheIdentity"])),
+        "cacheKey": cache_key,
+        "manifestSha256": expected_manifest_sha256,
+        "operationId": operation_id,
+        "schema": "Ds1000WheelhouseResolution/v1",
+    }
+    if (
+        "sha256:" + sha256(_canonical_json(normalized).encode("utf-8")).hexdigest()
+        != resolution_evidence["sha256"]
+    ):
+        raise ValueError(f"{field_name} digest does not match evidence")
+    return normalized
 
 
 def _normalized_ds1000_base_image_provenance(value: object, *, field_name: str) -> dict[str, str]:
@@ -2839,12 +2947,17 @@ def _validate_execution_substrate_source_set_paths(
     )
     if dataset_evidence["s3Uri"] != f"{source_root}/datasets/ds1000/simplified-provenance.json":
         raise ValueError(f"{field_name} must use the canonical DS-1000 dataset provenance object")
-    wheelhouse_evidence = _validated_compact_worm_handle(
-        source_set.get("ds1000WheelhouseManifestEvidence"),
-        f"{field_name} DS-1000 wheelhouse manifest evidence",
+    wheelhouse_resolution_evidence = _validated_compact_worm_handle(
+        source_set.get("ds1000WheelhouseResolutionEvidence"),
+        f"{field_name} DS-1000 wheelhouse resolution evidence",
     )
-    if wheelhouse_evidence["s3Uri"] != f"{source_root}/wheelhouses/ds1000/manifest.json":
-        raise ValueError(f"{field_name} must use the canonical DS-1000 wheelhouse manifest object")
+    if (
+        wheelhouse_resolution_evidence["s3Uri"]
+        != f"{source_root}/wheelhouses/ds1000/resolution.json"
+    ):
+        raise ValueError(
+            f"{field_name} must use the canonical DS-1000 wheelhouse resolution object"
+        )
     supply_evidence = _validated_compact_worm_handle(
         source_set.get("supplyAttestationsEvidence"),
         f"{field_name} supply attestations evidence",
@@ -5536,23 +5649,32 @@ def _load_execution_substrate_source_set(
         verified_source_set.get("ds1000DatasetProvenance"),
         field_name="verified benchmark execution substrate source set DS-1000 dataset provenance",
     )
-    wheelhouse_handle = _validated_compact_worm_handle(
-        verified_source_set.get("ds1000WheelhouseManifestEvidence"),
-        "verified benchmark execution substrate source set DS-1000 wheelhouse " "manifest evidence",
+    wheelhouse_resolution_handle = _validated_compact_worm_handle(
+        verified_source_set.get("ds1000WheelhouseResolutionEvidence"),
+        "verified benchmark execution substrate source set DS-1000 wheelhouse resolution evidence",
     )
-    if declared_source_set["ds1000WheelhouseManifestEvidence"] != wheelhouse_handle:
+    if declared_source_set["ds1000WheelhouseResolutionEvidence"] != wheelhouse_resolution_handle:
         raise ValueError(
-            "verified benchmark execution substrate source set wheelhouse evidence "
+            "verified benchmark execution substrate source set wheelhouse resolution evidence "
             "does not match sourceSet"
         )
-    if wheelhouse_handle["s3Uri"] != f"{source_root}/wheelhouses/ds1000/manifest.json":
+    if wheelhouse_resolution_handle["s3Uri"] != f"{source_root}/wheelhouses/ds1000/resolution.json":
         raise ValueError(
             "verified benchmark execution substrate source set must use the canonical "
-            "DS-1000 wheelhouse manifest object"
+            "DS-1000 wheelhouse resolution object"
         )
     declared_wheelhouse_manifest = _normalized_ds1000_wheelhouse_manifest(
         verified_source_set.get("ds1000WheelhouseManifest"),
         field_name="verified benchmark execution substrate source set DS-1000 wheelhouse manifest",
+    )
+    declared_wheelhouse_resolution = _normalized_ds1000_wheelhouse_resolution(
+        verified_source_set.get("ds1000WheelhouseResolution"),
+        wheelhouse_manifest=declared_wheelhouse_manifest,
+        resolution_evidence=wheelhouse_resolution_handle,
+        operation_id=operation_id,
+        field_name=(
+            "verified benchmark execution substrate source set DS-1000 wheelhouse resolution"
+        ),
     )
 
     source_client = s3_client or _s3_client(source_handle["s3Uri"])
@@ -5623,25 +5745,31 @@ def _load_execution_substrate_source_set(
             "does not match its evidence"
         )
 
-    wheelhouse_client = s3_client or _s3_client(wheelhouse_handle["s3Uri"])
-    wheelhouse_bytes, _, wheelhouse_retain_until = _read_compliance_locked_s3_bytes(
+    wheelhouse_client = s3_client or _s3_client(wheelhouse_resolution_handle["s3Uri"])
+    wheelhouse_resolution_bytes, _, wheelhouse_retain_until = _read_compliance_locked_s3_bytes(
         wheelhouse_client,
-        wheelhouse_handle["s3Uri"],
-        field_name="DS-1000 wheelhouse manifest",
-        version_id=wheelhouse_handle["versionId"],
+        wheelhouse_resolution_handle["s3Uri"],
+        field_name="DS-1000 wheelhouse resolution",
+        version_id=wheelhouse_resolution_handle["versionId"],
     )
-    if wheelhouse_retain_until != wheelhouse_handle["retainUntil"]:
-        raise ValueError("DS-1000 wheelhouse manifest retainUntil is mismatched")
-    if "sha256:" + sha256(wheelhouse_bytes).hexdigest() != wheelhouse_handle["sha256"]:
-        raise ValueError("DS-1000 wheelhouse manifest digest is mismatched")
-    loaded_wheelhouse_manifest = _normalized_ds1000_wheelhouse_manifest(
-        _canonical_json_object_bytes(wheelhouse_bytes, "DS-1000 wheelhouse manifest"),
-        field_name="DS-1000 wheelhouse manifest",
+    if wheelhouse_retain_until != wheelhouse_resolution_handle["retainUntil"]:
+        raise ValueError("DS-1000 wheelhouse resolution retainUntil is mismatched")
+    if (
+        "sha256:" + sha256(wheelhouse_resolution_bytes).hexdigest()
+        != wheelhouse_resolution_handle["sha256"]
+    ):
+        raise ValueError("DS-1000 wheelhouse resolution digest is mismatched")
+    loaded_wheelhouse_resolution = _normalized_ds1000_wheelhouse_resolution(
+        _canonical_json_object_bytes(wheelhouse_resolution_bytes, "DS-1000 wheelhouse resolution"),
+        wheelhouse_manifest=declared_wheelhouse_manifest,
+        resolution_evidence=wheelhouse_resolution_handle,
+        operation_id=operation_id,
+        field_name="DS-1000 wheelhouse resolution",
     )
-    if loaded_wheelhouse_manifest != declared_wheelhouse_manifest:
+    if loaded_wheelhouse_resolution != declared_wheelhouse_resolution:
         raise ValueError(
             "verified benchmark execution substrate source set DS-1000 wheelhouse "
-            "manifest does not match its evidence"
+            "resolution does not match its evidence"
         )
 
     supply_attestations_evidence = _validated_compact_worm_handle(
@@ -5666,14 +5794,18 @@ def _load_execution_substrate_source_set(
         supply_attestations_evidence,
         base_image_evidence=base_image_handle,
         dataset_evidence=dataset_handle,
-        wheelhouse_evidence=wheelhouse_handle,
+        wheelhouse_manifest=declared_wheelhouse_manifest,
+        wheelhouse_resolution=declared_wheelhouse_resolution,
+        wheelhouse_resolution_evidence=wheelhouse_resolution_handle,
         s3_client=s3_client,
     )
     verified_supply_attestations = _normalize_benchmark_supply_attestations(
         verified_source_set.get("supplyAttestations"),
         base_image_evidence=base_image_handle,
         dataset_evidence=dataset_handle,
-        wheelhouse_evidence=wheelhouse_handle,
+        wheelhouse_manifest=declared_wheelhouse_manifest,
+        wheelhouse_resolution=declared_wheelhouse_resolution,
+        wheelhouse_resolution_evidence=wheelhouse_resolution_handle,
         source_root=source_root,
         field_name="verified benchmark execution substrate source set supply attestations",
     )
@@ -5757,7 +5889,9 @@ def _load_benchmark_supply_attestations(
     *,
     base_image_evidence: Mapping[str, str],
     dataset_evidence: Mapping[str, str],
-    wheelhouse_evidence: Mapping[str, str],
+    wheelhouse_manifest: Mapping[str, Any],
+    wheelhouse_resolution: Mapping[str, Any],
+    wheelhouse_resolution_evidence: Mapping[str, str],
     s3_client: Any | None = None,
 ) -> dict[str, Any]:
     handle = _validated_compact_worm_handle(evidence, "benchmark substrate supply attestations")
@@ -5778,7 +5912,9 @@ def _load_benchmark_supply_attestations(
         manifest,
         base_image_evidence=base_image_evidence,
         dataset_evidence=dataset_evidence,
-        wheelhouse_evidence=wheelhouse_evidence,
+        wheelhouse_manifest=wheelhouse_manifest,
+        wheelhouse_resolution=wheelhouse_resolution,
+        wheelhouse_resolution_evidence=wheelhouse_resolution_evidence,
         source_root=source_root,
         field_name="benchmark substrate supply attestations",
     )
@@ -5789,14 +5925,16 @@ def _normalize_benchmark_supply_attestations(
     *,
     base_image_evidence: Mapping[str, str],
     dataset_evidence: Mapping[str, str],
-    wheelhouse_evidence: Mapping[str, str],
+    wheelhouse_manifest: Mapping[str, Any],
+    wheelhouse_resolution: Mapping[str, Any],
+    wheelhouse_resolution_evidence: Mapping[str, str],
     source_root: str,
     field_name: str,
 ) -> dict[str, Any]:
     if (
         not isinstance(manifest, Mapping)
         or set(manifest) != {"ds1000", "schema", "sweBench"}
-        or manifest.get("schema") != "BenchmarkSubstrateSupplyAttestations/v3"
+        or manifest.get("schema") != "BenchmarkSubstrateSupplyAttestations/v4"
     ):
         raise ValueError(f"{field_name} shape is invalid")
     ds1000 = manifest.get("ds1000")
@@ -5811,8 +5949,9 @@ def _normalize_benchmark_supply_attestations(
             "imageReference",
             "sbomEvidence",
             "signatureStatus",
-            "wheelhouseManifestEvidence",
             "wheelhouseManifestSha256",
+            "wheelhouseResolutionEvidence",
+            "wheelhouseResolutionSha256",
         }
         or ds1000.get("signatureStatus") != "signed-and-verified"
         or not isinstance(ds1000.get("imageReference"), str)
@@ -5833,9 +5972,20 @@ def _normalize_benchmark_supply_attestations(
         ds1000.get("datasetProvenanceEvidence"),
         "DS-1000 dataset provenance",
     )
-    attested_wheelhouse_evidence = _validated_compact_worm_handle(
-        ds1000.get("wheelhouseManifestEvidence"),
-        "DS-1000 wheelhouse manifest",
+    attested_wheelhouse_resolution_evidence = _validated_compact_worm_handle(
+        ds1000.get("wheelhouseResolutionEvidence"),
+        "DS-1000 wheelhouse resolution",
+    )
+    if (
+        attested_wheelhouse_resolution_evidence["s3Uri"]
+        != f"{source_root}/wheelhouses/ds1000/resolution.json"
+    ):
+        raise ValueError(f"{field_name} DS-1000 wheelhouse resolution evidence is noncanonical")
+    expected_manifest_sha256 = (
+        "sha256:" + sha256(_canonical_json(wheelhouse_manifest).encode("utf-8")).hexdigest()
+    )
+    expected_resolution_sha256 = (
+        "sha256:" + sha256(_canonical_json(wheelhouse_resolution).encode("utf-8")).hexdigest()
     )
     if (
         attested_base_image_evidence != dict(base_image_evidence)
@@ -5844,13 +5994,15 @@ def _normalize_benchmark_supply_attestations(
         or attested_dataset_evidence != dict(dataset_evidence)
         or _required_sha256_prefixed(ds1000, "datasetProvenanceSha256")
         != dataset_evidence["sha256"]
-        or attested_wheelhouse_evidence != dict(wheelhouse_evidence)
         or _required_sha256_prefixed(ds1000, "wheelhouseManifestSha256")
-        != wheelhouse_evidence["sha256"]
+        != expected_manifest_sha256
+        or attested_wheelhouse_resolution_evidence != dict(wheelhouse_resolution_evidence)
+        or _required_sha256_prefixed(ds1000, "wheelhouseResolutionSha256")
+        != expected_resolution_sha256
     ):
         raise ValueError(
             f"{field_name} DS-1000 supply attestation must bind the exact base image, "
-            "dataset, and wheelhouse manifest evidence"
+            "dataset, and wheelhouse resolution evidence"
         )
 
     swe_bench = manifest.get("sweBench")
@@ -5900,10 +6052,11 @@ def _normalize_benchmark_supply_attestations(
             "imageReference": _required_str(ds1000, "imageReference"),
             "sbomEvidence": sbom_evidence,
             "signatureStatus": "signed-and-verified",
-            "wheelhouseManifestEvidence": attested_wheelhouse_evidence,
-            "wheelhouseManifestSha256": wheelhouse_evidence["sha256"],
+            "wheelhouseManifestSha256": expected_manifest_sha256,
+            "wheelhouseResolutionEvidence": attested_wheelhouse_resolution_evidence,
+            "wheelhouseResolutionSha256": expected_resolution_sha256,
         },
-        "schema": "BenchmarkSubstrateSupplyAttestations/v3",
+        "schema": "BenchmarkSubstrateSupplyAttestations/v4",
         "sweBench": {
             "datasetRevision": _required_str(swe_bench, "datasetRevision"),
             "images": [dict(image) for image in swe_bench["images"]],
