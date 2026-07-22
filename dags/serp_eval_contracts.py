@@ -5994,8 +5994,7 @@ def _normalize_benchmark_supply_attestations(
         or attested_dataset_evidence != dict(dataset_evidence)
         or _required_sha256_prefixed(ds1000, "datasetProvenanceSha256")
         != dataset_evidence["sha256"]
-        or _required_sha256_prefixed(ds1000, "wheelhouseManifestSha256")
-        != expected_manifest_sha256
+        or _required_sha256_prefixed(ds1000, "wheelhouseManifestSha256") != expected_manifest_sha256
         or attested_wheelhouse_resolution_evidence != dict(wheelhouse_resolution_evidence)
         or _required_sha256_prefixed(ds1000, "wheelhouseResolutionSha256")
         != expected_resolution_sha256

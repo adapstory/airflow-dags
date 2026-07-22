@@ -89,10 +89,11 @@ REGISTRY_RESOURCE_ID = "018f5e13-2d73-7a77-a052-8d1bcbf96541"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _canonical_sha256(value: object) -> str:
-    return "sha256:" + sha256(
-        serp_eval_contracts_module._canonical_json(value).encode("utf-8")
-    ).hexdigest()
+def _canonical_sha256(value: Mapping[str, Any]) -> str:
+    return (
+        "sha256:"
+        + sha256(serp_eval_contracts_module._canonical_json(value).encode("utf-8")).hexdigest()
+    )
 
 
 def _complete_v4_wheelhouse_manifest(
@@ -1329,9 +1330,9 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
         for role in roles
     }
     objects: dict[tuple[str, str], bytes] = {}
-    suite_entries: list[dict[str, object]] = []
+    suite_entries: list[dict[str, Any]] = []
     for suite_id, roles in EXTERNAL_EXECUTION_SUBSTRATE_ROLES.items():
-        role_entries: list[dict[str, object]] = []
+        role_entries: list[dict[str, Any]] = []
         for role in roles:
             payload = role_payloads[(suite_id, role)]
             key = f"serp-evals/{operation_id}/roles/" f"{role_file_names[(suite_id, role)]}"
@@ -1440,9 +1441,9 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
     ).encode()
     wheelhouse_resolution_key = f"serp-evals/{operation_id}/wheelhouses/ds1000/resolution.json"
     wheelhouse_resolution_version = "ds1000-wheelhouse-resolution-version"
-    objects[
-        (wheelhouse_resolution_key, wheelhouse_resolution_version)
-    ] = wheelhouse_resolution_bytes
+    objects[(wheelhouse_resolution_key, wheelhouse_resolution_version)] = (
+        wheelhouse_resolution_bytes
+    )
     wheelhouse_resolution_evidence = {
         "objectLockMode": "COMPLIANCE",
         "retainUntil": "2027-07-15T00:00:00Z",
@@ -1495,11 +1496,11 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
             ),
             "sbomEvidence": sbom_handle("ds1000/image.cdx"),
             "signatureStatus": "signed-and-verified",
-                "wheelhouseManifestSha256": _canonical_sha256(wheelhouse_manifest),
-                "wheelhouseResolutionEvidence": wheelhouse_resolution_evidence,
-                "wheelhouseResolutionSha256": wheelhouse_resolution_evidence["sha256"],
-            },
-            "schema": "BenchmarkSubstrateSupplyAttestations/v4",
+            "wheelhouseManifestSha256": _canonical_sha256(wheelhouse_manifest),
+            "wheelhouseResolutionEvidence": wheelhouse_resolution_evidence,
+            "wheelhouseResolutionSha256": wheelhouse_resolution_evidence["sha256"],
+        },
+        "schema": "BenchmarkSubstrateSupplyAttestations/v4",
         "sweBench": {
             "datasetRevision": "91aa3ed51b709be6457e12d00300a6a596d4c6a3",
             "images": [
@@ -1573,8 +1574,8 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
         },
         "ds1000BaseImageProvenanceEvidence": base_image_evidence,
         "ds1000DatasetProvenanceEvidence": dataset_evidence,
-            "ds1000WheelhouseResolutionEvidence": wheelhouse_resolution_evidence,
-            "schema": "BenchmarkExecutionSubstrateSourceSet/v7",
+        "ds1000WheelhouseResolutionEvidence": wheelhouse_resolution_evidence,
+        "schema": "BenchmarkExecutionSubstrateSourceSet/v7",
         "suites": suite_entries,
         "supplyAttestationsEvidence": supply_evidence,
     }
@@ -1599,11 +1600,11 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
         "sourceSetEvidence": source_evidence,
         "ds1000BaseImageProvenance": base_image_provenance,
         "ds1000BaseImageProvenanceEvidence": base_image_evidence,
-            "ds1000DatasetProvenance": dataset_provenance,
-            "ds1000DatasetProvenanceEvidence": dataset_evidence,
-            "ds1000WheelhouseManifest": wheelhouse_manifest,
-            "ds1000WheelhouseResolution": wheelhouse_resolution,
-            "ds1000WheelhouseResolutionEvidence": wheelhouse_resolution_evidence,
+        "ds1000DatasetProvenance": dataset_provenance,
+        "ds1000DatasetProvenanceEvidence": dataset_evidence,
+        "ds1000WheelhouseManifest": wheelhouse_manifest,
+        "ds1000WheelhouseResolution": wheelhouse_resolution,
+        "ds1000WheelhouseResolutionEvidence": wheelhouse_resolution_evidence,
         "supplyAttestations": supply_attestations,
         "supplyAttestationsEvidence": supply_evidence,
     }
@@ -10022,7 +10023,7 @@ def _d19_rejected_evaluator_result(
 
     evaluator_result, objects = _d19_evaluator_result(plan)
     result = json.loads(json.dumps(evaluator_result))
-    receipt_evidence = cast(Mapping[str, Any], result["receiptEvidence"])
+    receipt_evidence = cast(dict[str, Any], result["receiptEvidence"])
     receipt_path = str(receipt_evidence["artifactPath"])
     receipt_version = str(receipt_evidence["artifactVersionId"])
     receipt = json.loads(objects[(receipt_path, receipt_version)])
@@ -10055,7 +10056,7 @@ def _d19_rejected_evaluator_result(
     receipt_evidence["artifactETag"] = digest
     receipt_evidence["artifactSha256"] = digest
     result["receiptStatus"] = "rejected"
-    receipt_subject = cast(Mapping[str, Any], result["receiptVerification"])["subject"]
+    receipt_subject = cast(dict[str, Any], result["receiptVerification"])["subject"]
     receipt_subject["sha256"] = "sha256:" + digest
     return result, objects
 
