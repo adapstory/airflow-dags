@@ -15,9 +15,9 @@ maintainability, observability, and future evolution.
 4. For infrastructure, observability, GitOps, CI/CD, or deployment work, read
    `../docs/monitoring-observability-regulation.md` when available.
 
-## Mandatory BMAD Delivery Cycle
+## Mandatory Delivery Cycle
 
-Every AI agent must self-manage the BMAD-style cycle for non-trivial work:
+Every AI agent must self-manage the repository delivery cycle for non-trivial work:
 
 1. Start from a tracked beads issue or create one before changing files.
 2. Clarify product intent and acceptance criteria with the PO when ambiguity
