@@ -6,7 +6,7 @@ from typing import Any
 from airflow.exceptions import AirflowException
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
-from airflow.utils.trigger_rule import TriggerRule
+from airflow.task.trigger_rule import TriggerRule
 
 from dags.serp_eval_contracts import (
     build_public_docs_publish_activation_cli_spec,

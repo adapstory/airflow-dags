@@ -7715,6 +7715,17 @@ def test_d5_post_activation_failure_uses_direct_parent_rollback_compensation() -
     assert "raise AirflowException(" in source
 
 
+def test_airflow3_dags_use_public_trigger_rule_api() -> None:
+    # Context: Airflow 3 keeps airflow.utils.trigger_rule as a deprecated bridge.
+    # Decision: production DAGs import TriggerRule only from airflow.task.trigger_rule.
+    # Reason: import gates must remain warning-free and must not depend on a removal-prone API.
+    # Revisit when: the supported Airflow public API moves TriggerRule again.
+    for dag_name in ("serp_publish_signed_pack.py", "serp_nightly_regression_suite.py"):
+        source = (REPO_ROOT / "dags" / dag_name).read_text(encoding="utf-8")
+        assert "from airflow.task.trigger_rule import TriggerRule" in source
+        assert "from airflow.utils.trigger_rule import TriggerRule" not in source
+
+
 def test_d5_rollback_compensation_preserves_validation_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8106,8 +8117,8 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         ),
         "airflow.sdk": types.ModuleType("airflow.sdk"),
         "airflow.sdk.exceptions": types.ModuleType("airflow.sdk.exceptions"),
-        "airflow.utils": types.ModuleType("airflow.utils"),
-        "airflow.utils.trigger_rule": types.ModuleType("airflow.utils.trigger_rule"),
+        "airflow.task": types.ModuleType("airflow.task"),
+        "airflow.task.trigger_rule": types.ModuleType("airflow.task.trigger_rule"),
         "kubernetes": types.ModuleType("kubernetes"),
         "kubernetes.client": types.ModuleType("kubernetes.client"),
         "kubernetes.client.models": types.ModuleType("kubernetes.client.models"),
@@ -8126,7 +8137,7 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     ).KubernetesPodOperator = FakeKubernetesPodOperator
     cast(Any, modules["airflow.sdk"]).DAG = FakeDAG
     cast(Any, modules["airflow.sdk"]).literal = lambda value: value
-    cast(Any, modules["airflow.utils.trigger_rule"]).TriggerRule = FakeTriggerRule
+    cast(Any, modules["airflow.task.trigger_rule"]).TriggerRule = FakeTriggerRule
     models = cast(Any, modules["kubernetes.client.models"])
     models.V1Capabilities = FakeKubernetesModel
     models.V1ConfigMapKeySelector = FakeKubernetesModel

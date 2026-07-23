@@ -7,7 +7,7 @@ from typing import Any
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sdk import DAG
-from airflow.utils.trigger_rule import TriggerRule
+from airflow.task.trigger_rule import TriggerRule
 from kubernetes.client import models as k8s
 
 from dags.serp_benchmark_catalog import mandatory_benchmark_adapters_ready
