@@ -352,13 +352,17 @@ def minio_web_identity_executor_config(
     *,
     service_account_name: str,
     labels: Mapping[str, str],
+    additional_env_vars: Sequence[k8s.V1EnvVar] = (),
 ) -> dict[str, Any]:
     """Return a KubernetesExecutor override with only a MinIO STS token."""
 
     return _evidence_executor_config(
         service_account_name=service_account_name,
         labels=labels,
-        env_vars=minio_web_identity_env_vars(()),
+        env_vars=[
+            *minio_web_identity_env_vars(()),
+            *_validated_additional_env_vars(additional_env_vars),
+        ],
         volume_mounts=minio_web_identity_volume_mounts(),
         volumes=minio_web_identity_volumes(),
     )
@@ -479,6 +483,29 @@ def _evidence_executor_config(
             ),
         )
     }
+
+
+def _validated_additional_env_vars(
+    env_vars: Sequence[k8s.V1EnvVar],
+) -> list[k8s.V1EnvVar]:
+    """Reject duplicate or ambient static credentials in composed task overrides."""
+
+    reserved_names = {
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_WEB_IDENTITY_TOKEN_FILE",
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_STS_DURATION_SECONDS",
+        *_STATIC_CREDENTIAL_ENV_NAMES,
+    }
+    seen: set[str] = set()
+    validated: list[k8s.V1EnvVar] = []
+    for env_var in env_vars:
+        name = (env_var.name or "").strip()
+        if not name:
+            raise ValueError("additional evidence workload environment name is required")
+        if name in reserved_names or name in seen:
+            raise ValueError(f"additional evidence workload environment is forbidden: {name}")
+        seen.add(name)
+        validated.append(env_var)
+    return validated
 
 
 def kubernetes_pod_launcher_executor_config() -> dict[str, Any]:

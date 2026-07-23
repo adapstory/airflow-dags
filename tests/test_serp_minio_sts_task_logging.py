@@ -11,6 +11,8 @@ from typing import Any, ClassVar
 
 import pytest
 
+from dags.serp_kubernetes_executor import task_secret_env_var
+
 
 class _MissingObjectError(Exception):
     response: ClassVar[dict[str, dict[str, str]]] = {"Error": {"Code": "NoSuchKey"}}
@@ -250,6 +252,38 @@ def test_evidence_executor_config_is_explicitly_hardened_and_writable_only_at_ru
         "serp-runtime-tmp",
         "serp-runtime-logs",
     ]
+    _assert_hardened_runtime_pod(pod)
+
+
+def test_evidence_executor_config_can_add_one_task_scoped_secret_without_losing_identity() -> None:
+    with _isolated_task_log_modules() as (_task_logging, workload_identity):
+        config = workload_identity.minio_web_identity_executor_config(
+            service_account_name="airflow-serp-public-docs-acquisition",
+            labels={"adapstory.com/serp-network-profile": "public-docs-acquisition"},
+            additional_env_vars=[
+                task_secret_env_var(
+                    name="ADAPSTORY_SERP_CONTEXT_BENCHMARK_GITHUB_TOKEN",
+                    secret_name="airflow-serp-github-status",
+                    secret_key="token",
+                )
+            ],
+        )
+
+    pod = config["pod_override"]
+    assert pod.spec is not None
+    assert pod.spec.service_account_name == "airflow-serp-public-docs-acquisition"
+    assert pod.spec.automount_service_account_token is False
+    assert pod.spec.containers is not None
+    env = pod.spec.containers[0].env
+    assert env is not None
+    assert [item.name for item in env] == [
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_WEB_IDENTITY_TOKEN_FILE",
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_STS_DURATION_SECONDS",
+        "ADAPSTORY_SERP_CONTEXT_BENCHMARK_GITHUB_TOKEN",
+    ]
+    secret = env[-1].value_from.secret_key_ref
+    assert secret.name == "airflow-serp-github-status"
+    assert secret.key == "token"
     _assert_hardened_runtime_pod(pod)
 
 
