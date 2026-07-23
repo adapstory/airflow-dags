@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import io
 import json
 import sys
 from collections.abc import Iterator
@@ -193,6 +194,88 @@ def test_task_log_sts_client_rejects_ambient_static_credentials(
 
         with pytest.raises(ValueError, match="static MinIO credentials are forbidden"):
             workload_identity.task_log_s3_client()
+
+
+def test_minio_sts_retries_transport_timeout_with_bounded_request_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _isolated_task_log_modules() as (_task_logging, workload_identity):
+        calls: list[float] = []
+        sleeps: list[float] = []
+        response_body = b"""\
+<AssumeRoleWithWebIdentityResponse>
+  <AssumeRoleWithWebIdentityResult>
+    <Credentials>
+      <AccessKeyId>access</AccessKeyId>
+      <SecretAccessKey>secret</SecretAccessKey>
+      <SessionToken>session</SessionToken>
+    </Credentials>
+  </AssumeRoleWithWebIdentityResult>
+</AssumeRoleWithWebIdentityResponse>
+"""
+
+        class Response(io.BytesIO):
+            def __enter__(self) -> Response:
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                self.close()
+
+        def flaky_urlopen(_request: object, *, timeout: float) -> Response:
+            calls.append(timeout)
+            if len(calls) == 1:
+                raise TimeoutError("injected slow MinIO IAM refresh")
+            return Response(response_body)
+
+        monkeypatch.setattr(workload_identity, "urlopen", flaky_urlopen)
+        monkeypatch.setattr(workload_identity, "sleep", sleeps.append)
+
+        credentials = workload_identity._assume_minio_role_with_web_identity(
+            endpoint_url="http://minio.env-prod.svc.cluster.local:9000",
+            token="projected-token",
+            policy="{}",
+        )
+
+    assert credentials == {
+        "AccessKeyId": "access",
+        "SecretAccessKey": "secret",
+        "SessionToken": "session",
+    }
+    assert calls == [30.0, 30.0]
+    assert sleeps == [1.0]
+
+
+def test_minio_sts_does_not_retry_http_contract_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _isolated_task_log_modules() as (_task_logging, workload_identity):
+        calls = 0
+        sleeps: list[float] = []
+
+        def denied_urlopen(_request: object, *, timeout: float) -> object:
+            nonlocal calls
+            calls += 1
+            assert timeout == 30.0
+            raise workload_identity.HTTPError(
+                "http://minio.env-prod.svc.cluster.local:9000",
+                403,
+                "AccessDenied",
+                {},
+                None,
+            )
+
+        monkeypatch.setattr(workload_identity, "urlopen", denied_urlopen)
+        monkeypatch.setattr(workload_identity, "sleep", sleeps.append)
+
+        with pytest.raises(ValueError, match="MinIO web-identity STS exchange failed"):
+            workload_identity._assume_minio_role_with_web_identity(
+                endpoint_url="http://minio.env-prod.svc.cluster.local:9000",
+                token="projected-token",
+                policy="{}",
+            )
+
+    assert calls == 1
+    assert sleeps == []
 
 
 def test_airflow_logging_module_exports_the_native_remote_log_object() -> None:

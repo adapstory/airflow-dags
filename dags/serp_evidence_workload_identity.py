@@ -7,6 +7,7 @@ import json
 import os
 import re
 from collections.abc import Iterable, Mapping, Sequence
+from time import sleep
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse, urlsplit, urlunsplit
@@ -19,6 +20,12 @@ MINIO_WEB_IDENTITY_TOKEN_FILE = "/var/run/secrets/adapstory/minio-web-identity/t
 MINIO_WEB_IDENTITY_TOKEN_VOLUME_NAME = "minio-web-identity-token"
 MINIO_WEB_IDENTITY_AUDIENCE = "minio"
 MINIO_WEB_IDENTITY_EXPIRATION_SECONDS = 900
+# Context: MinIO IAM refreshes on the production HDD have taken 9.7-12.1 seconds.
+# Decision: allow three 30-second transport attempts with bounded backoff.
+# Reason: tolerate storage latency without retrying authorization/contract failures.
+# Revisit when: MinIO metadata moves to SSD-backed storage and its STS SLO is enforced.
+MINIO_WEB_IDENTITY_STS_ATTEMPTS = 3
+MINIO_WEB_IDENTITY_STS_TIMEOUT_SECONDS = 30.0
 BC21_WORKLOAD_TOKEN_FILE = "/var/run/secrets/adapstory/bc21-workload/token"
 BC21_WORKLOAD_TOKEN_VOLUME_NAME = "bc21-workload-token"
 BC21_WORKLOAD_TOKEN_AUDIENCE = "https://kubernetes.default.svc.cluster.local"
@@ -718,19 +725,29 @@ def _assume_minio_role_with_web_identity(
             "Policy": policy,
         }
     ).encode("utf-8")
-    try:
-        with urlopen(
-            Request(
-                request_url,
-                data=body,
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-                method="POST",
-            ),
-            timeout=10.0,
-        ) as response:
-            payload = response.read()
-    except (HTTPError, URLError, OSError) as exc:
-        raise ValueError("MinIO web-identity STS exchange failed") from exc
+    request = Request(
+        request_url,
+        data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    payload: bytes | None = None
+    for attempt in range(MINIO_WEB_IDENTITY_STS_ATTEMPTS):
+        try:
+            with urlopen(
+                request,
+                timeout=MINIO_WEB_IDENTITY_STS_TIMEOUT_SECONDS,
+            ) as response:
+                payload = response.read()
+            break
+        except HTTPError as exc:
+            raise ValueError("MinIO web-identity STS exchange failed") from exc
+        except (URLError, OSError) as exc:
+            if attempt == MINIO_WEB_IDENTITY_STS_ATTEMPTS - 1:
+                raise ValueError("MinIO web-identity STS exchange failed") from exc
+            sleep(float(2**attempt))
+    if payload is None:  # pragma: no cover - the bounded loop either returns or raises.
+        raise ValueError("MinIO web-identity STS exchange failed")
     try:
         root = ElementTree.fromstring(payload)
     except ElementTree.ParseError as exc:
