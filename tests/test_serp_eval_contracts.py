@@ -6780,7 +6780,7 @@ def test_default_public_docs_seed_refresh_conf_changes_identity_on_catalog_metad
     assert baseline_plan.payload["operation_id"] != drifted_plan.payload["operation_id"]
 
 
-def test_default_public_docs_seed_refresh_conf_does_not_read_tmp_catalog(
+def test_default_public_docs_seed_refresh_conf_does_not_read_reference_files_at_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7882,10 +7882,15 @@ def test_public_docs_pipeline_runner_env_contract_survives_native_template_rende
     for name, value in numeric_values.items():
         assert values[name] == f'"{value}"'
     assert values["ADAPSTORY_BC10_GATEWAY_URL"] == "test"
-    assert values["ADAPSTORY_BC10_PUBLIC_DOCS_EMBEDDING_ROUTE_ID"] == "test"
-    assert values["ADAPSTORY_BC10_PUBLIC_DOCS_EMBEDDING_MODEL_VERSION_ID"] == "test"
-    assert values["ADAPSTORY_BC10_PUBLIC_DOCS_EMBEDDING_PROMPT_TEMPLATE_VERSION"] == "test"
-    assert values["ADAPSTORY_BC10_PUBLIC_DOCS_EMBEDDING_BUDGET_POLICY_ID"] == "test"
+    for prefix in (
+        "ADAPSTORY_BC10_SERP_CONTEXT_EMBEDDING",
+        "ADAPSTORY_BC10_PUBLIC_DOCS_CONTEXT",
+    ):
+        assert values[f"{prefix}_ROUTE_ID"] == "test"
+        assert values[f"{prefix}_MODEL_VERSION_ID"] == "test"
+        assert values[f"{prefix}_PROMPT_TEMPLATE_VERSION"] == "test"
+        assert values[f"{prefix}_BUDGET_POLICY_ID"] == "test"
+    assert not any(name.startswith("ADAPSTORY_BC10_PUBLIC_DOCS_EMBEDDING_") for name in values)
     assert values["ADAPSTORY_BC10_TOKEN_PATH"] == ("/var/run/secrets/adapstory/bc10-workload/token")
     assert "ADAPSTORY_SERP_EMBEDDING_URL" not in values
     assert "ADAPSTORY_SERP_EMBEDDING_PROVIDER_MODEL" not in values
@@ -8043,10 +8048,14 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
 
     for name in (
         "ADAPSTORY_BC10_GATEWAY_URL",
-        "ADAPSTORY_BC10_PUBLIC_DOCS_EMBEDDING_BUDGET_POLICY_ID",
-        "ADAPSTORY_BC10_PUBLIC_DOCS_EMBEDDING_MODEL_VERSION_ID",
-        "ADAPSTORY_BC10_PUBLIC_DOCS_EMBEDDING_PROMPT_TEMPLATE_VERSION",
-        "ADAPSTORY_BC10_PUBLIC_DOCS_EMBEDDING_ROUTE_ID",
+        "ADAPSTORY_BC10_SERP_CONTEXT_EMBEDDING_BUDGET_POLICY_ID",
+        "ADAPSTORY_BC10_SERP_CONTEXT_EMBEDDING_MODEL_VERSION_ID",
+        "ADAPSTORY_BC10_SERP_CONTEXT_EMBEDDING_PROMPT_TEMPLATE_VERSION",
+        "ADAPSTORY_BC10_SERP_CONTEXT_EMBEDDING_ROUTE_ID",
+        "ADAPSTORY_BC10_PUBLIC_DOCS_CONTEXT_BUDGET_POLICY_ID",
+        "ADAPSTORY_BC10_PUBLIC_DOCS_CONTEXT_MODEL_VERSION_ID",
+        "ADAPSTORY_BC10_PUBLIC_DOCS_CONTEXT_PROMPT_TEMPLATE_VERSION",
+        "ADAPSTORY_BC10_PUBLIC_DOCS_CONTEXT_ROUTE_ID",
         "ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS",
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT",
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_PATH_STYLE",
@@ -10910,7 +10919,7 @@ def _public_docs_seed(
         "inventory_evidence": {
             "component": component,
             "evidence_sha256": sha256(f"{component}:{version}".encode()).hexdigest(),
-            "stack_inventory_path": "tmp/stack-inventory-2026-07-02.md",
+            "stack_inventory_path": "docs/evidence/serp/stack-inventory-2026-07-02.md",
             "version": version,
         },
         "license": {
@@ -10918,7 +10927,7 @@ def _public_docs_seed(
             "obligation_state": "reviewed-public-docs",
         },
         "metadata": {
-            "origin": "tmp/stack-inventory-2026-07-02.md",
+            "origin": "docs/evidence/serp/stack-inventory-2026-07-02.md",
             "purpose": "public-docs-seed-to-serve",
         },
         "official_docs_uri": source_uri,
