@@ -10919,7 +10919,7 @@ def _public_docs_seed(
         "inventory_evidence": {
             "component": component,
             "evidence_sha256": sha256(f"{component}:{version}".encode()).hexdigest(),
-            "stack_inventory_path": "docs/evidence/serp/stack-inventory-2026-07-02.md",
+            "stack_inventory_path": "docs/reports/serp/stack-inventory-2026-07-02.md",
             "version": version,
         },
         "license": {
@@ -10927,7 +10927,7 @@ def _public_docs_seed(
             "obligation_state": "reviewed-public-docs",
         },
         "metadata": {
-            "origin": "docs/evidence/serp/stack-inventory-2026-07-02.md",
+            "origin": "docs/reports/serp/stack-inventory-2026-07-02.md",
             "purpose": "public-docs-seed-to-serve",
         },
         "official_docs_uri": source_uri,

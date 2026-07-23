@@ -12466,7 +12466,7 @@ def _public_docs_license(seed: Mapping[str, Any]) -> dict[str, Any]:
 def _public_docs_inventory_evidence(seed: Mapping[str, Any]) -> dict[str, Any]:
     evidence = _required_mapping(seed, "inventory_evidence")
     stack_inventory_path = _required_str(evidence, "stack_inventory_path")
-    if stack_inventory_path != "docs/evidence/serp/stack-inventory-2026-07-02.md":
+    if stack_inventory_path != "docs/reports/serp/stack-inventory-2026-07-02.md":
         raise ValueError("inventory_evidence must reference canonical stack inventory evidence")
     evidence_sha256 = _required_str(evidence, "evidence_sha256")
     if not re.fullmatch(r"[a-f0-9]{64}", evidence_sha256):

@@ -3,10 +3,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-PUBLIC_DOCS_NIGHTLY_SOURCE_CATALOG_PATH = (
-    "docs/evidence/serp/public-docs-seed-catalog-2026-07-08.md"
-)
-STACK_INVENTORY_SOURCE_PATH = "docs/evidence/serp/stack-inventory-2026-07-02.md"
+PUBLIC_DOCS_NIGHTLY_SOURCE_CATALOG_PATH = "docs/reports/serp/public-docs-seed-catalog-2026-07-08.md"
+STACK_INVENTORY_SOURCE_PATH = "docs/reports/serp/stack-inventory-2026-07-02.md"
 
 WEBSITE_GIT_RELEASE_NOTES_INGEST_MODES = ("website", "git", "release-notes")
 OPENAPI_INGEST_MODES = ("openapi",)
