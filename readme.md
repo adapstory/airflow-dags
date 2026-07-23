@@ -200,7 +200,7 @@ SERP eval DAG contracts:
   `pdf`. Markdown/file-upload intake, Confluence, Notion, and Google Docs are
   taxonomy or planned adapters until their connectors exist in the SERP
   pipeline. Each seed must be approved, public or external-ok, reference the
-  `tmp/stack-inventory-2026-07-02.md` inventory evidence, include official-docs
+  `docs/evidence/serp/stack-inventory-2026-07-02.md` inventory evidence, include official-docs
   URI, license/distribution state, daily/nightly refresh policy, and a bounded
   crawl policy with robots enforcement, sitemap intent, allowlist, denylist,
   optional governed `frontier_urls`, max depth, max pages, and user agent.
