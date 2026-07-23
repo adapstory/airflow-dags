@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -152,6 +153,10 @@ def execute_context_benchmark(plan_json: Mapping[str, Any] | str) -> dict[str, A
             "K3s architecture documentation",
             "--warmup-timeout-sec",
             "20",
+            "--warmup-max-attempts",
+            "3",
+            "--warmup-retry-delay-sec",
+            "2",
             "--suite-id",
             plan["suite_id"],
             "--suite-version",
@@ -343,15 +348,27 @@ def publish_context_benchmark_github_status(
         },
         method="POST",
     )
-    try:
-        with urlopen(request, timeout=10.0) as response:
-            response_payload = _json_object(
-                response.read().decode("utf-8"), "github_commit_status_response"
-            )
-    except HTTPError as exc:
-        raise ValueError(f"GitHub commit status publication failed: status={exc.code}") from exc
-    except (URLError, TimeoutError, OSError) as exc:
-        raise ValueError("GitHub commit status publication failed") from exc
+    response_payload: dict[str, Any] | None = None
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            with urlopen(request, timeout=10.0) as response:
+                response_payload = _json_object(
+                    response.read().decode("utf-8"), "github_commit_status_response"
+                )
+            break
+        except HTTPError as exc:
+            if exc.code not in {502, 503, 504}:
+                raise ValueError(
+                    f"GitHub commit status publication failed: status={exc.code}"
+                ) from exc
+            last_error = exc
+        except (URLError, TimeoutError, OSError) as exc:
+            last_error = exc
+        if attempt < 2:
+            time.sleep(2**attempt)
+    if response_payload is None:
+        raise ValueError("GitHub commit status publication failed") from last_error
     receipt = {
         "context": GITHUB_STATUS_CONTEXT,
         "contract_version": CONTRACT_VERSION,

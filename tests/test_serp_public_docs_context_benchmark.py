@@ -255,3 +255,64 @@ def test_github_status_is_a_final_external_projection_of_in_cluster_evidence(
     }
     assert request.get_header("Authorization") == "Bearer test-token"
     assert receipt["state"] == "success"
+
+
+def test_github_status_retries_transient_read_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    benchmark_root = _benchmark_root(tmp_path)
+    source_sha = "a" * 40
+    monkeypatch.setenv("ADAPSTORY_SERP_CONTEXT_BENCHMARK_ROOT", str(benchmark_root))
+    monkeypatch.setenv("ADAPSTORY_SERP_CONTEXT_BENCHMARK_REF", source_sha)
+    monkeypatch.setenv(
+        "ADAPSTORY_SERP_SEARCH_SERVE_BASE_URL",
+        "http://prod-serp-mcp-gateway-svc.env-prod.svc.cluster.local:8000",
+    )
+    monkeypatch.setenv(
+        "ADAPSTORY_SERP_BC21_BASE_URL",
+        "http://prod-serp-context-platform-svc.env-prod.svc.cluster.local:8080",
+    )
+    monkeypatch.setenv("ADAPSTORY_SERP_CONTEXT_BENCHMARK_GITHUB_TOKEN", "test-token")
+    plan = build_context_benchmark_plan(
+        {
+            "artifact_root_path": str(tmp_path / "evidence"),
+            "generated_at": "2026-07-11T03:15:00Z",
+        }
+    )
+    attempts = 0
+
+    class Response:
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"id": 13, "url": "https://api.github.com/statuses/13"}'
+
+    def flaky_urlopen(request: object, *, timeout: float) -> Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise TimeoutError("read timed out")
+        return Response()
+
+    monkeypatch.setattr(
+        "dags.serp_public_docs_context_benchmark_contracts.urlopen",
+        flaky_urlopen,
+    )
+    monkeypatch.setattr(
+        "dags.serp_public_docs_context_benchmark_contracts.time.sleep",
+        lambda _: None,
+    )
+
+    receipt = publish_context_benchmark_github_status(
+        plan,
+        {"status": "passed"},
+        {"status": "submitted"},
+    )
+
+    assert attempts == 2
+    assert receipt["status_id"] == 13
