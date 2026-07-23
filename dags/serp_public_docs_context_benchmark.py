@@ -5,6 +5,7 @@ from typing import Any
 
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
+from kubernetes.client import models as k8s
 
 from dags.serp_evidence_workload_identity import (
     bc21_authorized_minio_executor_config,
@@ -40,7 +41,19 @@ GITHUB_STATUS_EXECUTOR_CONFIG = minio_web_identity_executor_config(
             name="ADAPSTORY_SERP_CONTEXT_BENCHMARK_GITHUB_TOKEN",
             secret_name="airflow-serp-github-status",
             secret_key="token",
-        )
+        ),
+        k8s.V1EnvVar(
+            name="HTTP_PROXY",
+            value="http://forward-proxy.forward-proxy.svc.cluster.local:3128",
+        ),
+        k8s.V1EnvVar(
+            name="HTTPS_PROXY",
+            value="http://forward-proxy.forward-proxy.svc.cluster.local:3128",
+        ),
+        k8s.V1EnvVar(
+            name="NO_PROXY",
+            value="localhost,127.0.0.1,::1,.svc,.svc.cluster.local,cluster.local",
+        ),
     ],
 )
 

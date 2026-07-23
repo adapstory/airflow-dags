@@ -78,7 +78,7 @@ def test_context_benchmark_assigns_least_privilege_workload_identity_to_each_ext
     github_keywords = {keyword.arg: keyword.value for keyword in github_config.keywords}
     additional_env_vars = github_keywords["additional_env_vars"]
     assert isinstance(additional_env_vars, ast.List)
-    assert len(additional_env_vars.elts) == 1
+    assert len(additional_env_vars.elts) == 4
     secret_env_var = additional_env_vars.elts[0]
     assert isinstance(secret_env_var, ast.Call)
     assert isinstance(secret_env_var.func, ast.Name)
@@ -90,6 +90,22 @@ def test_context_benchmark_assigns_least_privilege_workload_identity_to_each_ext
     assert secret_keywords["secret_name"].value == "airflow-serp-github-status"
     assert isinstance(secret_keywords["secret_key"], ast.Constant)
     assert secret_keywords["secret_key"].value == "token"
+    proxy_env = {}
+    for env_var in additional_env_vars.elts[1:]:
+        assert isinstance(env_var, ast.Call)
+        assert isinstance(env_var.func, ast.Attribute)
+        assert isinstance(env_var.func.value, ast.Name)
+        assert env_var.func.value.id == "k8s"
+        assert env_var.func.attr == "V1EnvVar"
+        env_keywords = {keyword.arg: keyword.value for keyword in env_var.keywords}
+        assert isinstance(env_keywords["name"], ast.Constant)
+        assert isinstance(env_keywords["value"], ast.Constant)
+        proxy_env[env_keywords["name"].value] = env_keywords["value"].value
+    assert proxy_env == {
+        "HTTP_PROXY": "http://forward-proxy.forward-proxy.svc.cluster.local:3128",
+        "HTTPS_PROXY": "http://forward-proxy.forward-proxy.svc.cluster.local:3128",
+        "NO_PROXY": "localhost,127.0.0.1,::1,.svc,.svc.cluster.local,cluster.local",
+    }
 
     task_executor_configs = {}
     for call in calls:
