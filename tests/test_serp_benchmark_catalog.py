@@ -761,10 +761,17 @@ def _execution_substrate_materializer(
             {
                 "baseImage": {
                     "imageReference": (
-                        "harbor.adapstory.com/dockerhub-cache/library/python@sha256:" + "2" * 64
+                        "harbor.adapstory.com/benchmark-sandboxes/" "ds1000-base@sha256:" + "2" * 64
                     ),
                     "platform": "linux/amd64",
-                    "schema": "Ds1000BaseImageProvenance/v1",
+                    "promotionReference": (
+                        "harbor.adapstory.com/benchmark-sandboxes/"
+                        "ds1000-base:python-3.10-slim-bookworm-v1"
+                    ),
+                    "schema": "Ds1000BaseImageProvenance/v2",
+                    "sourceImageReference": (
+                        "harbor.adapstory.com/dockerhub-cache/" "library/python@sha256:" + "2" * 64
+                    ),
                     "sourceReference": (
                         "harbor.adapstory.com/dockerhub-cache/library/python:" "3.10-slim-bookworm"
                     ),

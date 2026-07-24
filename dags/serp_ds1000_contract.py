@@ -18,13 +18,8 @@ DS1000_EXECUTOR_COMMAND = "/opt/ds1000-venv/bin/python"
 DS1000_PYTORCH_VARIANT = "cpuonly"
 DS1000_SANDBOX_IMAGE_INVENTORY_SCHEMA = "Ds1000SandboxImageInventory/v2"
 DS1000_WHEELHOUSE_MANIFEST_SCHEMA = "Ds1000WheelhouseManifest/v4"
-DS1000_BASE_IMAGE_PROVENANCE_SCHEMA = "Ds1000BaseImageProvenance/v1"
 DS1000_DATASET_PROVENANCE_SCHEMA = "Ds1000SimplifiedDatasetProvenance/v1"
 DS1000_SUPPLY_ATTESTATION_SCHEMA = "Ds1000SandboxSupplyAttestation/v3"
-DS1000_BASE_IMAGE_SOURCE_REFERENCE = (
-    "harbor.adapstory.com/dockerhub-cache/library/python:3.10-slim-bookworm"
-)
-DS1000_BASE_IMAGE_REPOSITORY = "harbor.adapstory.com/dockerhub-cache/library/python"
 DS1000_SANDBOX_IMAGE_REPOSITORY = "harbor.adapstory.com/benchmark-sandboxes/ds1000"
 DS1000_DATASET_FIELD_NAMES = (
     "code_context",

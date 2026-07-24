@@ -10,6 +10,7 @@ from airflow.configuration import conf
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
+from airflow.sdk.exceptions import AirflowSkipException
 
 from dags.serp_benchmark_catalog_workload import (
     BENCHMARK_CATALOG_ACQUISITION_RESOURCES,
@@ -21,6 +22,9 @@ from dags.serp_benchmark_catalog_workload import (
     benchmark_catalog_acquisition_pod_security_context,
     benchmark_catalog_acquisition_web_identity_volume_mounts,
     benchmark_catalog_acquisition_web_identity_volumes,
+)
+from dags.serp_benchmark_runtime_prerequisite import (
+    source_set_prerequisite_state,
 )
 from dags.serp_eval_contracts import (
     build_mandatory_benchmark_dataset_evidence_plan,
@@ -61,6 +65,22 @@ def validate_mandatory_benchmark_dataset_evidence_plan(**context: Any) -> str:
     )
 
 
+def wait_for_benchmark_substrate_source_set() -> dict[str, Any]:
+    prerequisite = source_set_prerequisite_state(os.environ)
+    if prerequisite is None:
+        # Context: a daily catalog snapshot can race the immutable substrate
+        # supply/runtime rollout. Decision: absence is skipped and retried by
+        # the next schedule or the release chain; malformed identity still
+        # fails closed. Reason: a missing ConfigMap key must never create a
+        # doomed KPO pod that requires manual repair. Revisit when: Airflow has
+        # an event-driven trigger bound directly to the GitOps source-set key.
+        raise AirflowSkipException(
+            "benchmark substrate source set is not published yet; "
+            "the automated supply and runtime-promotion chain remains authoritative"
+        )
+    return prerequisite
+
+
 default_args = {
     "owner": "serp-benchmark-catalog",
     "retries": 0,
@@ -77,6 +97,13 @@ dag = DAG(
     is_paused_upon_creation=False,
     render_template_as_native_obj=True,
     tags=["serp", "evals", "benchmark", "evidence", "dataset"],
+)
+
+wait_for_source_set = PythonOperator(
+    task_id="wait_for_benchmark_substrate_source_set",
+    python_callable=wait_for_benchmark_substrate_source_set,
+    executor_config=BENCHMARK_EVALUATOR_EXECUTOR_CONFIG,
+    dag=dag,
 )
 
 validate_plan = PythonOperator(
@@ -120,4 +147,4 @@ materialize_evidence = KubernetesPodOperator(
     dag=dag,
 )
 
-validate_plan >> materialize_evidence
+wait_for_source_set >> validate_plan >> materialize_evidence

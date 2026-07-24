@@ -1355,10 +1355,16 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
     source_root = f"s3://airflow-serp-evidence/serp-evals/{operation_id}"
     base_image_provenance: dict[str, Any] = {
         "imageReference": (
-            "harbor.adapstory.com/dockerhub-cache/library/python@sha256:" + "c" * 64
+            "harbor.adapstory.com/benchmark-sandboxes/ds1000-base@sha256:" + "c" * 64
         ),
         "platform": "linux/amd64",
-        "schema": "Ds1000BaseImageProvenance/v1",
+        "promotionReference": (
+            "harbor.adapstory.com/benchmark-sandboxes/" "ds1000-base:python-3.10-slim-bookworm-v1"
+        ),
+        "schema": "Ds1000BaseImageProvenance/v2",
+        "sourceImageReference": (
+            "harbor.adapstory.com/dockerhub-cache/library/python@sha256:" + "c" * 64
+        ),
         "sourceReference": "harbor.adapstory.com/dockerhub-cache/library/python:3.10-slim-bookworm",
     }
 
@@ -7010,6 +7016,7 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
             "serp_mandatory_benchmark_dataset_evidence_snapshot.py",
             "serp_mandatory_benchmark_dataset_evidence_snapshot",
             [
+                "wait_for_benchmark_substrate_source_set",
                 "validate_mandatory_benchmark_dataset_evidence_plan",
                 "materialize_mandatory_benchmark_dataset_evidence",
             ],
@@ -7163,7 +7170,8 @@ def test_serp_dag_files_declare_expected_airflow_contracts(
         assert "scheduled_d6_fence" not in source
     elif dag_id == "serp_mandatory_benchmark_dataset_evidence_snapshot":
         assert _keyword_values(tree, "PythonOperator", "task_id") == [
-            "validate_mandatory_benchmark_dataset_evidence_plan"
+            "wait_for_benchmark_substrate_source_set",
+            "validate_mandatory_benchmark_dataset_evidence_plan",
         ]
         assert _keyword_values(tree, "KubernetesPodOperator", "task_id") == [
             "materialize_mandatory_benchmark_dataset_evidence"
@@ -7174,6 +7182,10 @@ def test_serp_dag_files_declare_expected_airflow_contracts(
             "container_security_context=benchmark_catalog_acquisition_container_security_context()"
             in source
         )
+        assert "from airflow.sdk.exceptions import AirflowSkipException" in source
+        assert "source_set_prerequisite_state(os.environ)" in source
+        assert "benchmark substrate source set is not published yet" in source
+        assert "wait_for_source_set >> validate_plan >> materialize_evidence" in source
         assert "BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS" in source
     else:
         assert _keyword_values(tree, "PythonOperator", "task_id") == task_ids
@@ -10384,10 +10396,17 @@ def _execution_substrate_materializer(
             {
                 "baseImage": {
                     "imageReference": (
-                        "harbor.adapstory.com/dockerhub-cache/library/python@sha256:" + "2" * 64
+                        "harbor.adapstory.com/benchmark-sandboxes/" "ds1000-base@sha256:" + "2" * 64
                     ),
                     "platform": "linux/amd64",
-                    "schema": "Ds1000BaseImageProvenance/v1",
+                    "promotionReference": (
+                        "harbor.adapstory.com/benchmark-sandboxes/"
+                        "ds1000-base:python-3.10-slim-bookworm-v1"
+                    ),
+                    "schema": "Ds1000BaseImageProvenance/v2",
+                    "sourceImageReference": (
+                        "harbor.adapstory.com/dockerhub-cache/" "library/python@sha256:" + "2" * 64
+                    ),
                     "sourceReference": (
                         "harbor.adapstory.com/dockerhub-cache/library/python:" "3.10-slim-bookworm"
                     ),

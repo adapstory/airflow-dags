@@ -15,10 +15,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
 
+from adapstory_serp_pipeline.benchmark.ds1000_contract import (
+    normalize_ds1000_base_image_provenance,
+)
+
 from dags.serp_ds1000_contract import (
-    DS1000_BASE_IMAGE_PROVENANCE_SCHEMA,
-    DS1000_BASE_IMAGE_REPOSITORY,
-    DS1000_BASE_IMAGE_SOURCE_REFERENCE,
     DS1000_DATASET_FIELD_NAMES,
     DS1000_DATASET_PROVENANCE_SCHEMA,
     DS1000_DATASET_ROW_COUNT,
@@ -26,7 +27,6 @@ from dags.serp_ds1000_contract import (
     DS1000_INVENTORY_SUITE_ID,
     DS1000_LIBRARY_VERSIONS,
     DS1000_OFFICIAL_DATASET_PATH,
-    DS1000_PLATFORM,
     DS1000_PYTHON_VERSION,
     DS1000_PYTORCH_VARIANT,
     DS1000_REVISION,
@@ -949,25 +949,10 @@ def _validate_ds1000_sandbox_inventory(payload: bytes, entry: BenchmarkSuiteCata
 
 
 def _validate_ds1000_base_image_provenance(value: object) -> None:
-    if not isinstance(value, Mapping) or set(value) != {
-        "imageReference",
-        "platform",
-        "schema",
-        "sourceReference",
-    }:
-        raise ValueError("DS-1000 base image provenance shape is invalid")
-    image_reference = value.get("imageReference")
-    if (
-        value.get("schema") != DS1000_BASE_IMAGE_PROVENANCE_SCHEMA
-        or value.get("platform") != DS1000_PLATFORM
-        or value.get("sourceReference") != DS1000_BASE_IMAGE_SOURCE_REFERENCE
-        or not isinstance(image_reference, str)
-        or not re.fullmatch(
-            re.escape(DS1000_BASE_IMAGE_REPOSITORY) + r"@sha256:[0-9a-f]{64}",
-            image_reference,
-        )
-    ):
-        raise ValueError("DS-1000 base image provenance is unsupported")
+    try:
+        normalize_ds1000_base_image_provenance(value)
+    except ValueError as exc:
+        raise ValueError(f"DS-1000 base image provenance is unsupported: {exc}") from exc
 
 
 def _validate_ds1000_dataset_provenance(value: object) -> None:

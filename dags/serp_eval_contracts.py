@@ -24,6 +24,9 @@ from urllib.request import ProxyHandler, Request, build_opener, urlopen
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import rfc8785
+from adapstory_serp_pipeline.benchmark.ds1000_contract import (
+    normalize_ds1000_base_image_provenance,
+)
 from adapstory_serp_pipeline.benchmark.native_suite_scoring import suite_metric_profile
 from adapstory_serp_pipeline.orchestration.vault_transit_attestation import (
     VaultTransitClient,
@@ -37,9 +40,6 @@ from adapstory_serp_pipeline.registry.evaluation_release_contract import (
 
 from dags.public_docs_crawler import CrawlResponse, crawl_public_docs
 from dags.serp_ds1000_contract import (
-    DS1000_BASE_IMAGE_PROVENANCE_SCHEMA,
-    DS1000_BASE_IMAGE_REPOSITORY,
-    DS1000_BASE_IMAGE_SOURCE_REFERENCE,
     DS1000_DATASET_FIELD_NAMES,
     DS1000_DATASET_PROVENANCE_SCHEMA,
     DS1000_DATASET_ROW_COUNT,
@@ -2874,27 +2874,10 @@ def _normalized_ds1000_wheelhouse_resolution(
 
 
 def _normalized_ds1000_base_image_provenance(value: object, *, field_name: str) -> dict[str, str]:
-    expected = {"imageReference", "platform", "schema", "sourceReference"}
-    if not isinstance(value, Mapping) or set(value) != expected:
-        raise ValueError(f"{field_name} fields are unsupported")
-    image_reference = _required_str(value, "imageReference")
-    if (
-        _required_str(value, "schema") != DS1000_BASE_IMAGE_PROVENANCE_SCHEMA
-        or _required_str(value, "platform") != DS1000_PLATFORM
-        or _required_str(value, "sourceReference") != DS1000_BASE_IMAGE_SOURCE_REFERENCE
-        or re.fullmatch(
-            re.escape(DS1000_BASE_IMAGE_REPOSITORY) + r"@sha256:[0-9a-f]{64}",
-            image_reference,
-        )
-        is None
-    ):
-        raise ValueError(f"{field_name} is unsupported")
-    return {
-        "imageReference": image_reference,
-        "platform": DS1000_PLATFORM,
-        "schema": DS1000_BASE_IMAGE_PROVENANCE_SCHEMA,
-        "sourceReference": DS1000_BASE_IMAGE_SOURCE_REFERENCE,
-    }
+    try:
+        return normalize_ds1000_base_image_provenance(value)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} is unsupported: {exc}") from exc
 
 
 def _normalized_ds1000_dataset_provenance(value: object, *, field_name: str) -> dict[str, Any]:
