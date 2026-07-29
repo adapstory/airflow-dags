@@ -28,6 +28,9 @@ from adapstory_serp_pipeline.benchmark.ds1000_contract import (
     normalize_ds1000_base_image_provenance,
 )
 from adapstory_serp_pipeline.benchmark.native_suite_scoring import suite_metric_profile
+from adapstory_serp_pipeline.orchestration.remediation_event import (
+    build_pipeline_cli_failure_event,
+)
 from adapstory_serp_pipeline.orchestration.vault_transit_attestation import (
     VaultTransitClient,
     verify_artifact_attestation,
@@ -53,8 +56,9 @@ from dags.serp_ds1000_contract import (
 )
 from dags.serp_public_docs_seed_catalog import (
     PUBLIC_DOCS_NIGHTLY_SOURCE_CATALOG_PATH,
+    PUBLIC_DOCS_SOURCE_REGISTRY_VERSION,
     STACK_INVENTORY_SOURCE_PATH,
-    p0_public_docs_sources,
+    governed_public_docs_sources,
 )
 
 _LOG = logging.getLogger(__name__)
@@ -7979,15 +7983,15 @@ def _write_pipeline_cli_failure_receipt(
     stderr: str,
 ) -> str:
     failure_artifact_path = _pipeline_cli_failure_artifact_path(stdout_path)
-    payload = {
-        "artifact_type": "pipeline_cli_failure",
-        "contract_version": _PIPELINE_CLI_CONTRACT_VERSION,
-        "operation_id": _required_str(spec, "operation_id"),
-        "returncode": returncode,
-        "stderr_excerpt": _sanitize_pipeline_cli_failure_excerpt(stderr),
-        "stderr_sha256": sha256(stderr.encode("utf-8")).hexdigest(),
-        "task_id": _required_str(spec, "task_id"),
-    }
+    payload = build_pipeline_cli_failure_event(
+        component="serp-public-docs-d20",
+        evidence_uri=failure_artifact_path,
+        operation_id=_required_str(spec, "operation_id"),
+        repair_policy_id="serp-public-docs-d20",
+        returncode=returncode,
+        stderr=stderr,
+        task_id=_required_str(spec, "task_id"),
+    )
     _reject_raw_secrets(payload)
     _write_json_artifact(failure_artifact_path, payload)
     return failure_artifact_path
@@ -10164,9 +10168,14 @@ def _public_docs_source_uri_identity(source_uri: str) -> tuple[str, str, tuple[s
     parsed = urlparse(source_uri)
     scheme = parsed.scheme.lower()
     host = (parsed.hostname or "").lower().rstrip(".")
-    if scheme != "https" or not host:
+    if scheme not in {"https", "git+https"} or not host:
         return None
     path = tuple(segment for segment in parsed.path.split("/") if segment)
+    if scheme == "git+https":
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        if set(query) != {"path", "ref"} or not query["path"] or not query["ref"]:
+            return None
+        path = (*path, f"@ref={query['ref']}", f"@path={query['path']}")
     if path and _PUBLIC_DOCS_LOCALE_PATH_SEGMENT.fullmatch(path[0]):
         path = path[1:]
     return scheme, host, path
@@ -11735,10 +11744,11 @@ def _default_public_docs_seed_registry() -> list[dict[str, Any]]:
             priority=str(source.get("priority", "P0")),
             releases_url=str(source["releases_url"]),
             repo_url=str(source["repo_url"]),
+            robots_cache_max_hours=int(source["robots_cache_max_hours"]),
             suggested_ingest_modes=tuple(str(value) for value in source["suggested_ingest_modes"]),
             version=str(source.get("version", "catalog@2026-07-08")),
         )
-        for source in p0_public_docs_sources()
+        for source in governed_public_docs_sources()
     ]
 
 
@@ -11751,6 +11761,7 @@ def _default_public_docs_seed(
     component: str,
     releases_url: str,
     repo_url: str,
+    robots_cache_max_hours: int,
     suggested_ingest_modes: Sequence[str],
     version: str,
     frontier_urls: Sequence[str] = (),
@@ -11780,6 +11791,7 @@ def _default_public_docs_seed(
             "max_depth": 2,
             "max_pages": 25,
             "respect_robots_txt": True,
+            "robots_cache_max_hours": robots_cache_max_hours,
             "sitemap_discovery": True,
             "user_agent": "AdapstorySERPDocsRefresh/2026.07",
         },
@@ -11799,14 +11811,16 @@ def _default_public_docs_seed(
         "metadata": {
             "catalog_docs_url": catalog_docs_url,
             "nightly_source_catalog_path": PUBLIC_DOCS_NIGHTLY_SOURCE_CATALOG_PATH,
+            "governance_state": "active",
             "origin": _PUBLIC_DOCS_STACK_INVENTORY_PATH,
             "priority": priority,
             "purpose": "public-docs-seed-to-serve",
             "releases_url": releases_url,
             "repo_url": repo_url,
+            "source_registry_version": PUBLIC_DOCS_SOURCE_REGISTRY_VERSION,
             "suggested_ingest_modes": list(suggested_ingest_modes),
         },
-        "official_docs_uri": source_uri,
+        "official_docs_uri": catalog_docs_url if source_type == "git" else source_uri,
         "refresh_policy": {
             "cadence": "daily",
             "max_age_hours": 24,
@@ -11902,10 +11916,20 @@ def _required_public_docs_source_uri(seed: Mapping[str, Any], source_type: str) 
         raise ValueError("source_uri must not contain raw secret material")
     parsed = urlparse(source_uri)
     if source_type == "git":
-        if parsed.scheme != "git+file":
-            raise ValueError(
-                "git public docs seeds must use git+file until remote git connector exists"
-            )
+        if parsed.scheme not in {"git+file", "git+https"}:
+            raise ValueError("git public docs seeds must use git+file or governed git+https")
+        if parsed.scheme == "git+https" and parsed.hostname != "github.com":
+            raise ValueError("remote git public docs seeds must use allowlisted github.com")
+        if parsed.scheme == "git+https":
+            path_segments = [segment for segment in parsed.path.split("/") if segment]
+            query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+            if (
+                len(path_segments) != 2
+                or set(query) != {"path", "ref"}
+                or not query["path"]
+                or not query["ref"]
+            ):
+                raise ValueError("remote git public docs seed URI is invalid")
         return source_uri
     if parsed.scheme != "https" or not parsed.hostname:
         raise ValueError("public docs source_uri must use https")
@@ -11941,6 +11965,13 @@ def _public_docs_crawl_policy(
     sitemap_discovery = policy.get("sitemap_discovery")
     if not isinstance(sitemap_discovery, bool):
         raise ValueError("sitemap_discovery must be boolean")
+    robots_cache_max_hours = policy.get("robots_cache_max_hours", 24)
+    if (
+        isinstance(robots_cache_max_hours, bool)
+        or not isinstance(robots_cache_max_hours, int)
+        or not 1 <= robots_cache_max_hours <= 24
+    ):
+        raise ValueError("robots_cache_max_hours must be 24 or fewer")
     allowed_domains = _required_str_list(policy, "allowed_domains")
     deny_patterns = policy.get("deny_patterns", [])
     if not isinstance(deny_patterns, list) or not all(
@@ -11981,6 +12012,7 @@ def _public_docs_crawl_policy(
         "previous_state": dict(previous_state),
         "crawl_evidence": crawl_evidence,
         "respect_robots_txt": True,
+        "robots_cache_max_hours": robots_cache_max_hours,
         "sitemap_discovery": sitemap_discovery,
         "user_agent": _required_str(policy, "user_agent"),
     }

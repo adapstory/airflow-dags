@@ -5,6 +5,7 @@ from typing import Any
 
 PUBLIC_DOCS_NIGHTLY_SOURCE_CATALOG_PATH = "docs/reports/serp/public-docs-seed-catalog-2026-07-08.md"
 STACK_INVENTORY_SOURCE_PATH = "docs/reports/serp/stack-inventory-2026-07-02.md"
+PUBLIC_DOCS_SOURCE_REGISTRY_VERSION = "public-docs-source-registry/v1"
 
 WEBSITE_GIT_RELEASE_NOTES_INGEST_MODES = ("website", "git", "release-notes")
 OPENAPI_INGEST_MODES = ("openapi",)
@@ -22,13 +23,19 @@ def _source(
     source_type: str = "website",
     suggested_ingest_modes: Sequence[str] = WEBSITE_GIT_RELEASE_NOTES_INGEST_MODES,
     version: str | None = None,
+    priority: str = "P0",
 ) -> Mapping[str, Any]:
     source: dict[str, Any] = {
         "component": component,
         "docs_url": docs_url,
-        "priority": "P0",
+        "governance_state": "active",
+        "license_review": "reviewed-public-docs",
+        "official_source_evidence": "vendor-docs-or-owned-repository",
+        "priority": priority,
+        "refresh_cadence": "daily",
         "releases_url": releases_url,
         "repo_url": repo_url,
+        "robots_cache_max_hours": 24,
         "seed_id": seed_id,
         "source_type": source_type,
         "suggested_ingest_modes": tuple(suggested_ingest_modes),
@@ -42,7 +49,7 @@ def _source(
     return source
 
 
-P0_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
+GOVERNED_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
     _source(
         component="Proxmox VE",
         docs_url="https://pve.proxmox.com/pve-docs/",
@@ -246,8 +253,200 @@ P0_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
         releases_url="https://github.com/NVIDIA/gpu-operator/releases",
         seed_id="nvidia-gpu-operator-docs",
     ),
+    _source(
+        component="Grafana",
+        docs_url="https://grafana.com/docs/grafana/latest/",
+        repo_url="https://github.com/grafana/grafana",
+        releases_url="https://github.com/grafana/grafana/releases",
+        seed_id="grafana-docs",
+        priority="P1",
+    ),
+    _source(
+        component="Loki",
+        docs_url="https://grafana.com/docs/loki/latest/",
+        repo_url="https://github.com/grafana/loki",
+        releases_url="https://github.com/grafana/loki/releases",
+        seed_id="loki-docs",
+        priority="P1",
+    ),
+    _source(
+        component="Tempo",
+        docs_url="https://grafana.com/docs/tempo/latest/",
+        repo_url="https://github.com/grafana/tempo",
+        releases_url="https://github.com/grafana/tempo/releases",
+        seed_id="tempo-docs",
+        priority="P1",
+    ),
+    _source(
+        component="Pyroscope",
+        docs_url="https://grafana.com/docs/pyroscope/latest/",
+        repo_url="https://github.com/grafana/pyroscope",
+        releases_url="https://github.com/grafana/pyroscope/releases",
+        seed_id="pyroscope-docs",
+        priority="P1",
+    ),
+    _source(
+        component="OpenTelemetry",
+        docs_url="https://opentelemetry.io/docs/",
+        repo_url="https://github.com/open-telemetry/opentelemetry.io",
+        releases_url="https://github.com/open-telemetry/opentelemetry.io/releases",
+        seed_id="opentelemetry-docs",
+        priority="P1",
+    ),
+    _source(
+        component="ClickHouse",
+        docs_url="https://clickhouse.com/docs/",
+        repo_url="https://github.com/ClickHouse/ClickHouse",
+        releases_url="https://github.com/ClickHouse/ClickHouse/releases",
+        seed_id="clickhouse-docs",
+        priority="P1",
+    ),
+    _source(
+        component="Dify",
+        docs_url="https://docs.dify.ai/en/introduction",
+        repo_url="https://github.com/langgenius/dify",
+        releases_url="https://github.com/langgenius/dify/releases",
+        seed_id="dify-docs",
+        priority="P1",
+    ),
+    _source(
+        component="n8n",
+        docs_url="https://docs.n8n.io/",
+        repo_url="https://github.com/n8n-io/n8n",
+        releases_url="https://github.com/n8n-io/n8n/releases",
+        seed_id="n8n-docs",
+        priority="P1",
+    ),
+    _source(
+        component="Ollama",
+        docs_url="https://docs.ollama.com/",
+        repo_url="https://github.com/ollama/ollama",
+        releases_url="https://github.com/ollama/ollama/releases",
+        seed_id="ollama-docs",
+        priority="P1",
+    ),
+    _source(
+        component="SonarQube Server",
+        docs_url="https://docs.sonarsource.com/sonarqube-server/",
+        repo_url="https://github.com/SonarSource/sonarqube",
+        releases_url="https://github.com/SonarSource/sonarqube/releases",
+        seed_id="sonarqube-server-docs",
+        priority="P1",
+    ),
+    _source(
+        component="Trivy",
+        docs_url="https://trivy.dev/latest/",
+        repo_url="https://github.com/aquasecurity/trivy",
+        releases_url="https://github.com/aquasecurity/trivy/releases",
+        seed_id="trivy-docs",
+        priority="P1",
+    ),
+    _source(
+        component="Nextcloud",
+        docs_url="https://docs.nextcloud.com/",
+        repo_url="https://github.com/nextcloud/server",
+        releases_url="https://github.com/nextcloud/server/releases",
+        seed_id="nextcloud-docs",
+        priority="P1",
+    ),
+    _source(
+        component="Spring Boot",
+        docs_url="https://docs.spring.io/spring-boot/",
+        repo_url="https://github.com/spring-projects/spring-boot",
+        releases_url="https://github.com/spring-projects/spring-boot/releases",
+        seed_id="spring-boot-docs",
+        priority="P1",
+    ),
+    _source(
+        component="Spring Security",
+        docs_url="https://docs.spring.io/spring-security/reference/",
+        repo_url="https://github.com/spring-projects/spring-security",
+        releases_url="https://github.com/spring-projects/spring-security/releases",
+        seed_id="spring-security-docs",
+        priority="P1",
+    ),
+    _source(
+        component="React",
+        docs_url="https://react.dev/",
+        repo_url="https://github.com/facebook/react",
+        releases_url="https://github.com/facebook/react/releases",
+        seed_id="react-docs",
+        priority="P1",
+    ),
+    _source(
+        component="Vite",
+        docs_url="https://vite.dev/guide/",
+        repo_url="https://github.com/vitejs/vite",
+        releases_url="https://github.com/vitejs/vite/releases",
+        seed_id="vite-docs",
+        priority="P1",
+    ),
+    _source(
+        component="Playwright",
+        docs_url="https://playwright.dev/docs/intro",
+        repo_url="https://github.com/microsoft/playwright",
+        releases_url="https://github.com/microsoft/playwright/releases",
+        seed_id="playwright-docs",
+        priority="P1",
+    ),
+    _source(
+        component="FastAPI",
+        docs_url="https://fastapi.tiangolo.com/",
+        repo_url="https://github.com/fastapi/fastapi",
+        releases_url="https://github.com/fastapi/fastapi/releases",
+        seed_id="fastapi-docs",
+        priority="P1",
+    ),
+    _source(
+        component="Pydantic",
+        docs_url="https://docs.pydantic.dev/latest/",
+        repo_url="https://github.com/pydantic/pydantic",
+        releases_url="https://github.com/pydantic/pydantic/releases",
+        seed_id="pydantic-docs",
+        priority="P1",
+    ),
+    _source(
+        component="Proxmox VE Administration Guide",
+        docs_url="https://pve.proxmox.com/pve-docs/pve-admin-guide.pdf",
+        repo_url="https://git.proxmox.com/",
+        releases_url="https://www.proxmox.com/en/downloads",
+        seed_id="proxmox-ve-admin-guide-pdf",
+        source_type="pdf",
+        suggested_ingest_modes=("pdf",),
+        priority="P1",
+    ),
+    _source(
+        component="OpenTelemetry Docs Repository",
+        docs_url=(
+            "git+https://github.com/open-telemetry/opentelemetry.io" "?ref=main&path=README.md"
+        ),
+        catalog_docs_url="https://opentelemetry.io/docs/",
+        repo_url="https://github.com/open-telemetry/opentelemetry.io",
+        releases_url="https://github.com/open-telemetry/opentelemetry.io/releases",
+        seed_id="opentelemetry-docs-git-readme",
+        source_type="git",
+        suggested_ingest_modes=("git",),
+        priority="P1",
+    ),
+)
+
+QUARANTINED_PUBLIC_DOCS_CANDIDATES: tuple[Mapping[str, Any], ...] = (
+    {
+        "component": "Nexus Repository",
+        "docs_url": "https://help.sonatype.com/en/sonatype-nexus-repository.html",
+        "governance_state": "quarantined",
+        "quarantine_reason": "repository-ownership-and-release-surface-incomplete",
+        "seed_id": "nexus-repository-docs",
+    },
+    {
+        "component": "LangGraph",
+        "docs_url": "https://docs.langchain.com/oss/python/langgraph/",
+        "governance_state": "quarantined",
+        "quarantine_reason": "canonical-docs-migration-needs-review",
+        "seed_id": "langgraph-docs",
+    },
 )
 
 
-def p0_public_docs_sources() -> Sequence[Mapping[str, Any]]:
-    return tuple(dict(source) for source in P0_PUBLIC_DOCS_SOURCES)
+def governed_public_docs_sources() -> Sequence[Mapping[str, Any]]:
+    return tuple(dict(source) for source in GOVERNED_PUBLIC_DOCS_SOURCES)

@@ -76,10 +76,10 @@ from dags.serp_eval_contracts import (
     write_scheduled_d6_regression_receipt,
 )
 from dags.serp_public_docs_seed_catalog import (
-    P0_PUBLIC_DOCS_SOURCES,
+    GOVERNED_PUBLIC_DOCS_SOURCES,
     PUBLIC_DOCS_NIGHTLY_SOURCE_CATALOG_PATH,
     STACK_INVENTORY_SOURCE_PATH,
-    p0_public_docs_sources,
+    governed_public_docs_sources,
 )
 
 TENANT_ID = "00000000-0000-4000-a000-000000000001"
@@ -2419,14 +2419,18 @@ def test_execute_pipeline_cli_spec_persists_redacted_failure_receipt(
     receipt = json.loads(failure_path.read_text(encoding="utf-8"))
 
     assert f"failure_artifact_path={failure_path}" in str(error.value)
-    assert receipt["artifact_type"] == "pipeline_cli_failure"
+    assert receipt["artifact_type"] == "SerpRemediationEvent"
+    assert receipt["schema_version"] == "v1"
+    assert receipt["failure_class"] == "credentials"
+    assert receipt["reason_code"] == "credential_material_rejected"
+    assert receipt["repair_policy_id"] == "serp-public-docs-d20"
+    assert receipt["fingerprint"].startswith("sha256:")
     assert receipt["returncode"] == 2
     assert receipt["stderr_sha256"] == sha256(Result.stderr.encode("utf-8")).hexdigest()
-    assert "live store request failed" in receipt["stderr_excerpt"]
-    assert "super-secret-token" not in receipt["stderr_excerpt"]
-    assert "another-secret-token" not in receipt["stderr_excerpt"]
-    assert "json-secret-token" not in receipt["stderr_excerpt"]
-    assert "[REDACTED]" in receipt["stderr_excerpt"]
+    assert receipt["summary"] == "pipeline credentials or authorization failed"
+    assert "super-secret-token" not in json.dumps(receipt, sort_keys=True)
+    assert "another-secret-token" not in json.dumps(receipt, sort_keys=True)
+    assert "json-secret-token" not in json.dumps(receipt, sort_keys=True)
 
 
 def test_execute_pipeline_cli_spec_persists_failure_receipt_to_s3(
@@ -2500,7 +2504,10 @@ def test_execute_pipeline_cli_spec_persists_failure_receipt_to_s3(
         "serp-evals/op/public-docs-seed-refresh-result.failure.json",
     )
     assert "do-not-persist" not in raw_receipt
-    assert json.loads(raw_receipt)["stderr_excerpt"].endswith("[REDACTED]")
+    receipt = json.loads(raw_receipt)
+    assert receipt["artifact_type"] == "SerpRemediationEvent"
+    assert receipt["failure_class"] == "credentials"
+    assert "stderr_excerpt" not in receipt
 
 
 def test_execute_pipeline_cli_spec_rejects_evidence_only_public_docs_success(
@@ -6099,7 +6106,7 @@ def test_public_docs_search_serve_smoke_retries_transient_timeout(
     assert artifact["payload"]["status"] == "served_active_pack"
 
 
-def test_public_docs_retrieval_golden_runs_thirty_live_contract_cases_with_replay(
+def test_public_docs_retrieval_golden_runs_every_governed_source_with_replay(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6168,8 +6175,8 @@ def test_public_docs_retrieval_golden_runs_thirty_live_contract_cases_with_repla
 
     assert artifact["artifactType"] == "public_docs_retrieval_golden"
     assert artifact["payload"]["status"] == "passed"
-    assert artifact["payload"]["case_count"] == 30
-    assert len(calls) == 60
+    assert artifact["payload"]["case_count"] == len(GOVERNED_PUBLIC_DOCS_SOURCES)
+    assert len(calls) == len(GOVERNED_PUBLIC_DOCS_SOURCES) * 2
     assert all("source_uri_filter" not in call["metadata"] for call in calls)
     assert artifact["payload"]["latency_seconds"]["p95"] <= 2.0
 
@@ -6668,10 +6675,12 @@ def test_default_public_docs_seed_refresh_conf_materializes_autonomous_d20_plan(
     assert conf["seed_registry"]
     assert plan.payload["dag_id"] == "serp_web_seed_crawl_refresh"
     assert plan.payload["status"] == "ready_for_public_docs_seed_refresh"
-    assert plan.payload["seed_count"] == len(P0_PUBLIC_DOCS_SOURCES)
+    assert plan.payload["seed_count"] == len(GOVERNED_PUBLIC_DOCS_SOURCES)
     assert plan.payload["source_type_counts"] == {
+        "git": 1,
         "openapi": 1,
-        "website": len(P0_PUBLIC_DOCS_SOURCES) - 1,
+        "pdf": 1,
+        "website": len(GOVERNED_PUBLIC_DOCS_SOURCES) - 3,
     }
     assert {
         seed["inventory_evidence"]["stack_inventory_path"] for seed in plan.payload["seed_registry"]
@@ -6682,31 +6691,48 @@ def test_default_public_docs_seed_refresh_conf_materializes_autonomous_d20_plan(
     assert {
         seed["metadata"]["nightly_source_catalog_path"] for seed in plan.payload["seed_registry"]
     } == {PUBLIC_DOCS_NIGHTLY_SOURCE_CATALOG_PATH}
-    assert {seed["metadata"]["priority"] for seed in plan.payload["seed_registry"]} == {"P0"}
+    assert {seed["metadata"]["priority"] for seed in plan.payload["seed_registry"]} == {
+        "P0",
+        "P1",
+    }
+    assert {seed["metadata"]["governance_state"] for seed in plan.payload["seed_registry"]} == {
+        "active"
+    }
+    assert {
+        seed["metadata"]["source_registry_version"] for seed in plan.payload["seed_registry"]
+    } == {"public-docs-source-registry/v1"}
+    assert {
+        seed["crawl_policy"]["robots_cache_max_hours"] for seed in plan.payload["seed_registry"]
+    } == {24}
     assert {seed["seed_id"]: seed["source_uri"] for seed in plan.payload["seed_registry"]} == {
-        str(source["seed_id"]): str(source["docs_url"]) for source in P0_PUBLIC_DOCS_SOURCES
+        str(source["seed_id"]): str(source["docs_url"]) for source in GOVERNED_PUBLIC_DOCS_SOURCES
     }
     assert {
         seed["seed_id"]: seed["metadata"]["catalog_docs_url"]
         for seed in plan.payload["seed_registry"]
     } == {
         str(source["seed_id"]): str(source.get("catalog_docs_url", source["docs_url"]))
-        for source in P0_PUBLIC_DOCS_SOURCES
+        for source in GOVERNED_PUBLIC_DOCS_SOURCES
     }
     assert {
         seed["seed_id"]: seed["metadata"]["repo_url"] for seed in plan.payload["seed_registry"]
-    } == {str(source["seed_id"]): str(source["repo_url"]) for source in P0_PUBLIC_DOCS_SOURCES}
+    } == {
+        str(source["seed_id"]): str(source["repo_url"]) for source in GOVERNED_PUBLIC_DOCS_SOURCES
+    }
     assert {
         seed["seed_id"]: seed["metadata"]["releases_url"] for seed in plan.payload["seed_registry"]
-    } == {str(source["seed_id"]): str(source["releases_url"]) for source in P0_PUBLIC_DOCS_SOURCES}
+    } == {
+        str(source["seed_id"]): str(source["releases_url"])
+        for source in GOVERNED_PUBLIC_DOCS_SOURCES
+    }
     assert {
         seed["seed_id"]: tuple(seed["metadata"]["suggested_ingest_modes"])
         for seed in plan.payload["seed_registry"]
     } == {
         str(source["seed_id"]): tuple(source["suggested_ingest_modes"])
-        for source in P0_PUBLIC_DOCS_SOURCES
+        for source in GOVERNED_PUBLIC_DOCS_SOURCES
     }
-    sources_by_seed_id = {str(source["seed_id"]): source for source in P0_PUBLIC_DOCS_SOURCES}
+    sources_by_seed_id = {str(source["seed_id"]): source for source in GOVERNED_PUBLIC_DOCS_SOURCES}
     assert {
         request["seed_id"]: request["source_metadata"]["repo_url"]
         for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
@@ -6800,7 +6826,7 @@ def test_default_public_docs_seed_refresh_conf_does_not_read_reference_files_at_
     )
     plan = build_public_docs_seed_refresh_plan(conf)
 
-    assert plan.payload["seed_count"] == len(P0_PUBLIC_DOCS_SOURCES)
+    assert plan.payload["seed_count"] == len(GOVERNED_PUBLIC_DOCS_SOURCES)
     assert {
         seed["metadata"]["nightly_source_catalog_path"] for seed in plan.payload["seed_registry"]
     } == {PUBLIC_DOCS_NIGHTLY_SOURCE_CATALOG_PATH}
@@ -6809,11 +6835,11 @@ def test_default_public_docs_seed_refresh_conf_does_not_read_reference_files_at_
     } == {STACK_INVENTORY_SOURCE_PATH}
 
 
-def test_p0_public_docs_seed_catalog_shape_is_runtime_safe() -> None:
+def test_governed_public_docs_seed_catalog_shape_is_runtime_safe() -> None:
     allowed_source_types = {"git", "openapi", "pdf", "website"}
     seen_seed_ids: set[str] = set()
 
-    for source in p0_public_docs_sources():
+    for source in governed_public_docs_sources():
         seed_id = str(source["seed_id"])
         docs_url = str(source["docs_url"])
         source_type = str(source.get("source_type", "website"))
@@ -6822,12 +6848,12 @@ def test_p0_public_docs_seed_catalog_shape_is_runtime_safe() -> None:
         assert seed_id not in seen_seed_ids
         assert seed_id
         assert str(source["component"])
-        assert str(source.get("priority", "P0")) == "P0"
+        assert str(source["priority"]) in {"P0", "P1"}
         assert source_type in allowed_source_types
-        assert docs_origin.scheme in {"git+file", "https"}
+        assert docs_origin.scheme in {"git+https", "https"}
 
         if source_type == "git":
-            assert docs_url.startswith("git+file://")
+            assert docs_url.startswith("git+https://github.com/")
         if source_type == "pdf":
             assert docs_url.endswith(".pdf")
         if source_type in {"openapi", "website"}:
@@ -6840,10 +6866,10 @@ def test_p0_public_docs_seed_catalog_shape_is_runtime_safe() -> None:
 
         seen_seed_ids.add(seed_id)
 
-    assert seen_seed_ids == {str(source["seed_id"]) for source in P0_PUBLIC_DOCS_SOURCES}
+    assert seen_seed_ids == {str(source["seed_id"]) for source in GOVERNED_PUBLIC_DOCS_SOURCES}
 
 
-def test_p0_public_docs_sources_match_nightly_markdown_catalog() -> None:
+def test_governed_p0_public_docs_sources_match_nightly_markdown_catalog() -> None:
     catalog_path = REPO_ROOT.parent / PUBLIC_DOCS_NIGHTLY_SOURCE_CATALOG_PATH
     stack_inventory_path = REPO_ROOT.parent / STACK_INVENTORY_SOURCE_PATH
 
@@ -6854,7 +6880,11 @@ def test_p0_public_docs_sources_match_nightly_markdown_catalog() -> None:
     assert STACK_INVENTORY_SOURCE_PATH in catalog_text
 
     catalog_rows = _p0_nightly_catalog_rows(catalog_text)
-    executable_sources = {str(source["component"]): source for source in P0_PUBLIC_DOCS_SOURCES}
+    executable_sources = {
+        str(source["component"]): source
+        for source in GOVERNED_PUBLIC_DOCS_SOURCES
+        if source["priority"] == "P0"
+    }
 
     assert set(executable_sources) == set(catalog_rows)
     for component, source in executable_sources.items():
@@ -6875,7 +6905,7 @@ def test_p0_public_docs_sources_match_nightly_markdown_catalog() -> None:
 
 
 def test_p0_public_docs_website_seeds_use_canonical_public_docs_roots() -> None:
-    sources_by_seed_id = {str(source["seed_id"]): source for source in P0_PUBLIC_DOCS_SOURCES}
+    sources_by_seed_id = {str(source["seed_id"]): source for source in GOVERNED_PUBLIC_DOCS_SOURCES}
 
     for seed_id in (
         "kustomize-docs",
@@ -6898,7 +6928,9 @@ def test_p0_public_docs_website_seeds_use_canonical_public_docs_roots() -> None:
 
 def test_apache_kafka_seed_uses_version_pinned_canonical_docs_root() -> None:
     kafka = next(
-        source for source in P0_PUBLIC_DOCS_SOURCES if source["seed_id"] == "apache-kafka-docs"
+        source
+        for source in GOVERNED_PUBLIC_DOCS_SOURCES
+        if source["seed_id"] == "apache-kafka-docs"
     )
 
     assert kafka["docs_url"] == "https://kafka.apache.org/43/"
@@ -6965,7 +6997,7 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
     remote_git["seed_registry"][3]["official_docs_uri"] = (
         "git+https://github.com/adapstory/docs.git"
     )
-    with pytest.raises(ValueError, match="git public docs seeds must use git\\+file"):
+    with pytest.raises(ValueError, match="remote git public docs seed URI is invalid"):
         build_public_docs_seed_refresh_plan(remote_git)
 
     missing_robot_policy = _public_docs_seed_refresh_conf()
@@ -7871,9 +7903,9 @@ def test_serp_public_docs_dag_overlays_partial_run_conf_on_default_seed_registry
 
     assert set(plan_handle) == {"planEvidence", "schema", "summary"}
     assert plan["generated_at"] == "2026-07-08T21:30:00Z"
-    assert plan["seed_count"] == len(P0_PUBLIC_DOCS_SOURCES)
+    assert plan["seed_count"] == len(GOVERNED_PUBLIC_DOCS_SOURCES)
     assert {seed["seed_id"] for seed in plan["seed_registry"]} == {
-        str(source["seed_id"]) for source in P0_PUBLIC_DOCS_SOURCES
+        str(source["seed_id"]) for source in GOVERNED_PUBLIC_DOCS_SOURCES
     }
     assert all(
         path.startswith("s3://airflow-serp-evidence/serp-public-docs")
