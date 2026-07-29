@@ -192,7 +192,7 @@ SERP eval DAG contracts:
   closed before execution. Override `dag_run.conf` may still provide tenant id,
   pack id/version, registry resource identity, generated timestamp, a governed
   `seed_registry`, `index_mode` (`evidence-only` or `live`), `embedding_mode`
-  (`deterministic-dev` or `live-gateway`), target store names
+  (`deterministic-dev` or `bc10`), target store names
   (`qdrant_collection`, `opensearch_index`, `neo4j_database`), and either
   `artifact_root_path` or
   `ADAPSTORY_AIRFLOW_ARTIFACT_ROOT`. The seed registry is intentionally limited
@@ -260,7 +260,7 @@ SERP eval DAG contracts:
   upload into silent log truncation or duplicate append fragments.
   The packaged CLI executes the current fetch/parse/chunk/embed/index path
   through the SERP pipeline ports and writes deterministic batch evidence.
-  `index_mode=live` requires `embedding_mode=live-gateway`; evidence-only
+  `index_mode=live` requires `embedding_mode=bc10`; evidence-only
   mode defaults to `deterministic-dev`. The Airflow source contract supports
   env defaults through `ADAPSTORY_SERP_PUBLIC_DOCS_INDEX_MODE`,
   `ADAPSTORY_SERP_PUBLIC_DOCS_EMBEDDING_MODE`,

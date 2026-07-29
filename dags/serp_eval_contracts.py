@@ -330,7 +330,7 @@ _PUBLIC_DOCS_FRESHNESS_STATUSES = frozenset(
     {"failed", "indexed", "never_indexed", "partial_failure", "quarantined"}
 )
 _PUBLIC_DOCS_INDEX_MODES = frozenset({"evidence-only", "live"})
-_PUBLIC_DOCS_EMBEDDING_MODES = frozenset({"deterministic-dev", "live-gateway"})
+_PUBLIC_DOCS_EMBEDDING_MODES = frozenset({"bc10", "deterministic-dev"})
 _PUBLIC_DOCS_LOCALE_PATH_SEGMENT = re.compile(r"^[a-z]{2}(?:-[a-z0-9]{2,8})?$", re.IGNORECASE)
 _PUBLIC_DOCS_DEFAULT_TENANT_ID = "00000000-0000-4000-a000-000000000001"
 _PUBLIC_DOCS_DEFAULT_PACK_ID = "00000000-0000-4000-a000-000000000201"
@@ -12544,13 +12544,13 @@ def _public_docs_index_mode(payload: Mapping[str, Any]) -> str:
 def _public_docs_embedding_mode(payload: Mapping[str, Any], index_mode: str) -> str:
     value = payload.get("embedding_mode", os.environ.get(_PUBLIC_DOCS_EMBEDDING_MODE_ENV))
     if value is None:
-        value = "live-gateway" if index_mode == "live" else "deterministic-dev"
+        value = "bc10" if index_mode == "live" else "deterministic-dev"
     if not isinstance(value, str) or not value.strip():
         raise ValueError("embedding_mode is required")
     if value not in _PUBLIC_DOCS_EMBEDDING_MODES:
         raise ValueError("embedding_mode is unsupported")
-    if index_mode == "live" and value != "live-gateway":
-        raise ValueError("live index mode requires live-gateway embedding mode")
+    if index_mode == "live" and value != "bc10":
+        raise ValueError("live index mode requires bc10 embedding mode")
     return value
 
 

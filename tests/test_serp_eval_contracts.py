@@ -4221,7 +4221,7 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
     assert plan.to_canonical_json() == repeated.to_canonical_json()
     assert plan.payload["dag_id"] == "serp_web_seed_crawl_refresh"
     assert plan.payload["index_mode"] == "live"
-    assert plan.payload["embedding_mode"] == "live-gateway"
+    assert plan.payload["embedding_mode"] == "bc10"
     assert plan.payload["seed_count"] == 4
     assert plan.payload["status"] == "ready_for_public_docs_seed_refresh"
     assert plan.payload["source_type_counts"] == {
@@ -4280,7 +4280,7 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
     )
     assert refresh_plan_artifact["payload"]["status"] == "ready_for_pipeline_dispatch"
     assert refresh_plan_artifact["payload"]["index_mode"] == "live"
-    assert refresh_plan_artifact["payload"]["embedding_mode"] == "live-gateway"
+    assert refresh_plan_artifact["payload"]["embedding_mode"] == "bc10"
     assert refresh_plan_artifact["payload"]["skipped_seed_count"] == 0
     assert refresh_plan_artifact["payload"]["seed_count"] == 9
     assert all(
@@ -4339,7 +4339,7 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
     assert "--index-mode" in cli_spec["argv"]
     assert cli_spec["argv"][cli_spec["argv"].index("--index-mode") + 1] == "live"
     assert "--embedding-mode" in cli_spec["argv"]
-    assert cli_spec["argv"][cli_spec["argv"].index("--embedding-mode") + 1] == "live-gateway"
+    assert cli_spec["argv"][cli_spec["argv"].index("--embedding-mode") + 1] == "bc10"
     assert cli_spec["argv"][cli_spec["argv"].index("--qdrant-collection") + 1] == "serp_vectors_dev"
     assert cli_spec["argv"][cli_spec["argv"].index("--opensearch-index") + 1] == "serp_lexical_dev"
     assert cli_spec["argv"][cli_spec["argv"].index("--neo4j-database") + 1] == "serp_graph_dev"
@@ -5510,14 +5510,14 @@ def test_public_docs_seed_refresh_dispatches_live_index_mode(tmp_path: Path) -> 
     cli_spec = dispatch_public_docs_seed_refresh_handoff(plan.to_canonical_json())
 
     assert plan.payload["index_mode"] == "live"
-    assert plan.payload["embedding_mode"] == "live-gateway"
+    assert plan.payload["embedding_mode"] == "bc10"
     assert plan.payload["qdrant_collection"] == "serp_vectors_prod"
     assert plan.payload["opensearch_index"] == "serp_lexical_prod"
     assert plan.payload["neo4j_database"] == "neo4j"
     assert refresh_plan_artifact["payload"]["index_mode"] == "live"
-    assert refresh_plan_artifact["payload"]["embedding_mode"] == "live-gateway"
+    assert refresh_plan_artifact["payload"]["embedding_mode"] == "bc10"
     assert cli_spec["argv"][cli_spec["argv"].index("--index-mode") + 1] == "live"
-    assert cli_spec["argv"][cli_spec["argv"].index("--embedding-mode") + 1] == "live-gateway"
+    assert cli_spec["argv"][cli_spec["argv"].index("--embedding-mode") + 1] == "bc10"
     assert (
         cli_spec["argv"][cli_spec["argv"].index("--qdrant-collection") + 1] == "serp_vectors_prod"
     )
@@ -7024,7 +7024,7 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
     live_with_dev_embedding = _public_docs_seed_refresh_conf()
     live_with_dev_embedding["index_mode"] = "live"
     live_with_dev_embedding["embedding_mode"] = "deterministic-dev"
-    with pytest.raises(ValueError, match="live index mode requires live-gateway"):
+    with pytest.raises(ValueError, match="live index mode requires bc10"):
         build_public_docs_seed_refresh_plan(live_with_dev_embedding)
 
     unsafe_store_name = _public_docs_seed_refresh_conf()
