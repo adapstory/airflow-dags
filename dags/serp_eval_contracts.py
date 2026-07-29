@@ -87,6 +87,24 @@ PIPELINE_RETIRED_PACK_CLEANUP_CLI_MODULE = (
 _RESOURCE_TYPES = frozenset({"pack", "tenant", "workflow"})
 _GATEWAY_CLI_CONTRACT_VERSION = "serp-airflow-gateway-cli-bridge/v1"
 _PIPELINE_CLI_CONTRACT_VERSION = "serp-airflow-pipeline-cli-bridge/v1"
+_PIPELINE_REMEDIATION_TARGETS = {
+    "public_docs_seed_refresh_pipeline": (
+        "serp-public-docs-d20",
+        "serp-public-docs-d20",
+    ),
+    "public_docs_publish_activation_handoff": (
+        "serp-public-docs-d5",
+        "serp-public-docs-d5",
+    ),
+    "public_docs_publish_activation_submit": (
+        "serp-public-docs-d5",
+        "serp-public-docs-d5",
+    ),
+    "public_docs_retired_pack_cleanup": (
+        "serp-public-docs-d5",
+        "serp-public-docs-d5",
+    ),
+}
 _AIRFLOW_ARTIFACT_CONTRACT_VERSION = "serp-airflow-artifact-writer/v1"
 _EVAL_CONTRACT_VERSION = "2026.07.2"
 _METRIC_COMPATIBILITY_CONTRACT_VERSION = "serp-suite-metric-compatibility/v1"
@@ -7983,14 +8001,19 @@ def _write_pipeline_cli_failure_receipt(
     stderr: str,
 ) -> str:
     failure_artifact_path = _pipeline_cli_failure_artifact_path(stdout_path)
+    task_id = _required_str(spec, "task_id")
+    remediation_target = _PIPELINE_REMEDIATION_TARGETS.get(task_id)
+    if remediation_target is None:
+        raise ValueError("pipeline CLI task has no remediation policy")
+    component, repair_policy_id = remediation_target
     payload = build_pipeline_cli_failure_event(
-        component="serp-public-docs-d20",
+        component=component,
         evidence_uri=failure_artifact_path,
         operation_id=_required_str(spec, "operation_id"),
-        repair_policy_id="serp-public-docs-d20",
+        repair_policy_id=repair_policy_id,
         returncode=returncode,
         stderr=stderr,
-        task_id=_required_str(spec, "task_id"),
+        task_id=task_id,
     )
     _reject_raw_secrets(payload)
     _write_json_artifact(failure_artifact_path, payload)

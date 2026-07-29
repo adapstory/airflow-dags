@@ -2433,6 +2433,46 @@ def test_execute_pipeline_cli_spec_persists_redacted_failure_receipt(
     assert "json-secret-token" not in json.dumps(receipt, sort_keys=True)
 
 
+def test_execute_pipeline_cli_spec_routes_d5_failure_to_d5_repair_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    input_path = tmp_path / "public-docs-publish-request.json"
+    output_path = tmp_path / "public-docs-publish-receipt.json"
+    input_path.write_text("{}", encoding="utf-8")
+
+    class Result:
+        returncode = 2
+        stdout = ""
+        stderr = "TypeError: publish activation contract mismatch"
+
+    monkeypatch.setattr(
+        "dags.serp_eval_contracts.subprocess.run", lambda *_args, **_kwargs: Result()
+    )
+
+    with pytest.raises(ValueError, match="failure_artifact_path="):
+        execute_pipeline_cli_spec(
+            {
+                "argv": ["python", "-m", "publish_activation_cli"],
+                "contract_version": "serp-airflow-pipeline-cli-bridge/v1",
+                "dag_id": "serp_publish_signed_pack",
+                "input_paths": [str(input_path)],
+                "operation_id": "d5-op-1",
+                "status": "ready_for_pipeline_cli_runner",
+                "stdout_path": str(output_path),
+                "task_id": "public_docs_publish_activation_submit",
+                "tenant_id": TENANT_ID,
+            }
+        )
+
+    receipt = json.loads(
+        (tmp_path / "public-docs-publish-receipt.failure.json").read_text(encoding="utf-8")
+    )
+    assert receipt["component"] == "serp-public-docs-d5"
+    assert receipt["repair_policy_id"] == "serp-public-docs-d5"
+    assert receipt["task_id"] == "public_docs_publish_activation_submit"
+
+
 def test_execute_pipeline_cli_spec_persists_failure_receipt_to_s3(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
