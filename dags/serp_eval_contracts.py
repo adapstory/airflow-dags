@@ -19,7 +19,7 @@ from tempfile import TemporaryDirectory
 from time import perf_counter, sleep
 from typing import Any, NoReturn, cast
 from urllib.error import HTTPError, URLError
-from urllib.parse import ParseResult, parse_qsl, unquote, urlparse
+from urllib.parse import ParseResult, parse_qsl, unquote, urlencode, urlparse
 from urllib.request import ProxyHandler, Request, build_opener, urlopen
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -28,6 +28,9 @@ from adapstory_serp_pipeline.benchmark.ds1000_contract import (
     normalize_ds1000_base_image_provenance,
 )
 from adapstory_serp_pipeline.benchmark.native_suite_scoring import suite_metric_profile
+from adapstory_serp_pipeline.contracts.source_policy import (
+    normalize_public_docs_source_policy,
+)
 from adapstory_serp_pipeline.orchestration.remediation_event import (
     build_pipeline_cli_failure_event,
 )
@@ -4321,6 +4324,9 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
     previous_active_pack_version_id = _optional_previous_active_pack_version_id(payload)
     if previous_active_pack_version_id == str(pack_version_id):
         raise ValueError("previous_active_pack_version_id must not equal candidate pack_version_id")
+    canary_rollout_mode = (
+        "continuous" if previous_active_pack_version_id is not None else "bootstrap"
+    )
     qdrant_collection = _public_docs_store_name(
         payload,
         "qdrant_collection",
@@ -4379,6 +4385,17 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
                     "public-docs-publish-activation-receipt.json",
                 ),
                 (
+                    "public_docs_resolved_activation_request",
+                    "public-docs-resolved-activation-request.json",
+                ),
+                ("public_docs_canary_shadow_receipt", "public-docs-canary-shadow.json"),
+                ("public_docs_canary_5_receipt", "public-docs-canary-5.json"),
+                ("public_docs_canary_25_receipt", "public-docs-canary-25.json"),
+                ("public_docs_canary_ready_receipt", "public-docs-canary-ready.json"),
+                ("public_docs_canary_rollback_receipt", "public-docs-canary-rollback.json"),
+                ("public_docs_canary_5_golden", "public-docs-canary-5-golden.json"),
+                ("public_docs_canary_25_golden", "public-docs-canary-25-golden.json"),
+                (
                     "public_docs_search_serve_smoke",
                     "public-docs-search-serve-smoke.json",
                 ),
@@ -4406,6 +4423,7 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
         ),
         "benchmark_gate_export_sha256": benchmark_gate_export_sha256,
         "bc21_base_url": _required_bc21_base_url(payload),
+        "canary_rollout_mode": canary_rollout_mode,
         "dag_id": "serp_publish_signed_pack",
         "evidence_bundle_id": str(evidence_bundle_id),
         "evidence_seal_hash": evidence_seal_hash,
@@ -4448,6 +4466,21 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
                 "validate_publish_signed_pack_plan",
                 "dispatch_publish_activation_handoff",
                 "run_publish_activation_handoff",
+                "dispatch_public_docs_canary_resolve",
+                "resolve_publish_activation_approval",
+                "select_public_docs_canary_path",
+                "start_public_docs_bootstrap_shadow",
+                "mark_public_docs_bootstrap_ready",
+                "start_public_docs_canary_shadow",
+                "start_public_docs_canary_5",
+                "wait_public_docs_canary_5_window",
+                "run_public_docs_canary_5_golden",
+                "rollback_public_docs_canary_5_failure",
+                "start_public_docs_canary_25",
+                "wait_public_docs_canary_25_window",
+                "run_public_docs_canary_25_golden",
+                "rollback_public_docs_canary_25_failure",
+                "mark_public_docs_canary_ready",
                 "dispatch_publish_activation_submit",
                 "submit_publish_activation_to_bc21",
                 "verify_public_docs_search_serve",
@@ -4652,6 +4685,14 @@ def load_public_docs_crawl_state_conf(conf: Mapping[str, Any]) -> dict[str, Any]
             seed["freshness_state"] = _public_docs_freshness_state(
                 {"freshness_state": freshness_state}
             )
+            source_snapshot = _validated_public_docs_source_snapshot(
+                _required_mapping(persisted_seed, "source_snapshot")
+            )
+            if source_snapshot["source_id"] != _required_str(seed, "source_id"):
+                raise ValueError("public docs crawl-state snapshot source_id must match seed")
+            metadata = dict(_required_mapping(seed, "metadata"))
+            metadata["previous_source_snapshot"] = source_snapshot
+            seed["metadata"] = metadata
         hydrated_registry.append(seed)
     return {
         **payload,
@@ -4680,7 +4721,25 @@ def _recover_public_docs_active_pack_from_bc21(
 
     tenant_id = str(_required_uuid(payload, "tenant_id"))
     pack_id = str(_required_uuid(payload, "pack_id"))
-    endpoint = bc21_base_url.rstrip("/") + f"/api/bc-21/serp/v1/packs/{pack_id}/active-version"
+    route_key = str(
+        uuid5(
+            _PUBLIC_DOCS_NAMESPACE,
+            "\n".join(
+                (
+                    "public-docs-active-pack-recovery/v1",
+                    tenant_id,
+                    pack_id,
+                    _required_datetime_string(payload, "generated_at"),
+                )
+            ),
+        )
+    )
+    endpoint = (
+        bc21_base_url.rstrip("/")
+        + f"/api/bc-21/serp/v1/packs/{pack_id}/active-version"
+        + "?"
+        + urlencode({"routeKey": route_key})
+    )
     response = _bc21_json_request(
         endpoint,
         method="GET",
@@ -7445,6 +7504,7 @@ def write_public_docs_search_serve_smoke_artifact(
 
 def write_public_docs_retrieval_golden_artifact(
     plan_json: Mapping[str, Any] | str,
+    canary_phase: str | None = None,
 ) -> dict[str, Any]:
     """Run the governed public-docs retrieval acceptance set against the live MCP API."""
 
@@ -7452,34 +7512,63 @@ def write_public_docs_retrieval_golden_artifact(
     _reject_raw_secrets(plan)
     if _required_str(plan, "dag_id") != "serp_publish_signed_pack":
         raise ValueError("plan dag_id does not match public docs retrieval golden runner")
-    artifact_paths = _required_artifact_paths(
-        plan,
-        (
-            "public_docs_publish_activation_receipt",
-            "public_docs_retrieval_golden",
-        ),
+    if canary_phase not in {None, "canary-5", "canary-25"}:
+        raise ValueError("public docs retrieval golden canary_phase is unsupported")
+    receipt_key = (
+        "public_docs_publish_activation_receipt"
+        if canary_phase is None
+        else f"public_docs_canary_{canary_phase.removeprefix('canary-')}_receipt"
     )
-    receipt = _read_json_file(
-        artifact_paths["public_docs_publish_activation_receipt"],
-        "public_docs_publish_activation_receipt",
+    output_key = (
+        "public_docs_retrieval_golden"
+        if canary_phase is None
+        else f"public_docs_canary_{canary_phase.removeprefix('canary-')}_golden"
     )
+    artifact_paths = _required_artifact_paths(plan, (receipt_key, output_key))
+    receipt = _read_json_file(artifact_paths[receipt_key], receipt_key)
     expected_pack_version_id = _required_str(plan, "pack_version_id")
-    if _required_str(receipt, "active_pack_version_id") != expected_pack_version_id:
-        raise ValueError("retrieval golden requires the candidate pack to be active")
+    if canary_phase is None:
+        if _required_str(receipt, "active_pack_version_id") != expected_pack_version_id:
+            raise ValueError("retrieval golden requires the candidate pack to be active")
+    else:
+        if _required_str(receipt, "phase") != canary_phase:
+            raise ValueError("retrieval golden canary receipt phase mismatch")
+        response = _required_mapping(receipt, "response")
+        if _required_str(response, "candidatePackVersionId") != expected_pack_version_id:
+            raise ValueError("retrieval golden canary candidate pack mismatch")
     refresh_plan = _read_public_docs_refresh_plan_for_d5(plan)
+    refresh_result_path = _artifact_path(
+        "public_docs_seed_refresh_result_path",
+        _required_str(plan, "public_docs_seed_refresh_result_path"),
+    )
     refresh_result = _read_json_file(
-        _artifact_path(
-            "public_docs_seed_refresh_result_path",
-            _required_str(plan, "public_docs_seed_refresh_result_path"),
-        ),
+        refresh_result_path,
         "public_docs_seed_refresh_result",
     )
+    _, source_manifest_sha256 = _public_docs_activated_source_snapshots(
+        refresh_result,
+        expected_pack_version_id=_required_str(plan, "pack_version_id"),
+    )
+    if canary_phase is None:
+        if _required_sha256_prefixed(receipt, "source_manifest_sha256") != source_manifest_sha256:
+            raise ValueError("activation receipt source manifest must match refresh result")
+    else:
+        resolved_path = _required_artifact_paths(
+            plan, ("public_docs_resolved_activation_request",)
+        )["public_docs_resolved_activation_request"]
+        resolved = _read_json_file(resolved_path, "public_docs_resolved_activation_request")
+        resolved_body = _required_mapping(_required_mapping(resolved, "submission"), "body")
+        if (
+            _required_sha256_prefixed(resolved_body, "sourceManifestSha256")
+            != source_manifest_sha256
+        ):
+            raise ValueError("canary source manifest must match refresh result")
     cases = _public_docs_retrieval_golden_cases(refresh_plan, refresh_result=refresh_result)
     endpoint = _public_docs_search_serve_base_url(plan) + "/api/serp/search/v1/query"
     observed_cases: list[dict[str, Any]] = []
     latency_seconds: list[float] = []
     for case in cases:
-        request = _public_docs_search_request_for_golden_case(plan, case)
+        request = _public_docs_search_request_for_golden_case(plan, case, canary_phase=canary_phase)
         first_started_at = perf_counter()
         first_response = _post_json(endpoint, request, attempts=3, retry_statuses=(503,))
         latency_seconds.append(perf_counter() - first_started_at)
@@ -7516,8 +7605,9 @@ def write_public_docs_retrieval_golden_artifact(
         "operation_id": _required_str(plan, "operation_id"),
         "status": "passed",
         "tenant_id": _required_str(plan, "tenant_id"),
+        **({"canary_phase": canary_phase} if canary_phase is not None else {}),
     }
-    artifact_path = artifact_paths["public_docs_retrieval_golden"]
+    artifact_path = artifact_paths[output_key]
     _write_json_artifact(artifact_path, payload)
     _emit_public_docs_operational_gauge("retrieval_golden_p95_seconds", p95)
     _emit_public_docs_operational_gauge("retrieval_golden_passed", 1)
@@ -7773,6 +7863,23 @@ def write_public_docs_crawl_state_artifact(
         _required_str(plan, "public_docs_seed_refresh_plan_path"),
     )
     refresh_plan = _read_public_docs_refresh_plan_for_d5(plan)
+    refresh_result_path = _artifact_path(
+        "public_docs_seed_refresh_result_path",
+        _required_str(plan, "public_docs_seed_refresh_result_path"),
+    )
+    refresh_result = _read_json_file(
+        refresh_result_path,
+        "public_docs_seed_refresh_result",
+    )
+    source_snapshots, source_manifest_sha256 = _public_docs_activated_source_snapshots(
+        refresh_result,
+        expected_pack_version_id=_required_str(plan, "pack_version_id"),
+    )
+    if (
+        _required_sha256_prefixed(activation_receipt, "source_manifest_sha256")
+        != source_manifest_sha256
+    ):
+        raise ValueError("activation receipt source manifest must match refresh result")
     crawl_state_path = _public_docs_crawl_state_path(
         plan,
         _required_artifact_root_path(plan),
@@ -7782,6 +7889,7 @@ def write_public_docs_crawl_state_artifact(
         refresh_plan=refresh_plan,
         coverage_proof=coverage_proof,
         activation_receipt=activation_receipt,
+        source_snapshots=source_snapshots,
     )
     _write_json_artifact(crawl_state_path, state_payload)
     commit_payload = {
@@ -7793,6 +7901,8 @@ def write_public_docs_crawl_state_artifact(
         "generated_at": _required_datetime_string(plan, "generated_at"),
         "operation_id": _required_str(plan, "operation_id"),
         "refresh_plan_path": refresh_plan_path,
+        "refresh_result_path": refresh_result_path,
+        "source_manifest_sha256": source_manifest_sha256,
         "state_sha256": sha256(_canonical_json(state_payload).encode("utf-8")).hexdigest(),
         "status": "committed",
         "tenant_id": _required_str(plan, "tenant_id"),
@@ -7813,6 +7923,7 @@ def _public_docs_crawl_state_payload(
     refresh_plan: Mapping[str, Any],
     coverage_proof: Mapping[str, Any],
     activation_receipt: Mapping[str, Any],
+    source_snapshots: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
     registry = _public_docs_seed_registry_from_refresh_plan(refresh_plan)
     coverage_by_seed: dict[str, Mapping[str, Any]] = {}
@@ -7853,8 +7964,12 @@ def _public_docs_crawl_state_payload(
                 "status": "indexed",
             }
         )
+        selected_snapshot = _required_mapping(source_snapshots, seed_id)
+        if _required_str(selected_snapshot, "source_id") != _required_str(seed, "source_id"):
+            raise ValueError("source manifest snapshot source_id must match refresh seed")
         state_seeds[seed_id] = {
-            "freshness_state": _public_docs_freshness_state({"freshness_state": freshness_state})
+            "freshness_state": _public_docs_freshness_state({"freshness_state": freshness_state}),
+            "source_snapshot": dict(selected_snapshot),
         }
     return {
         "active_pack_version_id": _required_str(activation_receipt, "active_pack_version_id"),
@@ -7866,6 +7981,70 @@ def _public_docs_crawl_state_payload(
         "tenant_id": _required_str(plan, "tenant_id"),
         "updated_at": generated_at,
     }
+
+
+def _public_docs_activated_source_snapshots(
+    refresh_result: Mapping[str, Any],
+    *,
+    expected_pack_version_id: str,
+) -> tuple[dict[str, dict[str, Any]], str]:
+    manifest = _required_mapping(refresh_result, "source_manifest")
+    manifest_sha256 = _required_sha256_prefixed(refresh_result, "source_manifest_sha256")
+    actual_sha256 = "sha256:" + sha256(_canonical_json(manifest).encode("utf-8")).hexdigest()
+    if manifest_sha256 != actual_sha256:
+        raise ValueError("source manifest digest does not match refresh result")
+    if _required_str(manifest, "contract_version") != "PublicDocsSourceManifest/v1":
+        raise ValueError("source manifest contract_version is unsupported")
+    if _required_str(manifest, "candidate_pack_version_id") != expected_pack_version_id:
+        raise ValueError("source manifest pack version must match activation")
+    if _required_str(manifest, "activation_status") not in {"ready", "ready_degraded"}:
+        raise ValueError("source manifest must be ready before crawl-state commit")
+    snapshots: dict[str, dict[str, Any]] = {}
+    for raw_entry in _required_object_list(manifest, "entries"):
+        seed_id = _required_seed_id(raw_entry)
+        if seed_id in snapshots:
+            raise ValueError("source manifest contains duplicate seed_id")
+        snapshot = _validated_public_docs_source_snapshot(
+            _required_mapping(raw_entry, "selected_snapshot")
+        )
+        if snapshot["pack_version_id"] != expected_pack_version_id:
+            raise ValueError("source manifest snapshot pack version must match activation")
+        snapshots[seed_id] = snapshot
+    if not snapshots:
+        raise ValueError("source manifest must contain selected snapshots")
+    return snapshots, manifest_sha256
+
+
+def _validated_public_docs_source_snapshot(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    expected_fields = {
+        "acquired_at",
+        "chunk_ids",
+        "content_sha256",
+        "contract_version",
+        "evidence_uri",
+        "pack_version_id",
+        "snapshot_id",
+        "source_id",
+    }
+    if set(value) != expected_fields:
+        raise ValueError("public docs source snapshot fields are unsupported")
+    if _required_str(value, "contract_version") != "ImmutablePublicDocsSourceSnapshot/v1":
+        raise ValueError("public docs source snapshot contract_version is unsupported")
+    snapshot: dict[str, Any] = {
+        "acquired_at": _required_datetime_string(value, "acquired_at"),
+        "chunk_ids": _required_str_list(value, "chunk_ids"),
+        "content_sha256": _required_sha256_prefixed(value, "content_sha256"),
+        "contract_version": "ImmutablePublicDocsSourceSnapshot/v1",
+        "evidence_uri": _required_str(value, "evidence_uri"),
+        "pack_version_id": str(_required_uuid(value, "pack_version_id")),
+        "snapshot_id": _required_sha256_prefixed(value, "snapshot_id"),
+        "source_id": str(_required_uuid(value, "source_id")),
+    }
+    if not snapshot["evidence_uri"].startswith("s3://airflow-serp-evidence/serp-evals/"):
+        raise ValueError("public docs source snapshot evidence_uri is not governed")
+    return snapshot
 
 
 def write_online_eval_rollup_plan_artifact(
@@ -9865,6 +10044,187 @@ def build_public_docs_publish_activation_submit_cli_spec(
     }
 
 
+def build_public_docs_canary_resolve_cli_spec(
+    plan_json: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    artifact_paths = _required_artifact_paths(
+        plan,
+        (
+            "public_docs_publish_activation_request",
+            "public_docs_resolved_activation_request",
+        ),
+    )
+    request_path = _artifact_path(
+        "public_docs_publish_activation_request",
+        artifact_paths["public_docs_publish_activation_request"],
+    )
+    _read_json_file(request_path, "public_docs_publish_activation_request")
+    output_path = artifact_paths["public_docs_resolved_activation_request"]
+    return {
+        "actor_id": _required_str(plan, "actor_id"),
+        "argv": [
+            GATEWAY_CLI_PYTHON,
+            "-m",
+            PIPELINE_PUBLISH_ACTIVATION_CLI_MODULE,
+            "resolve",
+            "--publish-activation-request",
+            request_path,
+            "--resolved-activation-output",
+            output_path,
+            "--bc21-base-url",
+            _required_bc21_base_url(plan),
+        ],
+        "contract_version": _PIPELINE_CLI_CONTRACT_VERSION,
+        "dag_id": "serp_publish_signed_pack",
+        "input_paths": [request_path],
+        "operation_id": _required_str(plan, "operation_id"),
+        "plan_sha256": sha256(_canonical_json(plan).encode("utf-8")).hexdigest(),
+        "status": "ready_for_pipeline_cli_runner",
+        "stdout_path": output_path,
+        "task_id": "public_docs_canary_resolve",
+        "tenant_id": _required_str(plan, "tenant_id"),
+    }
+
+
+def execute_public_docs_canary_transition(
+    plan_json: Mapping[str, Any] | str,
+    target_phase: str,
+) -> dict[str, Any]:
+    from adapstory_serp_pipeline.registry.public_docs_canary_transition import (
+        build_public_docs_canary_transition_submission,
+        submit_public_docs_canary_transition,
+    )
+
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    phase_contract = {
+        "bootstrap-shadow": (
+            "benchmark_gate_export_sha256",
+            "public_docs_canary_shadow_receipt",
+        ),
+        "bootstrap-ready": (
+            "benchmark_gate_export_sha256",
+            "public_docs_canary_ready_receipt",
+        ),
+        "shadow": ("benchmark_gate_export_sha256", "public_docs_canary_shadow_receipt"),
+        "canary-5": ("benchmark_gate_export_sha256", "public_docs_canary_5_receipt"),
+        "canary-25": ("public_docs_canary_5_golden", "public_docs_canary_25_receipt"),
+        "ready": ("public_docs_canary_25_golden", "public_docs_canary_ready_receipt"),
+    }
+    if target_phase not in phase_contract:
+        raise ValueError("public docs canary target phase is unsupported")
+    gate_source, receipt_key = phase_contract[target_phase]
+    artifact_paths = _required_artifact_paths(
+        plan,
+        ("public_docs_resolved_activation_request", receipt_key),
+    )
+    resolved = _read_json_file(
+        artifact_paths["public_docs_resolved_activation_request"],
+        "public_docs_resolved_activation_request",
+    )
+    if gate_source == "benchmark_gate_export_sha256":
+        gate_evidence_sha256 = _required_sha256_prefixed(plan, gate_source)
+    else:
+        gate_path = _required_artifact_paths(plan, (gate_source,))[gate_source]
+        gate_payload = _read_json_file(gate_path, gate_source)
+        if _required_str(gate_payload, "status") != "passed":
+            raise ValueError("public docs canary gate artifact did not pass")
+        gate_evidence_sha256 = (
+            "sha256:" + sha256(_canonical_json(gate_payload).encode("utf-8")).hexdigest()
+        )
+    previous_pack_version_id = _optional_previous_active_pack_version_id(plan)
+    bootstrap_phase = target_phase.startswith("bootstrap-")
+    if bootstrap_phase != (previous_pack_version_id is None):
+        raise ValueError(
+            "public docs bootstrap canary phases require no last-known-good and "
+            "continuous canary phases require one"
+        )
+    transition = build_public_docs_canary_transition_submission(
+        resolved,
+        last_known_good_pack_version_id=(
+            UUID(previous_pack_version_id) if previous_pack_version_id is not None else None
+        ),
+        target_phase=target_phase,
+        evaluated_at=datetime.now(UTC),
+        gate_evidence_sha256=gate_evidence_sha256,
+    )
+    receipt = submit_public_docs_canary_transition(
+        transition,
+        bc21_base_url=_required_bc21_base_url(plan),
+    )
+    receipt_path = artifact_paths[receipt_key]
+    _write_json_artifact(receipt_path, receipt)
+    return _artifact_result(
+        receipt_path,
+        artifact_type="public_docs_canary_transition_receipt",
+        operation_id=_required_str(plan, "operation_id"),
+        payload=receipt,
+    )
+
+
+def execute_public_docs_canary_rollback(
+    plan_json: Mapping[str, Any] | str,
+    failed_phase: str,
+) -> dict[str, Any]:
+    from adapstory_serp_pipeline.registry.public_docs_canary_transition import (
+        build_public_docs_canary_transition_submission,
+        submit_public_docs_canary_transition,
+    )
+
+    if failed_phase not in {"canary-5", "canary-25"}:
+        raise ValueError("public docs canary rollback failed_phase is unsupported")
+    plan = _json_object(plan_json, "plan_json")
+    artifact_paths = _required_artifact_paths(
+        plan,
+        (
+            "public_docs_resolved_activation_request",
+            "public_docs_canary_rollback_receipt",
+        ),
+    )
+    resolved = _read_json_file(
+        artifact_paths["public_docs_resolved_activation_request"],
+        "public_docs_resolved_activation_request",
+    )
+    previous_pack_version_id = _optional_previous_active_pack_version_id(plan)
+    if previous_pack_version_id is None:
+        raise ValueError("public docs canary rollback requires last-known-good")
+    gate_evidence_sha256 = (
+        "sha256:"
+        + sha256(
+            _canonical_json(
+                {
+                    "failedPhase": failed_phase,
+                    "operationId": _required_str(plan, "operation_id"),
+                    "reason": "retrieval_golden_failed",
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+    )
+    transition = build_public_docs_canary_transition_submission(
+        resolved,
+        last_known_good_pack_version_id=UUID(previous_pack_version_id),
+        target_phase="rolled-back",
+        failed_phase=failed_phase,
+        evaluated_at=datetime.now(UTC),
+        gate_evidence_sha256=gate_evidence_sha256,
+        citation_correctness=False,
+    )
+    receipt = submit_public_docs_canary_transition(
+        transition,
+        bc21_base_url=_required_bc21_base_url(plan),
+    )
+    receipt_path = artifact_paths["public_docs_canary_rollback_receipt"]
+    _write_json_artifact(receipt_path, receipt)
+    return _artifact_result(
+        receipt_path,
+        artifact_type="public_docs_canary_transition_receipt",
+        operation_id=_required_str(plan, "operation_id"),
+        payload=receipt,
+    )
+
+
 def build_public_docs_retired_pack_cleanup_cli_spec(
     plan_json: Mapping[str, Any] | str,
 ) -> dict[str, Any]:
@@ -10143,17 +10503,31 @@ def _public_docs_retrieval_golden_case(
 
 
 def _public_docs_search_request_for_golden_case(
-    plan: Mapping[str, Any], case: Mapping[str, Any]
+    plan: Mapping[str, Any],
+    case: Mapping[str, Any],
+    *,
+    canary_phase: str | None = None,
 ) -> dict[str, Any]:
     request = _public_docs_search_serve_smoke_request(plan)
     case_id = _required_str(case, "case_id")
     expected = _required_mapping(case, "expected")
-    request["request_id"] = str(
-        uuid5(
-            _PUBLIC_DOCS_NAMESPACE,
-            "public-docs-retrieval-golden:" + _required_str(plan, "operation_id") + ":" + case_id,
+    if canary_phase is None:
+        request["request_id"] = str(
+            uuid5(
+                _PUBLIC_DOCS_NAMESPACE,
+                "public-docs-retrieval-golden:"
+                + _required_str(plan, "operation_id")
+                + ":"
+                + case_id,
+            )
         )
-    )
+    else:
+        request["request_id"] = _public_docs_candidate_canary_request_id(
+            rollout_id=_required_str(plan, "activation_idempotency_key"),
+            operation_id=_required_str(plan, "operation_id"),
+            case_id=case_id,
+            phase=canary_phase,
+        )
     request["query"] = _required_str(case, "query")
     request["metadata"] = {
         **_required_mapping(request, "metadata"),
@@ -10163,6 +10537,31 @@ def _public_docs_search_request_for_golden_case(
     }
     request["policy_rule_ids_applied"] = ["serp-public-docs-active-pack-retrieval-golden"]
     return request
+
+
+def _public_docs_candidate_canary_request_id(
+    *,
+    rollout_id: str,
+    operation_id: str,
+    case_id: str,
+    phase: str,
+) -> str:
+    traffic_percent = {"canary-5": 5, "canary-25": 25}.get(phase)
+    if traffic_percent is None:
+        raise ValueError("candidate canary request phase is unsupported")
+    UUID(rollout_id)
+    for nonce in range(100_000):
+        request_id = str(
+            uuid5(
+                _PUBLIC_DOCS_NAMESPACE,
+                f"public-docs-canary:{operation_id}:{phase}:{case_id}:{nonce}",
+            )
+        )
+        digest = sha256(f"{rollout_id}\n{request_id}".encode()).digest()
+        bucket = int.from_bytes(digest[:4], byteorder="big", signed=False) % 10_000
+        if bucket < traffic_percent * 100:
+            return request_id
+    raise RuntimeError("unable to derive deterministic candidate canary request id")
 
 
 def _public_docs_source_uri_matches_expected_docs_root(
@@ -10852,9 +11251,11 @@ def _public_docs_source_fetch_request(
             "crawl_policy": dict(_required_mapping(seed, "crawl_policy")),
             "inventory_evidence": dict(_required_mapping(seed, "inventory_evidence")),
             "license": dict(_required_mapping(seed, "license")),
+            "priority": _required_str(_required_mapping(seed, "metadata"), "priority"),
             "frontier": dict(_required_mapping(seed, "frontier")),
             "refresh_policy": dict(_required_mapping(seed, "refresh_policy")),
             "refresh_selection": dict(_required_mapping(seed, "refresh_selection")),
+            "source_policy": dict(_required_mapping(seed, "source_policy")),
         }
     )
     return {
@@ -11768,6 +12169,7 @@ def _default_public_docs_seed_registry() -> list[dict[str, Any]]:
             releases_url=str(source["releases_url"]),
             repo_url=str(source["repo_url"]),
             robots_cache_max_hours=int(source["robots_cache_max_hours"]),
+            source_policy=_default_public_docs_source_policy(source),
             suggested_ingest_modes=tuple(str(value) for value in source["suggested_ingest_modes"]),
             version=str(source.get("version", "catalog@2026-07-08")),
         )
@@ -11785,6 +12187,7 @@ def _default_public_docs_seed(
     releases_url: str,
     repo_url: str,
     robots_cache_max_hours: int,
+    source_policy: Mapping[str, Any],
     suggested_ingest_modes: Sequence[str],
     version: str,
     frontier_urls: Sequence[str] = (),
@@ -11849,6 +12252,7 @@ def _default_public_docs_seed(
             "max_age_hours": 24,
         },
         "seed_id": seed_id,
+        "source_policy": dict(source_policy),
         "source_id": str(uuid5(NAMESPACE_URL, f"adapstory-serp-public-docs:{seed_id}")),
         "source_type": source_type,
         "source_uri": source_uri,
@@ -11878,6 +12282,7 @@ def _public_docs_seed(
     metadata = seed.get("metadata", {})
     if not isinstance(metadata, Mapping):
         raise ValueError("metadata must be an object")
+    source_policy = _public_docs_source_policy(seed)
     return {
         "approved": _required_public_docs_approved(seed),
         "connector_name": _required_public_docs_connector_name(seed, source_type),
@@ -11890,10 +12295,37 @@ def _public_docs_seed(
         "official_docs_uri": official_docs_uri,
         "refresh_policy": refresh_policy,
         "seed_id": seed_id,
+        "source_policy": source_policy,
         "source_id": source_id,
         "source_type": source_type,
         "source_uri": source_uri,
     }
+
+
+def _default_public_docs_source_policy(source: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "authority_kind": str(source["authority_kind"]),
+        "capability_coverage": list(source["capability_coverage"]),
+        "freshness": {
+            "hard_limit_hours": int(source["freshness_hard_limit_hours"]),
+            "warning_hours": int(source["freshness_warning_hours"]),
+        },
+        "knowledge_scope": str(source["knowledge_scope"]),
+        "original_language": str(source["original_language"]),
+        "owners": {
+            "legal_owner": str(source["legal_owner"]),
+            "platform_owner": str(source["platform_owner"]),
+            "privacy_owner": str(source["privacy_owner"]),
+            "security_owner": str(source["security_owner"]),
+            "source_steward": str(source["source_steward"]),
+        },
+        "schema": "PublicDocsSourcePolicy/v1",
+        "version_scope": str(source["version_scope"]),
+    }
+
+
+def _public_docs_source_policy(seed: Mapping[str, Any]) -> dict[str, Any]:
+    return normalize_public_docs_source_policy(seed.get("source_policy"))
 
 
 def _required_seed_id(seed: Mapping[str, Any]) -> str:

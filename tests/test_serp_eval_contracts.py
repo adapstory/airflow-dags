@@ -16,7 +16,7 @@ from pathlib import Path
 from threading import Barrier
 from typing import Any, ClassVar, cast
 from urllib.error import HTTPError
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from urllib.request import Request
 from uuid import UUID
 
@@ -94,6 +94,23 @@ def _canonical_sha256(value: Mapping[str, Any]) -> str:
         "sha256:"
         + sha256(serp_eval_contracts_module._canonical_json(value).encode("utf-8")).hexdigest()
     )
+
+
+def _public_docs_source_snapshot(
+    *,
+    source_id: str,
+    pack_version_id: str = PACK_VERSION_ID,
+) -> dict[str, Any]:
+    return {
+        "acquired_at": "2026-07-09T21:00:00Z",
+        "chunk_ids": ["chunk-example-docs"],
+        "content_sha256": "sha256:" + "b" * 64,
+        "contract_version": "ImmutablePublicDocsSourceSnapshot/v1",
+        "evidence_uri": ("s3://airflow-serp-evidence/serp-evals/public-docs/example-docs.json"),
+        "pack_version_id": pack_version_id,
+        "snapshot_id": "sha256:" + "c" * 64,
+        "source_id": source_id,
+    }
 
 
 def _complete_v4_wheelhouse_manifest(
@@ -4389,6 +4406,7 @@ def test_public_docs_seed_registry_allows_url_keys_but_rejects_secret_fields(
 def test_public_docs_crawl_state_conf_overlays_persisted_state(tmp_path: Path) -> None:
     conf = _public_docs_seed_refresh_conf()
     conf["artifact_root_path"] = str(tmp_path)
+    k3s_seed_conf = next(seed for seed in conf["seed_registry"] if seed["seed_id"] == "k3s-docs")
     state_path = tmp_path / "public-docs-crawl-state" / "state.json"
     state_path.parent.mkdir()
     state_path.write_text(
@@ -4412,7 +4430,10 @@ def test_public_docs_crawl_state_conf_overlays_persisted_state(tmp_path: Path) -
                                 }
                             },
                             "status": "indexed",
-                        }
+                        },
+                        "source_snapshot": _public_docs_source_snapshot(
+                            source_id=str(k3s_seed_conf["source_id"])
+                        ),
                     }
                 },
                 "status": "active",
@@ -4434,6 +4455,7 @@ def test_public_docs_crawl_state_conf_overlays_persisted_state(tmp_path: Path) -
         k3s_seed["crawl_policy"]["previous_state"]["https://docs.k3s.io/"]["content_hash"]
         == "a" * 64
     )
+    assert k3s_seed["metadata"]["previous_source_snapshot"]["pack_version_id"] == (PACK_VERSION_ID)
 
 
 def test_public_docs_crawl_state_uses_a_dedicated_s3_security_prefix() -> None:
@@ -4486,10 +4508,15 @@ def test_public_docs_crawl_state_conf_recovers_active_version_from_bc21_when_sna
     def fake_urlopen(request: Any, *, timeout: float) -> Response:
         assert timeout == 5.0
         assert request.get_method() == "GET"
-        assert request.full_url == (
-            "http://serp-context-platform.env-dev.svc.cluster.local"
+        parsed_url = urlparse(request.full_url)
+        assert (
+            f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}"
+            == "http://serp-context-platform.env-dev.svc.cluster.local"
             f"/api/bc-21/serp/v1/packs/{PACK_ID}/active-version"
         )
+        route_key = parse_qs(parsed_url.query).get("routeKey", [])
+        assert len(route_key) == 1
+        UUID(route_key[0])
         assert request.get_header("X-adapstory-tenant-id") == TENANT_ID
         assert request.get_header("Authorization") == "Bearer test-workload-token"
         return Response()
@@ -4566,6 +4593,7 @@ def test_public_docs_crawl_state_commits_only_after_complete_d5_coverage(
     tmp_path: Path,
 ) -> None:
     refresh_plan_path = tmp_path / "refresh-plan.json"
+    refresh_result_path = tmp_path / "refresh-result.json"
     coverage_path = tmp_path / "coverage.json"
     activation_receipt_path = tmp_path / "activation-receipt.json"
     state_path = tmp_path / "public-docs-crawl-state" / "state.json"
@@ -4591,11 +4619,36 @@ def test_public_docs_crawl_state_commits_only_after_complete_d5_coverage(
                 },
                 "freshness_state": {"status": "never_indexed"},
                 "seed_id": "example-docs",
+                "source_id": "018f5e13-2d73-7a77-a052-8d1bcbf96534",
                 "source_uri": "https://docs.example.com/guide",
             }
         ],
     }
     refresh_plan_path.write_text(json.dumps(refresh_plan), encoding="utf-8")
+    selected_snapshot = _public_docs_source_snapshot(
+        source_id="018f5e13-2d73-7a77-a052-8d1bcbf96534"
+    )
+    source_manifest = {
+        "activation_status": "ready",
+        "candidate_pack_version_id": PACK_VERSION_ID,
+        "contract_version": "PublicDocsSourceManifest/v1",
+        "entries": [
+            {
+                "seed_id": "example-docs",
+                "selected_snapshot": selected_snapshot,
+            }
+        ],
+    }
+    source_manifest_sha256 = _canonical_sha256(source_manifest)
+    refresh_result_path.write_text(
+        json.dumps(
+            {
+                "source_manifest": source_manifest,
+                "source_manifest_sha256": source_manifest_sha256,
+            }
+        ),
+        encoding="utf-8",
+    )
     coverage_path.write_text(
         json.dumps(
             {
@@ -4615,7 +4668,13 @@ def test_public_docs_crawl_state_commits_only_after_complete_d5_coverage(
         encoding="utf-8",
     )
     activation_receipt_path.write_text(
-        json.dumps({"active_pack_version_id": PACK_VERSION_ID, "status": "active"}),
+        json.dumps(
+            {
+                "active_pack_version_id": PACK_VERSION_ID,
+                "source_manifest_sha256": source_manifest_sha256,
+                "status": "active",
+            }
+        ),
         encoding="utf-8",
     )
     plan = {
@@ -4632,6 +4691,7 @@ def test_public_docs_crawl_state_commits_only_after_complete_d5_coverage(
         "pack_version_id": PACK_VERSION_ID,
         "public_docs_crawl_state_path": str(state_path),
         "public_docs_seed_refresh_plan_path": str(refresh_plan_path),
+        "public_docs_seed_refresh_result_path": str(refresh_result_path),
         "tenant_id": TENANT_ID,
     }
 
@@ -4641,6 +4701,7 @@ def test_public_docs_crawl_state_commits_only_after_complete_d5_coverage(
     assert artifact["payload"]["status"] == "committed"
     assert state["active_pack_version_id"] == PACK_VERSION_ID
     assert state["seeds"]["example-docs"]["freshness_state"]["status"] == "indexed"
+    assert state["seeds"]["example-docs"]["source_snapshot"] == selected_snapshot
     assert (
         state["seeds"]["example-docs"]["freshness_state"]["page_state"][
             "https://docs.example.com/guide"
@@ -5614,7 +5675,10 @@ def test_public_docs_noop_retains_active_pack_without_bc21_or_d5_publish(
                         "freshness_state": {
                             "last_success_at": "2026-07-08T20:30:00Z",
                             "status": "indexed",
-                        }
+                        },
+                        "source_snapshot": _public_docs_source_snapshot(
+                            source_id=str(seed["source_id"])
+                        ),
                     }
                     for seed in conf["seed_registry"]
                 },
@@ -5650,6 +5714,7 @@ def test_public_docs_publish_activation_plan_dispatches_d5_handoff(tmp_path: Pat
     assert plan.to_canonical_json() == repeated.to_canonical_json()
     assert plan.payload["dag_id"] == "serp_publish_signed_pack"
     assert plan.payload["status"] == "ready_for_publish_activation_handoff"
+    assert plan.payload["canary_rollout_mode"] == "continuous"
     assert plan.payload["artifact_paths"] == {
         "airflow_plan": "/".join(
             (str(tmp_path), plan.payload["operation_id"], "airflow-plan.json")
@@ -5667,6 +5732,34 @@ def test_public_docs_publish_activation_plan_dispatches_d5_handoff(tmp_path: Pat
                 plan.payload["operation_id"],
                 "public-docs-publish-activation-receipt.json",
             )
+        ),
+        "public_docs_resolved_activation_request": "/".join(
+            (
+                str(tmp_path),
+                plan.payload["operation_id"],
+                "public-docs-resolved-activation-request.json",
+            )
+        ),
+        "public_docs_canary_shadow_receipt": "/".join(
+            (str(tmp_path), plan.payload["operation_id"], "public-docs-canary-shadow.json")
+        ),
+        "public_docs_canary_5_receipt": "/".join(
+            (str(tmp_path), plan.payload["operation_id"], "public-docs-canary-5.json")
+        ),
+        "public_docs_canary_25_receipt": "/".join(
+            (str(tmp_path), plan.payload["operation_id"], "public-docs-canary-25.json")
+        ),
+        "public_docs_canary_ready_receipt": "/".join(
+            (str(tmp_path), plan.payload["operation_id"], "public-docs-canary-ready.json")
+        ),
+        "public_docs_canary_rollback_receipt": "/".join(
+            (str(tmp_path), plan.payload["operation_id"], "public-docs-canary-rollback.json")
+        ),
+        "public_docs_canary_5_golden": "/".join(
+            (str(tmp_path), plan.payload["operation_id"], "public-docs-canary-5-golden.json")
+        ),
+        "public_docs_canary_25_golden": "/".join(
+            (str(tmp_path), plan.payload["operation_id"], "public-docs-canary-25-golden.json")
         ),
         "public_docs_search_serve_smoke": "/".join(
             (
@@ -5715,6 +5808,21 @@ def test_public_docs_publish_activation_plan_dispatches_d5_handoff(tmp_path: Pat
         "validate_publish_signed_pack_plan",
         "dispatch_publish_activation_handoff",
         "run_publish_activation_handoff",
+        "dispatch_public_docs_canary_resolve",
+        "resolve_publish_activation_approval",
+        "select_public_docs_canary_path",
+        "start_public_docs_bootstrap_shadow",
+        "mark_public_docs_bootstrap_ready",
+        "start_public_docs_canary_shadow",
+        "start_public_docs_canary_5",
+        "wait_public_docs_canary_5_window",
+        "run_public_docs_canary_5_golden",
+        "rollback_public_docs_canary_5_failure",
+        "start_public_docs_canary_25",
+        "wait_public_docs_canary_25_window",
+        "run_public_docs_canary_25_golden",
+        "rollback_public_docs_canary_25_failure",
+        "mark_public_docs_canary_ready",
         "dispatch_publish_activation_submit",
         "submit_publish_activation_to_bc21",
         "verify_public_docs_search_serve",
@@ -5771,6 +5879,20 @@ def test_public_docs_publish_activation_plan_dispatches_d5_handoff(tmp_path: Pat
     assert submit_spec["argv"][submit_spec["argv"].index("--bc21-base-url") + 1] == (
         "http://serp-context-platform.env-dev.svc.cluster.local"
     )
+
+
+def test_public_docs_publish_activation_selects_bootstrap_without_last_known_good(
+    tmp_path: Path,
+) -> None:
+    seed_refresh_result = tmp_path / "public-docs-seed-refresh-result.json"
+    _write_public_docs_seed_refresh_result(seed_refresh_result)
+    conf = _public_docs_publish_activation_conf(str(seed_refresh_result))
+    conf.pop("previous_active_pack_version_id")
+
+    plan = build_public_docs_publish_activation_plan(conf)
+
+    assert plan.payload["canary_rollout_mode"] == "bootstrap"
+    assert "previous_active_pack_version_id" not in plan.payload
 
 
 def test_post_activation_failure_rolls_back_to_direct_predecessor(
@@ -5852,13 +5974,14 @@ def test_post_activation_failure_rolls_back_to_direct_predecessor(
     assert Path(artifact["artifactPath"]).exists()
 
 
-def test_first_activation_failure_records_unrecoverable_compensation_without_retries(
+def test_d5_first_activation_uses_the_fail_closed_bootstrap_canary_path(
     tmp_path: Path,
 ) -> None:
     seed_refresh_result = tmp_path / "public-docs-seed-refresh-result.json"
-    _write_public_docs_seed_refresh_result(seed_refresh_result)
+    source_manifest_sha256 = _write_public_docs_seed_refresh_result(seed_refresh_result)
     conf = _public_docs_publish_activation_conf(str(seed_refresh_result))
     conf["artifact_root_path"] = str(tmp_path)
+    conf.pop("previous_active_pack_version_id")
     plan = build_public_docs_publish_activation_plan(conf)
     receipt_path = Path(plan.payload["artifact_paths"]["public_docs_publish_activation_receipt"])
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -5868,6 +5991,7 @@ def test_first_activation_failure_records_unrecoverable_compensation_without_ret
                 "active_pack_version_id": PACK_VERSION_ID,
                 "artifact_type": "public_docs_publish_activation_receipt",
                 "pack_id": PACK_ID,
+                "source_manifest_sha256": source_manifest_sha256,
                 "status": "activated",
                 "tenant_id": TENANT_ID,
             }
@@ -5877,6 +6001,8 @@ def test_first_activation_failure_records_unrecoverable_compensation_without_ret
 
     artifact = write_public_docs_post_activation_rollback_artifact(plan.to_canonical_json())
 
+    assert plan.payload["canary_rollout_mode"] == "bootstrap"
+    assert "previous_active_pack_version_id" not in plan.payload
     assert artifact["payload"]["status"] == "first_activation_no_restore_target"
     assert artifact["payload"]["rollback_attempted"] is False
     assert artifact["payload"]["active_pack_version_id"] == PACK_VERSION_ID
@@ -5890,6 +6016,7 @@ def test_public_docs_retired_pack_cleanup_runs_only_for_a_previous_active_pack(
     _write_public_docs_seed_refresh_result(seed_refresh_result)
     conf = _public_docs_publish_activation_conf(str(seed_refresh_result))
     conf["artifact_root_path"] = str(tmp_path)
+    conf.pop("previous_active_pack_version_id")
     plan_without_retired_pack = build_public_docs_publish_activation_plan(conf)
 
     no_cleanup = build_public_docs_retired_pack_cleanup_cli_spec(
@@ -6159,7 +6286,7 @@ def test_public_docs_retrieval_golden_runs_every_governed_source_with_replay(
     seed_refresh_result = Path(
         refresh_plan.payload["artifact_paths"]["public_docs_seed_refresh_result"]
     )
-    _write_public_docs_seed_refresh_result(seed_refresh_result)
+    source_manifest_sha256 = _write_public_docs_seed_refresh_result(seed_refresh_result)
     conf = _public_docs_publish_activation_conf(str(seed_refresh_result))
     conf["artifact_root_path"] = str(tmp_path)
     conf["public_docs_seed_refresh_plan_path"] = refresh_plan.payload["artifact_paths"][
@@ -6174,6 +6301,7 @@ def test_public_docs_retrieval_golden_runs_every_governed_source_with_replay(
                 "active_pack_version_id": PACK_VERSION_ID,
                 "artifact_type": "public_docs_publish_activation_receipt",
                 "pack_id": PACK_ID,
+                "source_manifest_sha256": source_manifest_sha256,
                 "status": "activated",
                 "tenant_id": TENANT_ID,
             }
@@ -6552,7 +6680,7 @@ def test_public_docs_publish_activation_plan_accepts_s3_d20_result(
         (request_bucket, request_key): json.dumps(
             {
                 "artifact_type": "public_docs_publish_activation_submission",
-                "contract_version": "2026.07.1",
+                "contract_version": "2026.07.2",
                 "status": "ready_for_bc21_publish_activation",
                 "submission": {"endpointPath": "/api/bc-21/serp/v1/packs/x"},
                 "submission_sha256": "a" * 64,
@@ -6740,7 +6868,26 @@ def test_default_public_docs_seed_refresh_conf_materializes_autonomous_d20_plan(
     }
     assert {
         seed["metadata"]["source_registry_version"] for seed in plan.payload["seed_registry"]
-    } == {"public-docs-source-registry/v1"}
+    } == {"public-docs-source-registry/v2"}
+    assert {seed["source_policy"]["schema"] for seed in plan.payload["seed_registry"]} == {
+        "PublicDocsSourcePolicy/v1"
+    }
+    assert {seed["source_policy"]["knowledge_scope"] for seed in plan.payload["seed_registry"]} == {
+        "public"
+    }
+    assert {
+        seed["source_policy"]["owners"]["source_steward"] for seed in plan.payload["seed_registry"]
+    } == {"adapstory-platform-architecture"}
+    assert {
+        seed["source_policy"]["freshness"]["warning_hours"]
+        for seed in plan.payload["seed_registry"]
+        if seed["metadata"]["priority"] == "P0"
+    } == {24}
+    assert {
+        seed["source_policy"]["freshness"]["hard_limit_hours"]
+        for seed in plan.payload["seed_registry"]
+        if seed["metadata"]["priority"] == "P1"
+    } == {168}
     assert {
         seed["crawl_policy"]["robots_cache_max_hours"] for seed in plan.payload["seed_registry"]
     } == {24}
@@ -6802,6 +6949,21 @@ def test_default_public_docs_seed_refresh_conf_materializes_autonomous_d20_plan(
         )
         for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
     }
+    assert {
+        request["source_metadata"]["source_policy"]["schema"]
+        for request in refresh_plan_artifact["payload"]["source_fetch_requests"]
+    } == {"PublicDocsSourcePolicy/v1"}
+
+
+def test_public_docs_seed_refresh_plan_rejects_source_ownership_gap(tmp_path: Path) -> None:
+    conf = default_public_docs_seed_refresh_conf(
+        generated_at="2026-07-08T21:00:00Z",
+        artifact_root_path=str(tmp_path),
+    )
+    del conf["seed_registry"][0]["source_policy"]["owners"]["source_steward"]
+
+    with pytest.raises(ValueError, match="source_policy.owners.source_steward"):
+        build_public_docs_seed_refresh_plan(conf)
 
 
 def test_default_public_docs_seed_refresh_conf_uses_run_scoped_pack_version(
@@ -7152,6 +7314,19 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
                 "validate_publish_signed_pack_plan",
                 "dispatch_publish_activation_handoff",
                 "run_publish_activation_handoff",
+                "dispatch_public_docs_canary_resolve",
+                "resolve_publish_activation_approval",
+                "select_public_docs_canary_path",
+                "start_public_docs_bootstrap_shadow",
+                "mark_public_docs_bootstrap_ready",
+                "start_public_docs_canary_shadow",
+                "start_public_docs_canary_5",
+                "run_public_docs_canary_5_golden",
+                "rollback_public_docs_canary_5_failure",
+                "start_public_docs_canary_25",
+                "run_public_docs_canary_25_golden",
+                "rollback_public_docs_canary_25_failure",
+                "mark_public_docs_canary_ready",
                 "dispatch_publish_activation_submit",
                 "submit_publish_activation_to_bc21",
                 "verify_public_docs_search_serve",
@@ -7259,6 +7434,18 @@ def test_serp_dag_files_declare_expected_airflow_contracts(
         assert "benchmark substrate source set is not published yet" in source
         assert "wait_for_source_set >> validate_plan >> materialize_evidence" in source
         assert "BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS" in source
+    elif dag_id == "serp_publish_signed_pack":
+        assert _keyword_values(tree, "PythonOperator", "task_id") == [
+            task_id for task_id in task_ids if task_id != "select_public_docs_canary_path"
+        ]
+        assert _keyword_values(tree, "BranchPythonOperator", "task_id") == [
+            "select_public_docs_canary_path"
+        ]
+        assert _keyword_values(tree, "TimeDeltaSensor", "task_id") == [
+            "wait_public_docs_canary_5_window",
+            "wait_public_docs_canary_25_window",
+        ]
+        assert "deferrable=True" in source
     else:
         assert _keyword_values(tree, "PythonOperator", "task_id") == task_ids
     assert "external_runner_pending" not in source
@@ -7844,6 +8031,25 @@ def test_d5_first_activation_compensation_records_incident_without_retry(
     assert module.rollback_public_docs_post_activation_failure("{}") is None
 
 
+def test_d5_selects_exactly_one_canary_path_from_the_immutable_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    module = importlib.import_module("dags.serp_publish_signed_pack")
+    module = importlib.reload(module)
+
+    assert (
+        module.select_public_docs_canary_path('{"canary_rollout_mode":"bootstrap"}')
+        == "start_public_docs_bootstrap_shadow"
+    )
+    assert (
+        module.select_public_docs_canary_path({"canary_rollout_mode": "continuous"})
+        == "start_public_docs_canary_shadow"
+    )
+    with pytest.raises(module.AirflowException, match="canary_rollout_mode is unsupported"):
+        module.select_public_docs_canary_path({})
+
+
 def test_prepare_public_docs_d5_dispatch_returns_only_validated_ready_conf(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8083,6 +8289,7 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
 
     class FakeTriggerRule:
         ALL_DONE = "all_done"
+        NONE_FAILED_MIN_ONE_SUCCESS = "none_failed_min_one_success"
         ONE_FAILED = "one_failed"
 
     class FakeDAG:
@@ -8124,7 +8331,13 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeTriggerDagRunOperator(FakePythonOperator):
         pass
 
+    class FakeBranchPythonOperator(FakePythonOperator):
+        pass
+
     class FakeKubernetesPodOperator(FakePythonOperator):
+        pass
+
+    class FakeTimeDeltaSensor(FakePythonOperator):
         pass
 
     class FakeConf:
@@ -8199,6 +8412,12 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         "airflow.providers.standard.operators.trigger_dagrun": types.ModuleType(
             "airflow.providers.standard.operators.trigger_dagrun"
         ),
+        "airflow.providers.standard.sensors": types.ModuleType(
+            "airflow.providers.standard.sensors"
+        ),
+        "airflow.providers.standard.sensors.time_delta": types.ModuleType(
+            "airflow.providers.standard.sensors.time_delta"
+        ),
         "airflow.sdk": types.ModuleType("airflow.sdk"),
         "airflow.sdk.exceptions": types.ModuleType("airflow.sdk.exceptions"),
         "airflow.task": types.ModuleType("airflow.task"),
@@ -8211,11 +8430,17 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     cast(
         Any, modules["airflow.providers.standard.operators.python"]
     ).PythonOperator = FakePythonOperator
+    cast(
+        Any, modules["airflow.providers.standard.operators.python"]
+    ).BranchPythonOperator = FakeBranchPythonOperator
     cast(Any, modules["airflow.sdk.exceptions"]).AirflowSkipException = FakeAirflowSkipException
     cast(Any, modules["airflow.exceptions"]).AirflowException = FakeAirflowException
     cast(
         Any, modules["airflow.providers.standard.operators.trigger_dagrun"]
     ).TriggerDagRunOperator = FakeTriggerDagRunOperator
+    cast(
+        Any, modules["airflow.providers.standard.sensors.time_delta"]
+    ).TimeDeltaSensor = FakeTimeDeltaSensor
     cast(
         Any, modules["airflow.providers.cncf.kubernetes.operators.pod"]
     ).KubernetesPodOperator = FakeKubernetesPodOperator
@@ -10805,6 +11030,7 @@ def _public_docs_publish_activation_conf(seed_refresh_result_path: str) -> dict[
         "policy_source_type": "website",
         "policy_trust_state": "trusted",
         "policy_version": "source-approval@2026.07.1",
+        "previous_active_pack_version_id": "018f5e13-2d73-7a77-a052-8d1bcbf96500",
         "public_docs_seed_refresh_plan_path": _seed_refresh_plan_path(seed_refresh_result_path),
         "public_docs_seed_refresh_result_path": seed_refresh_result_path,
         "registry_resource_id": REGISTRY_RESOURCE_ID,
@@ -10826,11 +11052,31 @@ def _write_public_docs_seed_refresh_result(
     tenant_id: str = TENANT_ID,
     pack_id: str = PACK_ID,
     pack_version_id: str = PACK_VERSION_ID,
-) -> None:
+) -> str:
     batch_evidence = _public_docs_seed_refresh_batch_evidence(status="indexed")
     batch_evidence["tenant_id"] = tenant_id
     batch_evidence["pack_id"] = pack_id
     batch_evidence["pack_version_id"] = pack_version_id
+    source_id = str(
+        default_public_docs_seed_refresh_conf(generated_at="2026-07-08T22:00:00Z")["seed_registry"][
+            0
+        ]["source_id"]
+    )
+    source_manifest = {
+        "activation_status": "ready",
+        "candidate_pack_version_id": pack_version_id,
+        "contract_version": "PublicDocsSourceManifest/v1",
+        "entries": [
+            {
+                "seed_id": "k3s-docs",
+                "selected_snapshot": _public_docs_source_snapshot(
+                    source_id=source_id,
+                    pack_version_id=pack_version_id,
+                ),
+            }
+        ],
+    }
+    source_manifest_sha256 = _canonical_sha256(source_manifest)
     path.write_text(
         json.dumps(
             {
@@ -10849,11 +11095,14 @@ def _write_public_docs_seed_refresh_result(
                     pack_id=pack_id,
                     pack_version_id=pack_version_id,
                 ),
+                "source_manifest": source_manifest,
+                "source_manifest_sha256": source_manifest_sha256,
             },
             sort_keys=True,
         ),
         encoding="utf-8",
     )
+    return source_manifest_sha256
 
 
 def _write_public_docs_bc21_pipeline_state_receipt(path: Path) -> None:
@@ -11030,6 +11279,7 @@ def _public_docs_seed(
         },
         "metadata": {
             "origin": "docs/reports/serp/stack-inventory-2026-07-02.md",
+            "priority": "P0",
             "purpose": "public-docs-seed-to-serve",
         },
         "official_docs_uri": source_uri,
@@ -11038,6 +11288,34 @@ def _public_docs_seed(
             "max_age_hours": 24,
         },
         "seed_id": seed_id,
+        "source_policy": {
+            "authority_kind": "official",
+            "capability_coverage": [
+                "concepts",
+                "setup",
+                "reference",
+                "security",
+                "operations",
+                "troubleshooting",
+                "migrations",
+                "release-notes",
+            ],
+            "freshness": {
+                "hard_limit_hours": 72,
+                "warning_hours": 24,
+            },
+            "knowledge_scope": "public",
+            "original_language": "en",
+            "owners": {
+                "legal_owner": "adapstory-legal",
+                "platform_owner": "adapstory-knowledge-platform",
+                "privacy_owner": "adapstory-privacy",
+                "security_owner": "adapstory-security",
+                "source_steward": "adapstory-platform-architecture",
+            },
+            "schema": "PublicDocsSourcePolicy/v1",
+            "version_scope": "supported-version",
+        },
         "source_id": str(
             __import__("uuid").uuid5(
                 __import__("uuid").NAMESPACE_URL,

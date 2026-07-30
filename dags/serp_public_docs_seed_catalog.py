@@ -3,9 +3,13 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from adapstory_serp_pipeline.contracts.source_policy import (
+    PUBLIC_DOCS_CAPABILITY_COVERAGE,
+)
+
 PUBLIC_DOCS_NIGHTLY_SOURCE_CATALOG_PATH = "docs/reports/serp/public-docs-seed-catalog-2026-07-08.md"
 STACK_INVENTORY_SOURCE_PATH = "docs/reports/serp/stack-inventory-2026-07-02.md"
-PUBLIC_DOCS_SOURCE_REGISTRY_VERSION = "public-docs-source-registry/v1"
+PUBLIC_DOCS_SOURCE_REGISTRY_VERSION = "public-docs-source-registry/v2"
 
 WEBSITE_GIT_RELEASE_NOTES_INGEST_MODES = ("website", "git", "release-notes")
 OPENAPI_INGEST_MODES = ("openapi",)
@@ -25,20 +29,34 @@ def _source(
     version: str | None = None,
     priority: str = "P0",
 ) -> Mapping[str, Any]:
+    freshness_warning_hours = 24 if priority == "P0" else 72
+    freshness_hard_limit_hours = 72 if priority == "P0" else 168
     source: dict[str, Any] = {
+        "authority_kind": "official",
+        "capability_coverage": PUBLIC_DOCS_CAPABILITY_COVERAGE,
         "component": component,
         "docs_url": docs_url,
+        "freshness_hard_limit_hours": freshness_hard_limit_hours,
+        "freshness_warning_hours": freshness_warning_hours,
         "governance_state": "active",
+        "knowledge_scope": "public",
+        "legal_owner": "adapstory-legal",
         "license_review": "reviewed-public-docs",
         "official_source_evidence": "vendor-docs-or-owned-repository",
+        "original_language": "en",
+        "platform_owner": "adapstory-knowledge-platform",
         "priority": priority,
+        "privacy_owner": "adapstory-privacy",
         "refresh_cadence": "daily",
         "releases_url": releases_url,
         "repo_url": repo_url,
         "robots_cache_max_hours": 24,
+        "security_owner": "adapstory-security",
         "seed_id": seed_id,
+        "source_steward": "adapstory-platform-architecture",
         "source_type": source_type,
         "suggested_ingest_modes": tuple(suggested_ingest_modes),
+        "version_scope": "supported-version" if version is not None else "current",
     }
     if catalog_docs_url is not None:
         source["catalog_docs_url"] = catalog_docs_url
