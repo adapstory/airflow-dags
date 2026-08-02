@@ -20,6 +20,7 @@ from dags.serp_eval_contracts import (
     discover_public_docs_crawler_frontier,
     dispatch_public_docs_seed_refresh_handoff_from_snapshot,
     load_public_docs_crawl_state_conf,
+    resolve_public_docs_official_measurement_gate_from_snapshot,
     submit_public_docs_bc21_pipeline_state_from_snapshot,
     write_public_docs_airflow_plan_snapshot,
     write_public_docs_publish_activation_trigger_conf_from_snapshot,
@@ -180,6 +181,10 @@ def prepare_public_docs_d5_dispatch(**context: Any) -> dict[str, Any]:
     status = payload.get("status")
     if status == "no_change_active_pack_retained":
         raise AirflowSkipException("public docs no-op: D5 activation is not dispatched")
+    if status == "knowledge_activation_frozen":
+        raise AirflowSkipException(
+            "public docs activation frozen: official SERP score is not measured"
+        )
     if status != "ready_for_d5_publish_activation":
         raise ValueError(f"D20 publish trigger artifact is not dispatchable: status={status!r}")
     if payload.get("target_dag_id") != "serp_publish_signed_pack":
@@ -280,12 +285,21 @@ submit_bc21_pipeline_state = PythonOperator(
     dag=dag,
 )
 
+resolve_official_measurement_gate = PythonOperator(
+    task_id="resolve_public_docs_official_measurement_gate",
+    python_callable=resolve_public_docs_official_measurement_gate_from_snapshot,
+    op_args=["{{ ti.xcom_pull(task_ids='validate_public_docs_seed_registry') }}"],
+    executor_config=PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG,
+    dag=dag,
+)
+
 write_publish_trigger_conf = PythonOperator(
     task_id="write_public_docs_publish_activation_trigger_conf",
     python_callable=write_public_docs_publish_activation_trigger_conf_from_snapshot,
     op_args=[
         "{{ ti.xcom_pull(task_ids='validate_public_docs_seed_registry') }}",
         "{{ ti.xcom_pull(task_ids='build_public_docs_seed_refresh_plan') }}",
+        "{{ ti.xcom_pull(task_ids='resolve_public_docs_official_measurement_gate') }}",
     ],
     executor_config=PUBLIC_DOCS_ACQUISITION_EXECUTOR_CONFIG,
     dag=dag,
@@ -318,6 +332,7 @@ trigger_d5_publish_activation = TriggerDagRunOperator(
     >> dispatch_handoff
     >> run_pipeline
     >> submit_bc21_pipeline_state
+    >> resolve_official_measurement_gate
     >> write_publish_trigger_conf
     >> prepare_d5_dispatch
     >> trigger_d5_publish_activation

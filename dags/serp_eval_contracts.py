@@ -4290,6 +4290,11 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
         payload,
         "benchmark_gate_export_sha256",
     )
+    official_measurement_gate = _normalized_public_docs_official_measurement_gate(
+        _required_mapping(payload, "official_measurement_gate")
+    )
+    if benchmark_gate_export_sha256 != official_measurement_gate["measurementEvidence"]["sha256"]:
+        raise ValueError("benchmark_gate_export_sha256 must match official measurement evidence")
     seed_refresh_result_path = _artifact_path(
         "public_docs_seed_refresh_result_path",
         _required_str(payload, "public_docs_seed_refresh_result_path"),
@@ -4363,6 +4368,7 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
         evidence_bundle_id,
         evidence_seal_hash,
         benchmark_gate_export_sha256,
+        _canonical_json(official_measurement_gate),
         search_serve_actor_id,
     )
     plan_payload = {
@@ -4422,6 +4428,7 @@ def build_public_docs_publish_activation_plan(conf: Mapping[str, Any]) -> SerpDa
             ),
         ),
         "benchmark_gate_export_sha256": benchmark_gate_export_sha256,
+        "official_measurement_gate": official_measurement_gate,
         "bc21_base_url": _required_bc21_base_url(payload),
         "canary_rollout_mode": canary_rollout_mode,
         "dag_id": "serp_publish_signed_pack",
@@ -4644,6 +4651,7 @@ def build_public_docs_seed_refresh_plan(
                 "dispatch_pipeline_seed_refresh_handoff",
                 "run_public_docs_seed_refresh_pipeline",
                 "submit_public_docs_bc21_pipeline_state",
+                "resolve_public_docs_official_measurement_gate",
                 "write_public_docs_publish_activation_trigger_conf",
                 "prepare_public_docs_d5_dispatch",
                 "trigger_public_docs_d5_publish_activation",
@@ -7114,6 +7122,7 @@ def write_public_docs_seed_refresh_plan_artifact(
 def write_public_docs_publish_activation_trigger_conf_from_snapshot(
     plan_handle: Mapping[str, Any] | str,
     refresh_plan_handle: Mapping[str, Any] | str,
+    official_measurement_gate: Mapping[str, Any] | str,
 ) -> dict[str, Any]:
     plan = load_public_docs_airflow_plan_snapshot(plan_handle)
     refresh_payload, refresh_evidence = _read_public_docs_task_artifact_payload(
@@ -7126,6 +7135,7 @@ def write_public_docs_publish_activation_trigger_conf_from_snapshot(
     return write_public_docs_publish_activation_trigger_conf_artifact(
         plan,
         refresh_plan_evidence=refresh_evidence,
+        official_measurement_gate=official_measurement_gate,
     )
 
 
@@ -7133,6 +7143,7 @@ def write_public_docs_publish_activation_trigger_conf_artifact(
     plan_json: Mapping[str, Any] | str,
     *,
     refresh_plan_evidence: Mapping[str, Any] | None = None,
+    official_measurement_gate: Mapping[str, Any] | str | None = None,
 ) -> dict[str, Any]:
     plan = _json_object(plan_json, "plan_json")
     _reject_raw_secrets(plan)
@@ -7190,6 +7201,40 @@ def write_public_docs_publish_activation_trigger_conf_artifact(
         raise ValueError("public docs BC-21 receipt runId must match indexed_run_id")
     receipt_evidence_bundle_id = _required_uuid(bc21_response, "evidenceBundleId")
     receipt_evidence_seal_hash = _required_sha256_prefixed(bc21_response, "evidenceSealHash")
+    if official_measurement_gate is None:
+        raise ValueError("official_measurement_gate is required for knowledge activation")
+    normalized_gate = _json_object(official_measurement_gate, "official_measurement_gate")
+    gate_status = _required_str(normalized_gate, "status")
+    if gate_status == "knowledge_activation_frozen":
+        if set(normalized_gate) != {"measurementStatus", "status", "threshold"}:
+            raise ValueError("knowledge activation freeze fields are unsupported")
+        measurement_status = _required_str(normalized_gate, "measurementStatus")
+        if measurement_status not in {"unmeasured", "rejected"}:
+            raise ValueError("knowledge activation freeze status is unsupported")
+        threshold = _required_number(normalized_gate, "threshold")
+        if threshold != SERP_NORMALIZED_GATE_FLOOR:
+            raise ValueError("knowledge activation freeze threshold is unsupported")
+        payload = {
+            "artifact_type": "public_docs_publish_activation_trigger_conf",
+            "contract_version": _EVAL_CONTRACT_VERSION,
+            "dag_id": "serp_web_seed_crawl_refresh",
+            "generated_at": _required_datetime_string(plan, "generated_at"),
+            "measurement_status": measurement_status,
+            "operation_id": _required_str(plan, "operation_id"),
+            "source_seed_refresh_result_path": seed_refresh_result_path,
+            "status": "knowledge_activation_frozen",
+            "tenant_id": _required_str(plan, "tenant_id"),
+            "threshold": threshold,
+        }
+        artifact_path = artifact_paths["public_docs_publish_activation_trigger_conf"]
+        _write_json_artifact(artifact_path, payload)
+        return _artifact_result(
+            artifact_path,
+            artifact_type="public_docs_publish_activation_trigger_conf",
+            operation_id=_required_str(plan, "operation_id"),
+            payload=payload,
+        )
+    measured_gate = _normalized_public_docs_official_measurement_gate(normalized_gate)
     batch_evidence_sha256 = _required_str(seed_refresh_result, "batch_evidence_sha256")
     policy_inputs = _public_docs_pack_policy_inputs(plan, batch_evidence)
     material = "|".join(
@@ -7211,11 +7256,11 @@ def write_public_docs_publish_activation_trigger_conf_artifact(
             uuid5(_PUBLIC_DOCS_NAMESPACE, material + "|autonomous-approval")
         ),
         "artifact_root_path": _required_str(plan, "artifact_root_path"),
-        "benchmark_gate_export_sha256": "sha256:"
-        + sha256((material + "|benchmark-gate").encode("utf-8")).hexdigest(),
+        "benchmark_gate_export_sha256": measured_gate["measurementEvidence"]["sha256"],
         "evidence_bundle_id": str(receipt_evidence_bundle_id),
         "evidence_seal_hash": receipt_evidence_seal_hash,
         "generated_at": _required_datetime_string(plan, "generated_at"),
+        "official_measurement_gate": measured_gate,
         "pack_id": _required_str(plan, "pack_id"),
         "pack_version_id": _required_str(plan, "pack_version_id"),
         "qdrant_collection": _required_str(plan, "qdrant_collection"),
@@ -7276,6 +7321,161 @@ def write_public_docs_publish_activation_trigger_conf_artifact(
         operation_id=_required_str(plan, "operation_id"),
         payload=payload,
     )
+
+
+def resolve_public_docs_official_measurement_gate_from_snapshot(
+    plan_handle: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    return resolve_public_docs_official_measurement_gate(
+        load_public_docs_airflow_plan_snapshot(plan_handle)
+    )
+
+
+def resolve_public_docs_official_measurement_gate(
+    plan_json: Mapping[str, Any] | str,
+) -> dict[str, Any]:
+    """Resolve the only benchmark evidence allowed to authorize D5 activation."""
+
+    plan = _json_object(plan_json, "plan_json")
+    _reject_raw_secrets(plan)
+    if _required_str(plan, "dag_id") != "serp_web_seed_crawl_refresh":
+        raise ValueError("plan dag_id does not match public docs official measurement gate")
+    response = _bc21_json_request(
+        _required_bc21_base_url(plan).rstrip("/")
+        + "/api/bc-21/serp/v1/governance/official-measurements/latest",
+        method="GET",
+        body=None,
+        headers={"X-Adapstory-Tenant-Id": _required_str(plan, "tenant_id")},
+        error_label="public docs official SERP/MCP measurement lookup",
+    )
+    if response is None:
+        raise ValueError("public docs official SERP/MCP measurement lookup returned no body")
+    status = _required_str(response, "status")
+    threshold = _required_number(response, "threshold")
+    if threshold != SERP_NORMALIZED_GATE_FLOOR:
+        raise ValueError("official measurement threshold is unsupported")
+    if status == "unmeasured":
+        if set(response) != {"status", "threshold"}:
+            raise ValueError("unmeasured official measurement fields are unsupported")
+        return {
+            "measurementStatus": status,
+            "status": "knowledge_activation_frozen",
+            "threshold": threshold,
+        }
+    normalized = _normalized_public_docs_official_measurement_response(response)
+    if status == "rejected":
+        return {
+            "measurementStatus": status,
+            "status": "knowledge_activation_frozen",
+            "threshold": threshold,
+        }
+    return normalized
+
+
+def _normalized_public_docs_official_measurement_response(
+    response: Mapping[str, Any],
+) -> dict[str, Any]:
+    expected = {
+        "baselineRetentionLcb95ToMean",
+        "baselineRetentionThresholdMet",
+        "d19ObservedNormalizedScoreCellsEvidence",
+        "d19ReceiptAttestationEvidence",
+        "d19ReceiptEvidence",
+        "d19VerificationEvidence",
+        "measurementEvidence",
+        "publishedAt",
+        "score",
+        "status",
+        "threshold",
+        "verifiedCellCount",
+    }
+    if set(response) != expected:
+        raise ValueError("official measurement projection fields are unsupported")
+    status = _required_str(response, "status")
+    if status not in {"measured", "rejected"}:
+        raise ValueError("official measurement status is unsupported")
+    score = _required_number(response, "score")
+    if not 0.0 <= score <= 1.0:
+        raise ValueError("official measurement score must be between 0 and 1")
+    baseline_retention = _required_number(response, "baselineRetentionLcb95ToMean")
+    if baseline_retention < 0.0:
+        raise ValueError("official measurement baseline retention must be non-negative")
+    verified_cell_count = _required_non_negative_int(response, "verifiedCellCount")
+    if verified_cell_count != len(MANDATORY_SERP_BENCHMARK_SUITES):
+        raise ValueError("official measurement requires exactly nine verified cells")
+    threshold_met = response.get("baselineRetentionThresholdMet")
+    if not isinstance(threshold_met, bool):
+        raise ValueError("baselineRetentionThresholdMet must be a boolean")
+    threshold = _required_number(response, "threshold")
+    if threshold != SERP_NORMALIZED_GATE_FLOOR:
+        raise ValueError("official measurement threshold is unsupported")
+    result = {
+        "baselineRetentionLcb95ToMean": baseline_retention,
+        "baselineRetentionThresholdMet": threshold_met,
+        "benchmarkGateExportSha256": _worm_evidence_reference(response, "measurementEvidence")[
+            "sha256"
+        ],
+        "d19ObservedNormalizedScoreCellsEvidence": _worm_evidence_reference(
+            response, "d19ObservedNormalizedScoreCellsEvidence"
+        ),
+        "d19ReceiptAttestationEvidence": _worm_evidence_reference(
+            response, "d19ReceiptAttestationEvidence"
+        ),
+        "d19ReceiptEvidence": _worm_evidence_reference(response, "d19ReceiptEvidence"),
+        "d19VerificationEvidence": _worm_evidence_reference(response, "d19VerificationEvidence"),
+        "measurementEvidence": _worm_evidence_reference(response, "measurementEvidence"),
+        "measurementStatus": status,
+        "publishedAt": _required_datetime_string(response, "publishedAt"),
+        "score": score,
+        "status": "ready_for_d5_publish_activation",
+        "threshold": threshold,
+        "verifiedCellCount": verified_cell_count,
+    }
+    return result
+
+
+def _normalized_public_docs_official_measurement_gate(
+    gate: Mapping[str, Any],
+) -> dict[str, Any]:
+    # Context: D20 previously synthesized a benchmark digest from pack metadata.
+    # Decision: accept only the latest measured BC-21 WORM projection and exact digest.
+    # Reason: an activation gate must prove the honest all-nine score, not mere freshness.
+    # Revisit when: the official-measurement API version changes with equivalent evidence.
+    expected = {
+        "baselineRetentionLcb95ToMean",
+        "baselineRetentionThresholdMet",
+        "benchmarkGateExportSha256",
+        "d19ObservedNormalizedScoreCellsEvidence",
+        "d19ReceiptAttestationEvidence",
+        "d19ReceiptEvidence",
+        "d19VerificationEvidence",
+        "measurementEvidence",
+        "measurementStatus",
+        "publishedAt",
+        "score",
+        "status",
+        "threshold",
+        "verifiedCellCount",
+    }
+    if set(gate) != expected:
+        raise ValueError("official measurement gate fields are unsupported")
+    if _required_str(gate, "status") != "ready_for_d5_publish_activation":
+        raise ValueError("official measurement gate is not ready for D5 activation")
+    response = {
+        key: value
+        for key, value in gate.items()
+        if key not in {"status", "measurementStatus", "benchmarkGateExportSha256"}
+    }
+    response["status"] = _required_str(gate, "measurementStatus")
+    normalized = _normalized_public_docs_official_measurement_response(response)
+    if normalized["measurementStatus"] != "measured":
+        raise ValueError("official measurement gate must be measured")
+    if (
+        _required_sha256_prefixed(gate, "benchmarkGateExportSha256")
+        != normalized["measurementEvidence"]["sha256"]
+    ):
+        raise ValueError("official measurement gate digest does not match evidence")
+    return normalized
 
 
 def submit_public_docs_bc21_pipeline_state_from_snapshot(

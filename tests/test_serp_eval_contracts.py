@@ -61,6 +61,7 @@ from dags.serp_eval_contracts import (
     load_materialized_benchmark_catalog_snapshot,
     load_public_docs_crawl_state_conf,
     materialize_live_benchmark_catalog_artifact,
+    resolve_public_docs_official_measurement_gate,
     submit_public_docs_bc21_pipeline_state_artifact,
     write_airflow_plan_artifact,
     write_online_eval_rollup_plan_artifact,
@@ -4281,6 +4282,7 @@ def test_build_public_docs_seed_refresh_plan_materializes_d20_contract(tmp_path:
         "dispatch_pipeline_seed_refresh_handoff",
         "run_public_docs_seed_refresh_pipeline",
         "submit_public_docs_bc21_pipeline_state",
+        "resolve_public_docs_official_measurement_gate",
         "write_public_docs_publish_activation_trigger_conf",
         "prepare_public_docs_d5_dispatch",
         "trigger_public_docs_d5_publish_activation",
@@ -4864,7 +4866,8 @@ def test_d20_writes_public_docs_publish_activation_trigger_conf_artifact(
     )
 
     trigger_artifact = write_public_docs_publish_activation_trigger_conf_artifact(
-        plan.to_canonical_json()
+        plan.to_canonical_json(),
+        official_measurement_gate=_measured_public_docs_official_gate(),
     )
 
     assert Path(trigger_artifact["artifactPath"]).exists()
@@ -4895,6 +4898,7 @@ def test_d20_writes_public_docs_publish_activation_trigger_conf_artifact(
         "qdrant_collection",
         "opensearch_index",
         "neo4j_database",
+        "official_measurement_gate",
         "policy_data_class",
         "policy_freshness_state",
         "policy_license_obligation_state",
@@ -4933,7 +4937,8 @@ def test_d20_writes_public_docs_publish_activation_trigger_conf_artifact(
     assert target_conf["evidence_bundle_id"] == "018f5e13-2d73-7a77-a052-8d1bcbf96602"
     assert target_conf["evidence_seal_hash"] == "sha256:" + "b" * 64
     repeated_artifact = write_public_docs_publish_activation_trigger_conf_artifact(
-        json.loads(plan.to_canonical_json())
+        json.loads(plan.to_canonical_json()),
+        official_measurement_gate=_measured_public_docs_official_gate(),
     )
     assert trigger_artifact["artifactSha256"] == repeated_artifact["artifactSha256"]
 
@@ -4959,7 +4964,8 @@ def test_d20_trigger_conf_includes_bc21_base_url_from_env(
     )
 
     trigger_artifact = write_public_docs_publish_activation_trigger_conf_artifact(
-        plan.to_canonical_json()
+        plan.to_canonical_json(),
+        official_measurement_gate=_measured_public_docs_official_gate(),
     )
 
     assert plan.payload["bc21_base_url"] == (
@@ -5033,7 +5039,8 @@ def test_d20_trigger_conf_derives_policy_from_frontier_parent_seed(
     )
 
     trigger_artifact = write_public_docs_publish_activation_trigger_conf_artifact(
-        plan.to_canonical_json()
+        plan.to_canonical_json(),
+        official_measurement_gate=_measured_public_docs_official_gate(),
     )
 
     target_conf = trigger_artifact["payload"]["target_dag_run_conf"]
@@ -5107,7 +5114,8 @@ def test_d20_writes_public_docs_publish_activation_trigger_conf_from_s3_result(
     )
 
     trigger_artifact = write_public_docs_publish_activation_trigger_conf_artifact(
-        plan.to_canonical_json()
+        plan.to_canonical_json(),
+        official_measurement_gate=_measured_public_docs_official_gate(),
     )
 
     assert trigger_artifact["artifactPath"] == trigger_conf_path
@@ -5295,7 +5303,8 @@ def test_d5_still_requires_governance_inputs_from_d20_trigger_conf(
         Path(plan.payload["artifact_paths"]["public_docs_bc21_pipeline_state_receipt"])
     )
     trigger_artifact = write_public_docs_publish_activation_trigger_conf_artifact(
-        plan.to_canonical_json()
+        plan.to_canonical_json(),
+        official_measurement_gate=_measured_public_docs_official_gate(),
     )
 
     with pytest.raises(ValueError, match="bc21_base_url is required"):
@@ -7347,6 +7356,7 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
                 "build_public_docs_seed_refresh_plan",
                 "dispatch_pipeline_seed_refresh_handoff",
                 "submit_public_docs_bc21_pipeline_state",
+                "resolve_public_docs_official_measurement_gate",
                 "write_public_docs_publish_activation_trigger_conf",
                 "prepare_public_docs_d5_dispatch",
             ],
@@ -8085,6 +8095,89 @@ def test_prepare_public_docs_d5_dispatch_skips_noop_without_triggering_d5(
             return {"payload": {"status": "no_change_active_pack_retained"}}
 
     with pytest.raises(module.AirflowSkipException, match="no-op"):
+        module.prepare_public_docs_d5_dispatch(ti=TaskInstance())
+
+
+@pytest.mark.parametrize("measurement_status", ["unmeasured", "rejected"])
+def test_public_docs_activation_freezes_without_a_measured_official_score(
+    monkeypatch: pytest.MonkeyPatch,
+    measurement_status: str,
+) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["bc21_base_url"] = "http://serp-context-platform.env-prod.svc.cluster.local"
+    plan = build_public_docs_seed_refresh_plan(conf)
+    response: dict[str, object] = {"status": measurement_status, "threshold": 0.9}
+    if measurement_status == "rejected":
+        response.update(_official_measurement_projection_fields(status="rejected"))
+    monkeypatch.setattr(
+        serp_eval_contracts_module,
+        "_bc21_json_request",
+        lambda *_args, **_kwargs: response,
+    )
+
+    gate = resolve_public_docs_official_measurement_gate(plan.to_canonical_json())
+
+    assert gate == {
+        "measurementStatus": measurement_status,
+        "status": "knowledge_activation_frozen",
+        "threshold": 0.9,
+    }
+
+
+def test_public_docs_activation_uses_exact_measured_worm_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conf = _public_docs_seed_refresh_conf()
+    conf["bc21_base_url"] = "http://serp-context-platform.env-prod.svc.cluster.local"
+    plan = build_public_docs_seed_refresh_plan(conf)
+    response = {
+        "status": "measured",
+        "threshold": 0.9,
+        **_official_measurement_projection_fields(status="measured"),
+    }
+    monkeypatch.setattr(
+        serp_eval_contracts_module,
+        "_bc21_json_request",
+        lambda *_args, **_kwargs: response,
+    )
+
+    gate = resolve_public_docs_official_measurement_gate(plan.to_canonical_json())
+
+    assert gate["status"] == "ready_for_d5_publish_activation"
+    assert gate["measurementStatus"] == "measured"
+    assert gate["verifiedCellCount"] == 9
+    assert gate["benchmarkGateExportSha256"] == response["measurementEvidence"]["sha256"]
+
+
+def test_public_docs_publish_plan_rejects_synthetic_benchmark_digest(tmp_path: Path) -> None:
+    seed_refresh_result = tmp_path / "public-docs-seed-refresh-result.json"
+    _write_public_docs_seed_refresh_result(seed_refresh_result)
+    conf = _public_docs_publish_activation_conf(str(seed_refresh_result))
+    conf["artifact_root_path"] = str(tmp_path)
+    conf["benchmark_gate_export_sha256"] = "sha256:" + "f" * 64
+
+    with pytest.raises(ValueError, match="official measurement evidence"):
+        build_public_docs_publish_activation_plan(conf)
+
+
+def test_prepare_public_docs_d5_dispatch_skips_activation_freeze(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    module = importlib.import_module("dags.serp_web_seed_crawl_refresh")
+    module = importlib.reload(module)
+
+    class TaskInstance:
+        def xcom_pull(self, *, task_ids: str) -> dict[str, object]:
+            assert task_ids == "write_public_docs_publish_activation_trigger_conf"
+            return {
+                "payload": {
+                    "status": "knowledge_activation_frozen",
+                    "measurement_status": "unmeasured",
+                }
+            }
+
+    with pytest.raises(module.AirflowSkipException, match="activation frozen"):
         module.prepare_public_docs_d5_dispatch(ti=TaskInstance())
 
 
@@ -11011,6 +11104,7 @@ def _public_docs_seed_refresh_conf() -> dict[str, Any]:
 
 
 def _public_docs_publish_activation_conf(seed_refresh_result_path: str) -> dict[str, object]:
+    measurement_evidence = _d19_worm_evidence("official-measurements/latest", "c")
     return {
         "activation_idempotency_key": "018f5e13-2d73-7a77-a052-" + "8d1bcbf96603",
         "activation_reason_code": "public-docs-d20-indexed",
@@ -11022,6 +11116,28 @@ def _public_docs_publish_activation_conf(seed_refresh_result_path: str) -> dict[
         "evidence_bundle_id": "018f5e13-2d73-7a77-a052-8d1bcbf96602",
         "evidence_seal_hash": "sha256:" + "b" * 64,
         "generated_at": "2026-07-08T22:00:00Z",
+        "official_measurement_gate": {
+            "baselineRetentionLcb95ToMean": 1.01,
+            "baselineRetentionThresholdMet": True,
+            "benchmarkGateExportSha256": measurement_evidence["sha256"],
+            "d19ObservedNormalizedScoreCellsEvidence": _d19_worm_evidence(
+                "official-measurements/score-cells", "d"
+            ),
+            "d19ReceiptAttestationEvidence": _d19_worm_evidence(
+                "official-measurements/receipt-attestation", "e"
+            ),
+            "d19ReceiptEvidence": _d19_worm_evidence("official-measurements/receipt", "f"),
+            "d19VerificationEvidence": _d19_worm_evidence(
+                "official-measurements/verification", "a"
+            ),
+            "measurementEvidence": measurement_evidence,
+            "measurementStatus": "measured",
+            "publishedAt": "2026-07-08T21:59:00Z",
+            "score": 0.925,
+            "status": "ready_for_d5_publish_activation",
+            "threshold": 0.9,
+            "verifiedCellCount": 9,
+        },
         "pack_id": PACK_ID,
         "pack_version_id": PACK_VERSION_ID,
         "policy_data_class": "PUBLIC",
@@ -11036,6 +11152,38 @@ def _public_docs_publish_activation_conf(seed_refresh_result_path: str) -> dict[
         "registry_resource_id": REGISTRY_RESOURCE_ID,
         "registry_resource_type": "pack",
         "tenant_id": TENANT_ID,
+    }
+
+
+def _official_measurement_projection_fields(*, status: str) -> dict[str, object]:
+    measurement_evidence = _d19_worm_evidence("official-measurements/latest", "c")
+    return {
+        "baselineRetentionLcb95ToMean": 1.01,
+        "baselineRetentionThresholdMet": True,
+        "d19ObservedNormalizedScoreCellsEvidence": _d19_worm_evidence(
+            "official-measurements/score-cells", "d"
+        ),
+        "d19ReceiptAttestationEvidence": _d19_worm_evidence(
+            "official-measurements/receipt-attestation", "e"
+        ),
+        "d19ReceiptEvidence": _d19_worm_evidence("official-measurements/receipt", "f"),
+        "d19VerificationEvidence": _d19_worm_evidence("official-measurements/verification", "a"),
+        "measurementEvidence": measurement_evidence,
+        "publishedAt": "2026-07-08T21:59:00Z",
+        "score": 0.925 if status == "measured" else 0.8,
+        "verifiedCellCount": 9,
+    }
+
+
+def _measured_public_docs_official_gate() -> dict[str, object]:
+    fields = _official_measurement_projection_fields(status="measured")
+    measurement_evidence = cast(dict[str, str], fields["measurementEvidence"])
+    return {
+        **fields,
+        "benchmarkGateExportSha256": measurement_evidence["sha256"],
+        "measurementStatus": "measured",
+        "status": "ready_for_d5_publish_activation",
+        "threshold": 0.9,
     }
 
 
