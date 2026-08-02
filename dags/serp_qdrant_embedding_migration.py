@@ -192,7 +192,7 @@ def validate_qdrant_embedding_migration_conf(conf_value: Mapping[str, Any]) -> d
     )
     correlation_id = _required_token(conf_value.get("correlation_id"), "correlation_id")
     batch_size = _required_positive_int(conf_value.get("batch_size"), "batch_size")
-    operation_id = str(
+    operation_id = _required_token(
         conf_value.get("operation_id")
         or _operation_id(
             "qdrant-embedding-backfill",
@@ -200,8 +200,11 @@ def validate_qdrant_embedding_migration_conf(conf_value: Mapping[str, Any]) -> d
             source_collection,
             target_collection,
             embedding_profile_version,
-        )
+        ),
+        "operation_id",
     )
+    if not operation_id.startswith("qdrant-embedding-backfill-"):
+        raise ValueError("operation_id must use the qdrant-embedding-backfill prefix")
     artifact_paths = _artifact_paths(artifact_root_path, operation_id)
     plan = {
         "artifact_paths": artifact_paths,

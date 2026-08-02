@@ -30,6 +30,17 @@ def test_validate_qdrant_embedding_migration_conf_rejects_versioned_source_colle
         module.validate_qdrant_embedding_migration_conf(conf)
 
 
+def test_validate_conf_rejects_operation_outside_backfill_evidence_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_migration_module(monkeypatch)
+    conf = _valid_conf()
+    conf["operation_id"] = "unrelated-operation"
+
+    with pytest.raises(ValueError, match="qdrant-embedding-backfill prefix"):
+        module.validate_qdrant_embedding_migration_conf(conf)
+
+
 def test_validate_plan_derives_stable_operation_identity_from_airflow_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
