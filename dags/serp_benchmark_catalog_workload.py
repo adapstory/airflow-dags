@@ -6,6 +6,14 @@ import os
 
 from kubernetes.client import models as k8s
 
+from dags.serp_benchmark_runtime_contract import (
+    BENCHMARK_SUBSTRATE_SOURCE_SET_CONFIG_MAP,
+    BENCHMARK_SUBSTRATE_SOURCE_SET_CONFIG_MAP_KEY,
+    BENCHMARK_SUBSTRATE_SOURCE_SET_FILE_ENV_NAME,
+    BENCHMARK_SUBSTRATE_SOURCE_SET_FILE_PATH,
+    BENCHMARK_SUBSTRATE_SOURCE_SET_MOUNT_PATH,
+    BENCHMARK_SUBSTRATE_SOURCE_SET_VOLUME_NAME,
+)
 from dags.serp_evidence_workload_identity import (
     minio_web_identity_env_vars,
     minio_web_identity_volume_mounts,
@@ -29,8 +37,6 @@ BENCHMARK_CATALOG_ACQUISITION_RESOURCES = k8s.V1ResourceRequirements(
     limits={"cpu": "1000m", "memory": "3Gi"},
 )
 BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS = 90
-BENCHMARK_SUBSTRATE_SOURCE_SET_CONFIG_MAP = "airflow-evaluation-runtime-contract"
-BENCHMARK_SUBSTRATE_SOURCE_SET_ENV_NAME = "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE"
 _BENCHMARK_CATALOG_ACQUISITION_LITERAL_ENV_NAMES = (
     "ADAPSTORY_AIRFLOW_ARTIFACT_S3_PATH_STYLE",
     "ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS",
@@ -58,21 +64,14 @@ def benchmark_catalog_acquisition_env_vars() -> list[k8s.V1EnvVar]:
         values.append(k8s.V1EnvVar(name=name, value=native_template_safe_env_value(value.strip())))
     values.append(
         k8s.V1EnvVar(
-            name=BENCHMARK_SUBSTRATE_SOURCE_SET_ENV_NAME,
-            value_from=k8s.V1EnvVarSource(
-                config_map_key_ref=k8s.V1ConfigMapKeySelector(
-                    key=BENCHMARK_SUBSTRATE_SOURCE_SET_ENV_NAME,
-                    name=BENCHMARK_SUBSTRATE_SOURCE_SET_CONFIG_MAP,
-                    optional=False,
-                )
-            ),
+            name=BENCHMARK_SUBSTRATE_SOURCE_SET_FILE_ENV_NAME,
+            value=BENCHMARK_SUBSTRATE_SOURCE_SET_FILE_PATH,
         )
     )
     proxy_url = os.environ.get("ADAPSTORY_SERP_SOURCE_PROXY_URL", "").strip()
     if not proxy_url:
         raise ValueError(
-            "benchmark catalog acquisition environment is required: "
-            "ADAPSTORY_SERP_SOURCE_PROXY_URL"
+            "benchmark catalog acquisition environment is required: ADAPSTORY_SERP_SOURCE_PROXY_URL"
         )
     values.append(
         k8s.V1EnvVar(
@@ -96,13 +95,35 @@ def benchmark_catalog_acquisition_env_vars() -> list[k8s.V1EnvVar]:
 def benchmark_catalog_acquisition_web_identity_volumes() -> list[k8s.V1Volume]:
     """Project the bounded MinIO audience token without an ambient API token."""
 
-    return minio_web_identity_volumes()
+    return [
+        *minio_web_identity_volumes(),
+        k8s.V1Volume(
+            name=BENCHMARK_SUBSTRATE_SOURCE_SET_VOLUME_NAME,
+            config_map=k8s.V1ConfigMapVolumeSource(
+                name=BENCHMARK_SUBSTRATE_SOURCE_SET_CONFIG_MAP,
+                optional=True,
+                items=[
+                    k8s.V1KeyToPath(
+                        key=BENCHMARK_SUBSTRATE_SOURCE_SET_CONFIG_MAP_KEY,
+                        path="source-set-evidence.json",
+                    )
+                ],
+            ),
+        ),
+    ]
 
 
 def benchmark_catalog_acquisition_web_identity_volume_mounts() -> list[k8s.V1VolumeMount]:
     """Mount the bounded MinIO identity token read-only."""
 
-    return minio_web_identity_volume_mounts()
+    return [
+        *minio_web_identity_volume_mounts(),
+        k8s.V1VolumeMount(
+            name=BENCHMARK_SUBSTRATE_SOURCE_SET_VOLUME_NAME,
+            mount_path=BENCHMARK_SUBSTRATE_SOURCE_SET_MOUNT_PATH,
+            read_only=True,
+        ),
+    ]
 
 
 def benchmark_catalog_acquisition_pod_security_context() -> k8s.V1PodSecurityContext:

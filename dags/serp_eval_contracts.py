@@ -5611,9 +5611,6 @@ def _public_docs_seed_registry_from_refresh_plan(
     return hydrated
 
 
-_BENCHMARK_SUBSTRATE_SOURCE_SET_ENV = "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE"
-
-
 def _load_execution_substrate_source_set(
     verified_source_set: Mapping[str, Any],
     *,
@@ -6142,11 +6139,16 @@ def _validated_compact_worm_handle(value: object, field_name: str) -> dict[str, 
 
 
 def _execution_substrate_source_set_from_env() -> dict[str, dict[str, bytes]]:
-    raw = os.environ.get(_BENCHMARK_SUBSTRATE_SOURCE_SET_ENV, "").strip()
+    from dags.serp_benchmark_runtime_contract import (
+        BENCHMARK_SUBSTRATE_SOURCE_SET_FILE_ENV_NAME,
+        read_benchmark_substrate_source_set_evidence,
+    )
+
+    raw = read_benchmark_substrate_source_set_evidence(os.environ)
     if not raw:
         return {}
     return _load_execution_substrate_source_set(
-        _json_object(raw, _BENCHMARK_SUBSTRATE_SOURCE_SET_ENV)
+        _json_object(raw, BENCHMARK_SUBSTRATE_SOURCE_SET_FILE_ENV_NAME)
     )
 
 

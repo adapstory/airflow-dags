@@ -25,6 +25,8 @@ from dags.serp_benchmark_catalog_workload import (  # noqa: E402
     BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS,
     BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_LABELS,
     BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT,
+    BENCHMARK_SUBSTRATE_SOURCE_SET_FILE_ENV_NAME,
+    BENCHMARK_SUBSTRATE_SOURCE_SET_FILE_PATH,
     benchmark_catalog_acquisition_container_security_context,
     benchmark_catalog_acquisition_env_vars,
     benchmark_catalog_acquisition_pod_security_context,
@@ -148,12 +150,6 @@ def test_catalog_acquisition_workload_has_minimal_proxy_and_evidence_contract(
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_PATH_STYLE": "true",
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION": "us-east-1",
         "ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS": "365",
-        "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE": (
-            '{"objectLockMode":"COMPLIANCE","s3Uri":"s3://airflow-serp-evidence/'
-            'serp-evals/substrates/source-set.json","sha256":"sha256:'
-            + "a" * 64
-            + '","versionId":"source-set-v1"}'
-        ),
         "ADAPSTORY_SERP_SOURCE_PROXY_URL": "http://forward-proxy.forward-proxy.svc:3128",
     }.items():
         monkeypatch.setenv(name, value)
@@ -177,7 +173,7 @@ def test_catalog_acquisition_workload_has_minimal_proxy_and_evidence_contract(
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_STS_DURATION_SECONDS",
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_PATH_STYLE",
         "ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS",
-        "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE",
+        "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE_FILE",
         "ADAPSTORY_SERP_SOURCE_PROXY_URL",
         "HTTP_PROXY",
         "HTTPS_PROXY",
@@ -200,23 +196,14 @@ def test_catalog_acquisition_workload_has_minimal_proxy_and_evidence_contract(
     assert literal_env["HTTP_PROXY"] == "http://forward-proxy.forward-proxy.svc:3128"
     assert literal_env["HTTPS_PROXY"] == "http://forward-proxy.forward-proxy.svc:3128"
     assert ".svc.cluster.local" in literal_env["NO_PROXY"]
-    source_set_env = next(
+    source_set_file_env = next(
         env_var
         for env_var in env_vars
-        if env_var.name == "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE"
+        if env_var.name == BENCHMARK_SUBSTRATE_SOURCE_SET_FILE_ENV_NAME
     )
-    assert source_set_env.value is None
-    assert source_set_env.value_from is not None
-    selector = source_set_env.value_from.config_map_key_ref
-    assert selector is not None
-    assert selector.name == "airflow-evaluation-runtime-contract"
-    assert selector.key == "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE"
-    assert selector.optional is False
-    assert all(
-        env_var.value_from is None
-        for env_var in env_vars
-        if env_var.name != "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE"
-    )
+    assert source_set_file_env.value == BENCHMARK_SUBSTRATE_SOURCE_SET_FILE_PATH
+    assert source_set_file_env.value_from is None
+    assert all(env_var.value_from is None for env_var in env_vars)
     assert benchmark_catalog_acquisition_web_identity_volumes()[0].to_dict() == {
         "aws_elastic_block_store": None,
         "azure_disk": None,
@@ -283,7 +270,7 @@ def test_catalog_acquisition_workload_has_minimal_proxy_and_evidence_contract(
     assert BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS == 90
 
 
-def test_catalog_acquisition_source_set_is_resolved_from_required_gitops_config_map(
+def test_catalog_acquisition_source_set_is_mounted_from_required_gitops_config_map(
     monkeypatch: Any,
 ) -> None:
     for name, value in {
@@ -294,25 +281,25 @@ def test_catalog_acquisition_source_set_is_resolved_from_required_gitops_config_
         "ADAPSTORY_SERP_SOURCE_PROXY_URL": "http://forward-proxy.forward-proxy.svc:3128",
     }.items():
         monkeypatch.setenv(name, value)
-    monkeypatch.delenv(
-        "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE",
-        raising=False,
-    )
-
     env_vars = benchmark_catalog_acquisition_env_vars()
 
-    source_set_env = next(
+    source_set_file_env = next(
         env_var
         for env_var in env_vars
-        if env_var.name == "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE"
+        if env_var.name == BENCHMARK_SUBSTRATE_SOURCE_SET_FILE_ENV_NAME
     )
-    assert source_set_env.value is None
-    assert source_set_env.value_from is not None
-    selector = source_set_env.value_from.config_map_key_ref
-    assert selector is not None
-    assert selector.name == "airflow-evaluation-runtime-contract"
-    assert selector.key == "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE"
-    assert selector.optional is False
+    assert source_set_file_env.value == BENCHMARK_SUBSTRATE_SOURCE_SET_FILE_PATH
+    volumes = benchmark_catalog_acquisition_web_identity_volumes()
+    source_set_volume = next(volume for volume in volumes if volume.config_map is not None)
+    assert source_set_volume.config_map.name == "airflow-evaluation-runtime-contract"
+    assert source_set_volume.config_map.items[0].key == (
+        "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE"
+    )
+    assert source_set_volume.config_map.items[0].path == "source-set-evidence.json"
+    mounts = benchmark_catalog_acquisition_web_identity_volume_mounts()
+    source_set_mount = next(mount for mount in mounts if mount.name == source_set_volume.name)
+    assert source_set_mount.mount_path == "/var/run/adapstory/evaluation-runtime"
+    assert source_set_mount.read_only is True
     assert benchmark_catalog_acquisition_pod_security_context().to_dict() == {
         "app_armor_profile": None,
         "fs_group": None,

@@ -7,7 +7,10 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-BENCHMARK_SUBSTRATE_SOURCE_SET_ENV_NAME = "ADAPSTORY_SERP_BENCHMARK_SUBSTRATE_SOURCE_SET_EVIDENCE"
+from dags.serp_benchmark_runtime_contract import (
+    read_benchmark_substrate_source_set_evidence,
+)
+
 _VERIFIED_SOURCE_SET_FIELDS = frozenset(
     {
         "checkoutProvenance",
@@ -56,7 +59,7 @@ def source_set_prerequisite_state(
     or conflicting identity remains a fail-closed integrity error.
     """
 
-    raw = environment.get(BENCHMARK_SUBSTRATE_SOURCE_SET_ENV_NAME, "").strip()
+    raw = read_benchmark_substrate_source_set_evidence(environment)
     if not raw:
         return None
     try:
