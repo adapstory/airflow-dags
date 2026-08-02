@@ -30,6 +30,31 @@ def test_validate_qdrant_embedding_migration_conf_rejects_versioned_source_colle
         module.validate_qdrant_embedding_migration_conf(conf)
 
 
+def test_validate_plan_derives_stable_operation_identity_from_airflow_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_migration_module(monkeypatch)
+    conf = _valid_conf()
+    for field_name in ("generated_at", "correlation_id", "operation_id"):
+        conf.pop(field_name, None)
+    dag_run = SimpleNamespace(
+        conf=conf,
+        run_id="manual__2026-08-02T20:00:00+00:00",
+        logical_date=module.datetime(2026, 8, 2, 20, 0, tzinfo=module.UTC),
+    )
+
+    first = module.validate_qdrant_embedding_migration_plan(dag_run=dag_run)
+    retried = module.validate_qdrant_embedding_migration_plan(dag_run=dag_run)
+
+    assert first == retried
+    assert first["generated_at"] == "2026-08-02T20:00:00Z"
+    run_identity = sha256(
+        b"serp_qdrant_embedding_migration\0manual__2026-08-02T20:00:00+00:00"
+    ).hexdigest()[:24]
+    assert first["correlation_id"] == f"airflow:serp_qdrant_embedding_migration:{run_identity}"
+    assert first["operation_id"] == f"qdrant-embedding-backfill-{run_identity}"
+
+
 @pytest.mark.parametrize(
     "forbidden_field",
     ("minimum_target_points", "target_ready_threshold", "fail_when_not_ready"),
@@ -276,6 +301,26 @@ def test_dag_source_uses_single_runner_with_kubernetes_reliability_contracts() -
     assert "TriggerDagRunOperator" not in source
 
 
+def test_evidence_tasks_use_dedicated_minio_identity_while_kpo_keeps_launcher_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_migration_module(monkeypatch)
+
+    expected_evidence_config = {
+        "minio_identity": module.QDRANT_EMBEDDING_BACKFILL_SERVICE_ACCOUNT,
+        "labels": module.QDRANT_EMBEDDING_BACKFILL_LABELS,
+    }
+    for operator in (
+        module.validate_plan,
+        module.write_plan,
+        module.dispatch_handoff,
+        module.snapshot_receipt,
+    ):
+        assert operator.kwargs["executor_config"] == expected_evidence_config
+    run_config = module.run_qdrant_embedding_backfill.kwargs["executor_config"]
+    assert run_config == {"pod_launcher": True}
+
+
 def _load_migration_module(monkeypatch: pytest.MonkeyPatch) -> Any:
     module_name = "dags.serp_qdrant_embedding_migration"
     monkeypatch.delitem(sys.modules, module_name, raising=False)
@@ -388,6 +433,12 @@ def _fake_workload_identity_module() -> types.ModuleType:
     module.bc10_workload_volume_mounts = lambda: [SimpleNamespace(kwargs={"name": "bc10"})]
     module.bc10_workload_volumes = lambda: [SimpleNamespace(kwargs={"name": "bc10"})]
     module.kubernetes_pod_launcher_executor_config = lambda: {"pod_launcher": True}
+    module.minio_web_identity_executor_config = (
+        lambda *, service_account_name, labels: {
+            "minio_identity": service_account_name,
+            "labels": labels,
+        }
+    )
     module.minio_web_identity_env_vars = lambda names: [
         SimpleNamespace(kwargs={"name": name, "value": "value"}) for name in names
     ]

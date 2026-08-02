@@ -21,6 +21,7 @@ from dags.serp_evidence_workload_identity import (
     bc10_workload_volumes,
     kubernetes_pod_launcher_executor_config,
     minio_web_identity_env_vars,
+    minio_web_identity_executor_config,
     minio_web_identity_volume_mounts,
     minio_web_identity_volumes,
     operation_prefix_read_s3_client as _operation_prefix_read_s3_client,
@@ -59,6 +60,10 @@ QDRANT_EMBEDDING_BACKFILL_LABELS = {
     "release": "airflow",
     "tier": "airflow",
 }
+QDRANT_EMBEDDING_BACKFILL_EVIDENCE_EXECUTOR_CONFIG = minio_web_identity_executor_config(
+    service_account_name=QDRANT_EMBEDDING_BACKFILL_SERVICE_ACCOUNT,
+    labels=QDRANT_EMBEDDING_BACKFILL_LABELS,
+)
 QDRANT_EMBEDDING_BACKFILL_RUNTIME_VOLUMES = [
     *minio_web_identity_volumes(),
     *bc10_workload_volumes(),
@@ -117,7 +122,23 @@ def pipeline_runner_env_vars(cli_spec_task_id: str) -> list[k8s.V1EnvVar]:
 def validate_qdrant_embedding_migration_plan(**context: Any) -> dict[str, Any]:
     dag_run = context.get("dag_run")
     raw_conf = getattr(dag_run, "conf", None) or {}
-    return validate_qdrant_embedding_migration_conf(raw_conf)
+    if not isinstance(raw_conf, Mapping):
+        raise ValueError("dag run config must be an object")
+    run_id = getattr(dag_run, "run_id", None)
+    if not isinstance(run_id, str) or not run_id.strip():
+        raise ValueError("Airflow dag_run.run_id is required")
+    logical_date = getattr(dag_run, "logical_date", None)
+    if not isinstance(logical_date, datetime):
+        raise ValueError("Airflow dag_run.logical_date is required")
+    run_identity = sha256(f"{DAG_ID}\0{run_id}".encode("utf-8")).hexdigest()
+    conf_value = dict(raw_conf)
+    conf_value.setdefault(
+        "generated_at",
+        logical_date.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+    )
+    conf_value.setdefault("correlation_id", f"airflow:{DAG_ID}:{run_identity[:24]}")
+    conf_value.setdefault("operation_id", f"qdrant-embedding-backfill-{run_identity[:24]}")
+    return validate_qdrant_embedding_migration_conf(conf_value)
 
 
 def validate_qdrant_embedding_migration_conf(conf_value: Mapping[str, Any]) -> dict[str, Any]:
@@ -483,7 +504,7 @@ dag = DAG(
 validate_plan = PythonOperator(
     task_id="validate_qdrant_embedding_migration_plan",
     python_callable=validate_qdrant_embedding_migration_plan,
-    executor_config=kubernetes_pod_launcher_executor_config(),
+    executor_config=QDRANT_EMBEDDING_BACKFILL_EVIDENCE_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -491,7 +512,7 @@ write_plan = PythonOperator(
     task_id="write_qdrant_embedding_migration_plan",
     python_callable=write_qdrant_embedding_migration_plan,
     op_args=["{{ ti.xcom_pull(task_ids='validate_qdrant_embedding_migration_plan') }}"],
-    executor_config=kubernetes_pod_launcher_executor_config(),
+    executor_config=QDRANT_EMBEDDING_BACKFILL_EVIDENCE_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -499,7 +520,7 @@ dispatch_handoff = PythonOperator(
     task_id="dispatch_qdrant_embedding_backfill_handoff",
     python_callable=dispatch_qdrant_embedding_backfill_handoff_from_snapshot,
     op_args=["{{ ti.xcom_pull(task_ids='write_qdrant_embedding_migration_plan') }}"],
-    executor_config=kubernetes_pod_launcher_executor_config(),
+    executor_config=QDRANT_EMBEDDING_BACKFILL_EVIDENCE_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -536,7 +557,7 @@ snapshot_receipt = PythonOperator(
     task_id="snapshot_qdrant_embedding_backfill_receipt",
     python_callable=snapshot_qdrant_embedding_backfill_receipt_from_snapshot,
     op_args=["{{ ti.xcom_pull(task_ids='write_qdrant_embedding_migration_plan') }}"],
-    executor_config=kubernetes_pod_launcher_executor_config(),
+    executor_config=QDRANT_EMBEDDING_BACKFILL_EVIDENCE_EXECUTOR_CONFIG,
     dag=dag,
 )
 
