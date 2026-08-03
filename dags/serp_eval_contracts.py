@@ -2335,7 +2335,7 @@ def validate_d17_event_d6_airflow_run(
     plan_json: Mapping[str, Any] | str,
     airflow_run: Mapping[str, Any],
 ) -> dict[str, str]:
-    """Bind event D6 to D17's deterministic manual trigger and logical date."""
+    """Bind event D6 to D17's deterministic Airflow operator trigger."""
 
     plan = _json_object(plan_json, "plan_json")
     _reject_raw_secrets(plan)
@@ -2347,8 +2347,8 @@ def validate_d17_event_d6_airflow_run(
         raise ValueError("event D6 airflowRun fields are unsupported")
     if _required_str(metadata, "dagId") != _D17_EVENT_D6_DAG_ID:
         raise ValueError("event D6 airflowRun dagId does not match")
-    if _required_str(metadata, "runType") != "manual":
-        raise ValueError("event D6 only admits trigger-created manual DagRuns")
+    if _required_str(metadata, "runType") != "operator_triggered":
+        raise ValueError("event D6 only admits operator-triggered DagRuns")
     logical_date = _required_datetime_string(metadata, "logicalDate")
     if logical_date != _required_datetime_string(plan, "generated_at"):
         raise ValueError("event D6 DagRun logicalDate must match D17 generated_at")
@@ -2359,7 +2359,7 @@ def validate_d17_event_d6_airflow_run(
         "dagId": _D17_EVENT_D6_DAG_ID,
         "logicalDate": logical_date,
         "runId": run_id,
-        "runType": "manual",
+        "runType": "operator_triggered",
     }
 
 

@@ -757,20 +757,28 @@ def test_d17_receipt_derives_one_strict_event_d6_then_native_d19_conf() -> None:
     assert d19_plan.payload["evaluation_release_promotion_evidence"] == receipt["promotionEvidence"]
     assert d19_plan.payload["generated_at"] == d17_plan.payload["generated_at"]
 
+    # Context: Airflow 3.3 records TriggerDagRunOperator children as
+    # operator_triggered/operator, but the task SDK DagRun omits triggered_by.
+    # Decision: admit exact operator_triggered metadata only after the existing
+    # deterministic D17 dag/run/logical-date/conf/evidence bindings all match.
+    # Reason: this is the strongest live-observable fail-closed contract; a
+    # synthetic triggeredBy value would make every valid child fail at runtime.
+    # Revisit when: task code has an authenticated REST self-read and independent
+    # operator provenance is required beyond the deterministic D17 binding.
     admitted = validate_d17_event_d6_airflow_run(
         event_plan.to_canonical_json(),
         {
             "dagId": "serp_model_promotion_regression_suite",
             "logicalDate": d17_plan.payload["generated_at"],
             "runId": event_conf["eventD6RunId"],
-            "runType": "manual",
+            "runType": "operator_triggered",
         },
     )
     assert admitted == {
         "dagId": "serp_model_promotion_regression_suite",
         "logicalDate": d17_plan.payload["generated_at"],
         "runId": event_conf["eventD6RunId"],
-        "runType": "manual",
+        "runType": "operator_triggered",
     }
 
 
@@ -844,7 +852,7 @@ def test_d17_event_d6_rejects_mismatched_receipt_manual_scheduled_mixes_and_inli
             build_d17_event_d6_plan({**event_conf, legacy_field: "caller-controlled"})
 
     event_plan = build_d17_event_d6_plan(event_conf)
-    with pytest.raises(ValueError, match="event D6 only admits trigger-created manual DagRuns"):
+    with pytest.raises(ValueError, match="event D6 only admits operator-triggered DagRuns"):
         validate_d17_event_d6_airflow_run(
             event_plan.to_canonical_json(),
             {
@@ -854,6 +862,16 @@ def test_d17_event_d6_rejects_mismatched_receipt_manual_scheduled_mixes_and_inli
                 "runType": "scheduled",
             },
         )
+    with pytest.raises(ValueError, match="event D6 only admits operator-triggered DagRuns"):
+        validate_d17_event_d6_airflow_run(
+            event_plan.to_canonical_json(),
+            {
+                "dagId": "serp_model_promotion_regression_suite",
+                "logicalDate": d17_plan.payload["generated_at"],
+                "runId": event_conf["eventD6RunId"],
+                "runType": "manual",
+            },
+        )
     with pytest.raises(ValueError, match="event D6 DagRun runId does not match D17 trigger"):
         validate_d17_event_d6_airflow_run(
             event_plan.to_canonical_json(),
@@ -861,7 +879,7 @@ def test_d17_event_d6_rejects_mismatched_receipt_manual_scheduled_mixes_and_inli
                 "dagId": "serp_model_promotion_regression_suite",
                 "logicalDate": d17_plan.payload["generated_at"],
                 "runId": "manual__caller-controlled",
-                "runType": "manual",
+                "runType": "operator_triggered",
             },
         )
 

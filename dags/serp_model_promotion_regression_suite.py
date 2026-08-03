@@ -29,7 +29,7 @@ D17_EVENT_D6_EVALUATOR_EXECUTOR_CONFIG = minio_web_identity_executor_config(
 
 
 def validate_event_d6_plan(**context: Any) -> str:
-    """Require D17's deterministic manual trigger before D19 can be invoked."""
+    """Require D17's deterministic operator trigger before D19 can be invoked."""
 
     dag_run = context.get("dag_run")
     if dag_run is None:
