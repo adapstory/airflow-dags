@@ -317,6 +317,7 @@ def test_public_docs_crawler_retries_transient_http_failure(
 ) -> None:
     attempts: list[str] = []
     delays: list[float] = []
+    timeouts: list[int] = []
 
     class Response:
         def __init__(self) -> None:
@@ -333,7 +334,7 @@ def test_public_docs_crawler_retries_transient_http_failure(
             return b"<html>recovered</html>"
 
     def open_request(request: Request, *, timeout: int) -> Response:
-        assert timeout > 0
+        timeouts.append(timeout)
         attempts.append(request.full_url)
         if len(attempts) == 1:
             raise HTTPError(
@@ -364,6 +365,7 @@ def test_public_docs_crawler_retries_transient_http_failure(
         "https://doc.traefik.io/traefik/",
     ]
     assert delays == [0.5]
+    assert timeouts == [15, 15]
 
 
 def test_public_docs_crawler_discovery_scans_full_policy_before_bounding_ingestion_frontier(

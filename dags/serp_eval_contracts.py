@@ -343,7 +343,13 @@ _PUBLIC_DOCS_DEFAULT_SEARCH_SERVE_ACTOR_ID = "00000000-0000-4000-a000-0000000002
 _PUBLIC_DOCS_SEARCH_SERVE_SMOKE_SUBJECT_ID = "00000000-0000-4000-a000-000000000202"
 _PUBLIC_DOCS_DEFAULT_ARTIFACT_ROOT = "/var/opt/adapstory/serp-public-docs-refresh"
 _PUBLIC_DOCS_STACK_INVENTORY_PATH = STACK_INVENTORY_SOURCE_PATH
-_PUBLIC_DOCS_SITEMAP_FETCH_TIMEOUT_SECONDS = 8
+# Context: the production forward-proxy delivered ClickHouse's bounded 99,927-byte
+# official llms.txt in 9.276s, so an 8s deadline made every retry fail as HTTP 599.
+# Decision: use a 15s per-attempt deadline while retaining three bounded attempts.
+# Reason: this covers the observed legitimate path with >40% headroom without
+# weakening quarantine or allowing an unbounded crawl to consume the warm SLO.
+# Revisit when: proxy fetch latency telemetry supports a lower governed P99 budget.
+_PUBLIC_DOCS_SITEMAP_FETCH_TIMEOUT_SECONDS = 15
 _PUBLIC_DOCS_CRAWLER_FETCH_ATTEMPTS = 3
 _PUBLIC_DOCS_CRAWLER_RETRY_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
 _HUGGINGFACE_PROXY_CONNECT_TIMEOUT_SECONDS = 30.0
