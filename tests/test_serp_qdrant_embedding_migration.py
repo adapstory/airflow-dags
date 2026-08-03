@@ -346,6 +346,15 @@ def test_evidence_tasks_use_dedicated_minio_identity_while_kpo_keeps_launcher_au
         assert operator.kwargs["executor_config"] == expected_evidence_config
     run_config = module.run_qdrant_embedding_backfill.kwargs["executor_config"]
     assert run_config == {"pod_launcher": True}
+    child_env_names = {
+        item.kwargs["name"]
+        for item in module.run_qdrant_embedding_backfill.kwargs["env_vars"]
+    }
+    assert {
+        "ADAPSTORY_SERP_EMBEDDING_BATCH_SIZE",
+        "ADAPSTORY_SERP_EMBEDDING_DIMENSION",
+        "ADAPSTORY_SERP_EMBEDDING_PROFILE_VERSION",
+    } <= child_env_names
 
 
 def _load_migration_module(monkeypatch: pytest.MonkeyPatch) -> Any:
@@ -392,6 +401,9 @@ def _load_migration_module(monkeypatch: pytest.MonkeyPatch) -> Any:
         "ADAPSTORY_BC10_SERP_CONTEXT_EMBEDDING_MODEL_VERSION_ID": "model-version",
         "ADAPSTORY_BC10_SERP_CONTEXT_EMBEDDING_PROMPT_TEMPLATE_VERSION": "prompt-version",
         "ADAPSTORY_BC10_SERP_CONTEXT_EMBEDDING_ROUTE_ID": "route-id",
+        "ADAPSTORY_SERP_EMBEDDING_BATCH_SIZE": "16",
+        "ADAPSTORY_SERP_EMBEDDING_DIMENSION": "1024",
+        "ADAPSTORY_SERP_EMBEDDING_PROFILE_VERSION": "bge-m3-1024@2026.07.2",
         "ADAPSTORY_SERP_QDRANT_TIMEOUT_SECONDS": "15",
         "ADAPSTORY_SERP_QDRANT_URL": "https://qdrant.example.test",
     }.items():
