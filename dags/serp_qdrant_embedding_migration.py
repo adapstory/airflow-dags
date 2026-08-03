@@ -38,6 +38,9 @@ PIPELINE_CLI_SPEC_ENV = "ADAPSTORY_SERP_PIPELINE_CLI_SPEC_URLENCODED"
 MAX_PLAN_BYTES = 64 * 1024
 _VERSIONED_COLLECTION_RE = re.compile(r"[a-z0-9_]+_v\d{8,}\Z")
 _SAFE_TOKEN_RE = re.compile(r"[A-Za-z0-9._:/-]+\Z")
+_EMBEDDING_PROFILE_VERSION_RE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._:/-]*@[A-Za-z0-9][A-Za-z0-9._:/-]*\Z"
+)
 _ROUTE_PREFIX_RE = re.compile(r"[A-Z0-9_]+\Z")
 _PIPELINE_RUNNER_ENV_NAMES = (
     "ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS",
@@ -182,7 +185,7 @@ def validate_qdrant_embedding_migration_conf(conf_value: Mapping[str, Any]) -> d
         raise ValueError("source_collection and target_collection must differ")
     if not _VERSIONED_COLLECTION_RE.fullmatch(target_collection):
         raise ValueError("target_collection must be a versioned immutable collection name")
-    embedding_profile_version = _required_token(
+    embedding_profile_version = _required_embedding_profile_version(
         conf_value.get("embedding_profile_version"),
         "embedding_profile_version",
     )
@@ -306,7 +309,7 @@ def snapshot_qdrant_embedding_backfill_receipt_from_snapshot(
         raise ValueError("backfill receipt source_collection does not match the immutable plan")
     if _required_token(receipt_payload.get("target_collection"), "target_collection") != plan["target_collection"]:
         raise ValueError("backfill receipt target_collection does not match the immutable plan")
-    if _required_token(
+    if _required_embedding_profile_version(
         receipt_payload.get("embedding_profile_version"),
         "embedding_profile_version",
     ) != plan["embedding_profile_version"]:
@@ -448,6 +451,15 @@ def _required_s3_uri(value: object, field_name: str) -> str:
 def _required_token(value: object, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip() or not _SAFE_TOKEN_RE.fullmatch(value):
         raise ValueError(f"{field_name} is required")
+    return value
+
+
+def _required_embedding_profile_version(value: object, field_name: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not _EMBEDDING_PROFILE_VERSION_RE.fullmatch(value)
+    ):
+        raise ValueError(f"{field_name} must use canonical profile@version syntax")
     return value
 
 

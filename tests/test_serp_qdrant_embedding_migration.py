@@ -41,6 +41,22 @@ def test_validate_conf_rejects_operation_outside_backfill_evidence_prefix(
         module.validate_qdrant_embedding_migration_conf(conf)
 
 
+@pytest.mark.parametrize(
+    "profile_version",
+    ("bge-m3-1024", "bge-m3-1024@", "@2026.07.2", "bge-m3-1024@@2026.07.2"),
+)
+def test_validate_conf_rejects_noncanonical_embedding_profile_version(
+    monkeypatch: pytest.MonkeyPatch,
+    profile_version: str,
+) -> None:
+    module = _load_migration_module(monkeypatch)
+    conf = _valid_conf()
+    conf["embedding_profile_version"] = profile_version
+
+    with pytest.raises(ValueError, match="profile@version"):
+        module.validate_qdrant_embedding_migration_conf(conf)
+
+
 def test_validate_plan_derives_stable_operation_identity_from_airflow_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -163,7 +179,7 @@ def test_remote_runner_passes_canonical_s3_receipt_uri_to_cli(
             "backfill_receipt_evidence": "s3://airflow-serp-evidence/serp-evals/qdrant-embedding-backfill-001/qdrant-embedding-backfill-receipt-evidence.json",
         },
         "dag_id": "serp_qdrant_embedding_migration",
-        "embedding_profile_version": "bge-m3-1024",
+        "embedding_profile_version": "bge-m3-1024@2026.07.2",
         "operation_id": "qdrant-embedding-backfill-001",
         "source_collection": "serp_vectors_prod",
         "target_collection": "serp_vectors_bge_m3_1024_v20260716",
@@ -176,7 +192,7 @@ def test_remote_runner_passes_canonical_s3_receipt_uri_to_cli(
     }
     receipt_payload = {
         "completed": True,
-        "embedding_profile_version": "bge-m3-1024",
+        "embedding_profile_version": "bge-m3-1024@2026.07.2",
         "processed_point_count": 482910,
         "receipt_version": "qdrant-embedding-backfill-receipt/v1",
         "source_collection": "serp_vectors_prod",
@@ -248,7 +264,7 @@ def test_remote_runner_rejects_noncanonical_receipt_uri(
             "backfill_receipt_evidence": "s3://airflow-serp-evidence/serp-evals/qdrant-embedding-backfill-001/qdrant-embedding-backfill-receipt-evidence.json",
         },
         "dag_id": "serp_qdrant_embedding_migration",
-        "embedding_profile_version": "bge-m3-1024",
+        "embedding_profile_version": "bge-m3-1024@2026.07.2",
         "operation_id": "qdrant-embedding-backfill-001",
         "source_collection": "serp_vectors_prod",
         "target_collection": "serp_vectors_bge_m3_1024_v20260716",
@@ -485,7 +501,7 @@ def _valid_conf() -> dict[str, object]:
         "artifact_root_path": "s3://airflow-serp-evidence/serp-evals",
         "batch_size": 128,
         "correlation_id": "airflow:dag:run-qdrant-backfill",
-        "embedding_profile_version": "bge-m3-1024",
+        "embedding_profile_version": "bge-m3-1024@2026.07.2",
         "generated_at": "2026-08-02T19:00:00Z",
         "route_environment_prefix": "ADAPSTORY_BC10_SERP_CONTEXT_EMBEDDING",
         "source_collection": "serp_vectors_prod",
