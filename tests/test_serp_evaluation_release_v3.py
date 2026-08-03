@@ -5,6 +5,7 @@ import json
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -18,6 +19,7 @@ import dags.serp_eval_contracts as serp_eval_contracts
 from dags.serp_eval_contracts import (
     MANDATORY_SERP_BENCHMARK_SUITES,
     build_benchmark_improvement_wave_plan,
+    build_d17_event_d6_invocation,
     build_d17_event_d6_plan,
     build_d17_event_d6_trigger_conf,
     build_model_catalog_promotion_plan,
@@ -757,6 +759,26 @@ def test_d17_receipt_derives_one_strict_event_d6_then_native_d19_conf() -> None:
     assert d19_plan.payload["evaluation_release_promotion_evidence"] == receipt["promotionEvidence"]
     assert d19_plan.payload["generated_at"] == d17_plan.payload["generated_at"]
 
+    # Context: write_airflow_plan_artifact returns canonical JSON, while a
+    # TriggerDagRunOperator template needs typed invocation fields.
+    # Decision: persist the full event plan as version-bound COMPLIANCE evidence
+    # and return only a strict small invocation envelope.
+    # Reason: Jinja must neither parse nor dereference the full WORM plan.
+    # Revisit when: Airflow offers a native typed XCom contract for DAG triggers.
+    invocation = build_d17_event_d6_invocation(event_plan, snapshot_writer=_snapshot_writer)
+    assert invocation == {
+        "schema": "D17EventD6Invocation/v1",
+        "planEvidence": {
+            "objectLockMode": "COMPLIANCE",
+            "retainUntil": "2027-07-15T00:00:00Z",
+            "s3Uri": event_plan.payload["artifact_paths"]["airflow_plan"],
+            "sha256": "sha256:" + sha256(_canonical_bytes(event_plan.payload)).hexdigest(),
+            "versionId": "written-version-001",
+        },
+        "d19TriggerRunId": event_plan.payload["d19_trigger_run_id"],
+        "d19TriggerConf": event_plan.payload["d19_trigger_conf"],
+    }
+
     # Context: Airflow 3.3 records TriggerDagRunOperator children as
     # operator_triggered/operator, but the task SDK DagRun omits triggered_by.
     # Decision: admit exact operator_triggered metadata only after the existing
@@ -780,6 +802,17 @@ def test_d17_receipt_derives_one_strict_event_d6_then_native_d19_conf() -> None:
         "runId": event_conf["eventD6RunId"],
         "runType": "operator_triggered",
     }
+
+
+def test_event_d6_trigger_templates_consume_typed_invocation() -> None:
+    source = (
+        Path(__file__).parents[1] / "dags" / "serp_model_promotion_regression_suite.py"
+    ).read_text(encoding="utf-8")
+
+    assert "['d19TriggerRunId']" in source
+    assert "['d19TriggerConf']['generated_at']" in source
+    assert "['d19TriggerConf'] }}" in source
+    assert "['d19_trigger_conf']" not in source
 
 
 def test_d17_promotion_writer_uses_canonical_retain_until_not_executor_receipt_alias(

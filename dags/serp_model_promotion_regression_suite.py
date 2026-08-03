@@ -10,9 +10,9 @@ from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOpe
 from airflow.sdk import DAG
 
 from dags.serp_eval_contracts import (
+    build_d17_event_d6_invocation,
     build_d17_event_d6_plan,
     validate_d17_event_d6_airflow_run,
-    write_airflow_plan_artifact,
 )
 from dags.serp_evidence_workload_identity import minio_web_identity_executor_config
 
@@ -28,7 +28,7 @@ D17_EVENT_D6_EVALUATOR_EXECUTOR_CONFIG = minio_web_identity_executor_config(
 )
 
 
-def validate_event_d6_plan(**context: Any) -> str:
+def validate_event_d6_plan(**context: Any) -> dict[str, Any]:
     """Require D17's deterministic operator trigger before D19 can be invoked."""
 
     dag_run = context.get("dag_run")
@@ -54,7 +54,7 @@ def validate_event_d6_plan(**context: Any) -> str:
             "runType": str(run_type_value),
         },
     )
-    return write_airflow_plan_artifact(plan)
+    return build_d17_event_d6_invocation(plan)
 
 
 default_args = {
@@ -89,13 +89,13 @@ trigger_d19 = TriggerDagRunOperator(
     task_id="trigger_benchmark_improvement_wave",
     trigger_dag_id="serp_benchmark_improvement_wave",
     trigger_run_id=(
-        "{{ ti.xcom_pull(task_ids='validate_d17_event_d6_plan')['d19_trigger_run_id'] }}"
+        "{{ ti.xcom_pull(task_ids='validate_d17_event_d6_plan')['d19TriggerRunId'] }}"
     ),
     logical_date=(
         "{{ ti.xcom_pull(task_ids='validate_d17_event_d6_plan')"
-        "['d19_trigger_conf']['generated_at'] }}"
+        "['d19TriggerConf']['generated_at'] }}"
     ),
-    conf="{{ ti.xcom_pull(task_ids='validate_d17_event_d6_plan')['d19_trigger_conf'] }}",
+    conf="{{ ti.xcom_pull(task_ids='validate_d17_event_d6_plan')['d19TriggerConf'] }}",
     reset_dag_run=False,
     wait_for_completion=True,
     allowed_states=["success"],

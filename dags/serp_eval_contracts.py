@@ -195,6 +195,8 @@ _D19_VERIFICATION_EVIDENCE_MAX_BYTES = 16_000_000
 _SCHEDULED_D6_DAG_ID = "serp_nightly_regression_suite"
 _D17_EVENT_D6_DAG_ID = "serp_model_promotion_regression_suite"
 _D17_EVENT_D6_TRIGGER_SCHEMA = "D17EventD6Trigger/v1"
+_D17_EVENT_D6_INVOCATION_SCHEMA = "D17EventD6Invocation/v1"
+_D17_EVENT_D6_PLAN_ARTIFACT_TYPE = "d17-event-d6-plan"
 _D17_EVENT_D6_RUN_ID_PREFIX = "event_d6__"
 _D17_EVENT_D19_RUN_ID_PREFIX = "event_d6_d19__"
 _SCHEDULED_D6_RECEIPT_SCHEMA = "ScheduledD6RegressionReceipt/v2"
@@ -2360,6 +2362,48 @@ def validate_d17_event_d6_airflow_run(
         "logicalDate": logical_date,
         "runId": run_id,
         "runType": "operator_triggered",
+    }
+
+
+def build_d17_event_d6_invocation(
+    plan: SerpDagPlan,
+    *,
+    snapshot_writer: Callable[..., dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Persist the full event plan and return its minimal native trigger authority."""
+
+    if not isinstance(plan, SerpDagPlan):
+        raise ValueError("event D6 invocation requires a validated SerpDagPlan")
+    payload = plan.payload
+    if _required_str(payload, "dag_id") != _D17_EVENT_D6_DAG_ID:
+        raise ValueError("event D6 invocation plan dag_id does not match")
+    artifact_path = _required_artifact_paths(payload, ("airflow_plan",))["airflow_plan"]
+    writer = snapshot_writer or write_immutable_evidence_snapshot
+    written = writer(
+        artifact_path,
+        artifact_type=_D17_EVENT_D6_PLAN_ARTIFACT_TYPE,
+        operation_id=_required_str(payload, "operation_id"),
+        payload=payload,
+    )
+    if not isinstance(written, Mapping):
+        raise ValueError("event D6 plan evidence writer returned an invalid receipt")
+    plan_evidence = _worm_evidence_reference(
+        {
+            "planEvidence": {
+                "objectLockMode": _required_str(written, "objectLockMode"),
+                "retainUntil": _required_datetime_string(written, "retainUntil"),
+                "s3Uri": _required_str(written, "artifactPath"),
+                "sha256": "sha256:" + _required_sha256_hex(written, "artifactSha256"),
+                "versionId": _required_str(written, "artifactVersionId"),
+            }
+        },
+        "planEvidence",
+    )
+    return {
+        "schema": _D17_EVENT_D6_INVOCATION_SCHEMA,
+        "planEvidence": plan_evidence,
+        "d19TriggerRunId": _required_str(payload, "d19_trigger_run_id"),
+        "d19TriggerConf": dict(_required_mapping(payload, "d19_trigger_conf")),
     }
 
 
