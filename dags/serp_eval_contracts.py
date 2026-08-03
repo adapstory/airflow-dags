@@ -45,6 +45,7 @@ from adapstory_serp_pipeline.registry.evaluation_release_contract import (
 )
 
 from dags.public_docs_crawler import CrawlResponse, crawl_public_docs
+from dags.serp_d19_run_identity import normalize_d19_run_type
 from dags.serp_ds1000_contract import (
     DS1000_DATASET_FIELD_NAMES,
     DS1000_DATASET_PROVENANCE_SCHEMA,
@@ -1007,7 +1008,13 @@ def _normalized_d19_history_run(
     ):
         raise ValueError("D19 history run is outside the pre-parent window")
     run_type = _required_str(run, "runType")
-    if run_type not in {"asset_triggered", "backfill", "manual", "scheduled"}:
+    if run_type not in {
+        "asset_triggered",
+        "backfill",
+        "manual",
+        "operator_triggered",
+        "scheduled",
+    }:
         raise ValueError("D19 history runType is unsupported")
     state = _required_str(run, "state")
     if state not in {"failed", "queued", "running", "success"}:
@@ -1066,8 +1073,10 @@ def _normalized_d19_history_accepted_verifications(
     if len(history_runs) < _SCHEDULED_D6_PRIOR_STREAK_LENGTH:
         raise ValueError("D19 history requires at least three prior runs")
     expected_runs = list(history_runs[-_SCHEDULED_D6_PRIOR_STREAK_LENGTH:])
-    if any(run["state"] != "success" or run["runType"] != "manual" for run in expected_runs):
+    if any(run["state"] != "success" for run in expected_runs):
         raise ValueError("last three historical D19 runs must be successful admitted runs")
+    for run in expected_runs:
+        normalize_d19_run_type(run_id=run["runId"], run_type=run["runType"])
     logical_dates = [
         _datetime_value(run["logicalDate"], "D19 history logicalDate") for run in expected_runs
     ]
@@ -1156,8 +1165,8 @@ def _normalized_d19_history_fence(
         "acquiredAt",
         "expiresAt",
         "holderIdentity",
-        "leaseDurationSeconds",
-        "leaseName",
+        "durationSeconds",
+        "resourceName",
         "namespace",
         "parentDagId",
         "parentRunId",
@@ -1166,10 +1175,10 @@ def _normalized_d19_history_fence(
     }
     if set(fence) != expected_fields:
         raise ValueError("D19 history fence fields are unsupported")
-    if _required_str(fence, "schema") != "D19HistoryFence/v1":
+    if _required_str(fence, "schema") != "D19HistoryFence/v2":
         raise ValueError("D19 history fence schema is unsupported")
-    if _required_str(fence, "leaseName") != "serp-d19-history-fence":
-        raise ValueError("D19 history fence leaseName is unsupported")
+    if _required_str(fence, "resourceName") != "serp-d19-history-fence":
+        raise ValueError("D19 history fence resourceName is unsupported")
     if _required_str(fence, "namespace") != _D19_RUN_HISTORY_OBSERVER_NAMESPACE:
         raise ValueError("D19 history fence namespace is unsupported")
     if _required_str(fence, "parentDagId") != parent_airflow_run["dagId"]:
@@ -1189,7 +1198,7 @@ def _normalized_d19_history_fence(
     )
     if observed_at is not None and not acquired <= observed_at < expires:
         raise ValueError("D19 history fence must remain active through observation")
-    duration = _required_positive_int(fence, "leaseDurationSeconds")
+    duration = _required_positive_int(fence, "durationSeconds")
     if duration > 86_400 or expires - acquired != timedelta(seconds=duration):
         raise ValueError("D19 history fence duration is unsupported")
     parent_start = _datetime_value(parent_airflow_run["startDate"], "parent startDate")
@@ -1199,13 +1208,13 @@ def _normalized_d19_history_fence(
         "acquiredAt": acquired.isoformat().replace("+00:00", "Z"),
         "expiresAt": expires.isoformat().replace("+00:00", "Z"),
         "holderIdentity": expected_holder,
-        "leaseDurationSeconds": duration,
-        "leaseName": "serp-d19-history-fence",
+        "durationSeconds": duration,
+        "resourceName": "serp-d19-history-fence",
         "namespace": _D19_RUN_HISTORY_OBSERVER_NAMESPACE,
         "parentDagId": parent_airflow_run["dagId"],
         "parentRunId": parent_airflow_run["runId"],
         "resourceVersion": _required_str(fence, "resourceVersion"),
-        "schema": "D19HistoryFence/v1",
+        "schema": "D19HistoryFence/v2",
     }
 
 
@@ -9968,13 +9977,16 @@ def _normalized_d19_airflow_run(airflow_run: Mapping[str, Any] | str) -> dict[st
         raise ValueError("D19 airflowRun fields are unsupported")
     if _required_str(metadata, "dagId") != _D19_DAG_ID:
         raise ValueError("D19 airflowRun dagId does not match")
-    if _required_str(metadata, "runType") != "manual":
-        raise ValueError("D19 airflowRun runType must be manual")
+    run_id = _required_str(metadata, "runId")
+    run_type = normalize_d19_run_type(
+        run_id=run_id,
+        run_type=_required_str(metadata, "runType"),
+    )
     return {
         "dagId": _D19_DAG_ID,
         "logicalDate": _required_datetime_string(metadata, "logicalDate"),
-        "runId": _required_str(metadata, "runId"),
-        "runType": "manual",
+        "runId": run_id,
+        "runType": run_type,
     }
 
 

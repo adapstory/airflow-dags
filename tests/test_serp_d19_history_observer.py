@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
+import dags.serp_d19_history_observer as history_observer_module
 from dags.serp_d19_history_observer import (
     AIRFLOW_HISTORY_OBSERVER_USERNAME,
     AirflowD19HistoryClient,
@@ -473,8 +474,8 @@ def test_history_client_fails_closed_on_non_contiguous_or_replayed_streak(
         ).collect(parent_logical_date=PARENT_LOGICAL_DATE)
 
 
-def test_kubernetes_fence_requires_a_predeclared_lease() -> None:
-    api = _LeaseApi(read_error=_ApiError(404))
+def test_kubernetes_fence_requires_a_predeclared_config_map() -> None:
+    api = _ConfigMapApi(read_error=_ApiError(404))
     client = KubernetesD19HistoryFenceClient(
         api=api,
         clock=lambda: datetime(2026, 7, 17, 0, 0, 5, tzinfo=UTC),
@@ -486,7 +487,7 @@ def test_kubernetes_fence_requires_a_predeclared_lease() -> None:
 
 
 def test_kubernetes_fence_rejects_active_holder_and_cas_replaces_expired_holder() -> None:
-    active_api = _LeaseApi(read_response=_lease(resource_version="17"))
+    active_api = _ConfigMapApi(read_response=_config_map(resource_version="17"))
     active = KubernetesD19HistoryFenceClient(
         api=active_api,
         clock=lambda: datetime(2026, 7, 17, 0, 0, 6, tzinfo=UTC),
@@ -494,18 +495,18 @@ def test_kubernetes_fence_rejects_active_holder_and_cas_replaces_expired_holder(
     with pytest.raises(ValueError, match="already active"):
         active.acquire(parent_airflow_run={**_parent_run(), "runId": "scheduled__other"})
 
-    expired_lease = _lease(
+    expired_lease = _config_map(
         acquired_at="2026-07-16T00:00:00Z",
         renew_time="2026-07-16T00:00:00Z",
         resource_version="21",
     )
-    replacement = _lease(
+    replacement = _config_map(
         acquired_at="2026-07-17T00:00:05Z",
         renew_time="2026-07-17T00:00:05Z",
         resource_version="22",
         transitions=2,
     )
-    expired_api = _LeaseApi(read_response=expired_lease, patch_response=replacement)
+    expired_api = _ConfigMapApi(read_response=expired_lease, patch_response=replacement)
     client = KubernetesD19HistoryFenceClient(
         api=expired_api,
         clock=lambda: datetime(2026, 7, 17, 0, 0, 5, tzinfo=UTC),
@@ -513,7 +514,7 @@ def test_kubernetes_fence_rejects_active_holder_and_cas_replaces_expired_holder(
 
     assert client.acquire(parent_airflow_run=_parent_run()) == _fence(resource_version="22")
     patch = expired_api.patches[0][2]
-    assert set(patch) == {"metadata", "spec"}
+    assert set(patch) == {"data", "metadata"}
     assert patch["metadata"] == {
         "annotations": {
             "serp.adapstory.ai/parent-dag-id": "serp_nightly_regression_suite",
@@ -521,13 +522,13 @@ def test_kubernetes_fence_rejects_active_holder_and_cas_replaces_expired_holder(
         },
         "resourceVersion": "21",
     }
-    assert patch["spec"]["leaseTransitions"] == 2
+    assert patch["data"]["transitions"] == "2"
 
 
 def test_kubernetes_fence_release_and_child_validation_are_exact() -> None:
-    release_response = _lease(resource_version="18", holder="", transitions=1)
-    api = _LeaseApi(
-        read_response=_lease(resource_version="17"),
+    release_response = _config_map(resource_version="18", holder="", transitions=1)
+    api = _ConfigMapApi(
+        read_response=_config_map(resource_version="17"),
         patch_response=release_response,
     )
     client = KubernetesD19HistoryFenceClient(
@@ -540,9 +541,9 @@ def test_kubernetes_fence_release_and_child_validation_are_exact() -> None:
     client.release(evidence)
 
     assert api.patches[-1][2]["metadata"]["resourceVersion"] == "17"
-    assert api.patches[-1][2]["spec"]["holderIdentity"] == ""
+    assert api.patches[-1][2]["data"]["holderIdentity"] == ""
 
-    wrong_version = _LeaseApi(read_response=_lease(resource_version="99"))
+    wrong_version = _ConfigMapApi(read_response=_config_map(resource_version="99"))
     with pytest.raises(ValueError, match="resourceVersion"):
         KubernetesD19HistoryFenceClient(
             api=wrong_version,
@@ -552,15 +553,15 @@ def test_kubernetes_fence_release_and_child_validation_are_exact() -> None:
 
 def test_manual_d19_is_blocked_only_while_a_real_fence_is_active() -> None:
     active = KubernetesD19HistoryFenceClient(
-        api=_LeaseApi(read_response=_lease(resource_version="17")),
+        api=_ConfigMapApi(read_response=_config_map(resource_version="17")),
         clock=lambda: datetime(2026, 7, 17, 0, 0, 10, tzinfo=UTC),
     )
     with pytest.raises(ValueError, match="blocks unfenced D19"):
         active.assert_unfenced_run_allowed()
 
     expired = KubernetesD19HistoryFenceClient(
-        api=_LeaseApi(
-            read_response=_lease(
+        api=_ConfigMapApi(
+            read_response=_config_map(
                 acquired_at="2026-07-16T00:00:00Z",
                 renew_time="2026-07-16T00:00:00Z",
                 resource_version="17",
@@ -571,7 +572,7 @@ def test_manual_d19_is_blocked_only_while_a_real_fence_is_active() -> None:
     expired.assert_unfenced_run_allowed()
 
     missing = KubernetesD19HistoryFenceClient(
-        api=_LeaseApi(read_error=_ApiError(404)),
+        api=_ConfigMapApi(read_error=_ApiError(404)),
         clock=lambda: datetime(2026, 7, 17, 0, 0, 10, tzinfo=UTC),
     )
     with pytest.raises(ValueError, match="predeclared"):
@@ -584,9 +585,9 @@ def test_fence_environment_uses_only_projected_token_file(tmp_path: Path) -> Non
     token_file.write_text("projected-kubernetes-jwt\n", encoding="utf-8")
     ca_file.write_text("test-ca\n", encoding="utf-8")
     observed: list[tuple[Path, Path]] = []
-    api = _LeaseApi(read_error=_ApiError(404))
+    api = _ConfigMapApi(read_error=_ApiError(404))
 
-    def api_factory(*, token_path: Path, ca_path: Path) -> _LeaseApi:
+    def api_factory(*, token_path: Path, ca_path: Path) -> _ConfigMapApi:
         observed.append((token_path, ca_path))
         return api
 
@@ -609,6 +610,26 @@ def test_fence_environment_uses_only_projected_token_file(tmp_path: Path) -> Non
             },
             api_factory=lambda **_: api,
         )
+
+
+def test_projected_core_api_uses_generated_client_bearer_auth_key(
+    tmp_path: Path,
+) -> None:
+    token_file = tmp_path / "token"
+    ca_file = tmp_path / "ca.crt"
+    token_file.write_text("projected-kubernetes-jwt\n", encoding="utf-8")
+    ca_file.write_text("test-ca\n", encoding="utf-8")
+
+    api = history_observer_module._projected_core_api(
+        token_path=token_file,
+        ca_path=ca_file,
+    )
+    configuration = api.api_client.configuration
+
+    assert configuration.get_api_key_with_prefix("BearerToken") == (
+        "Bearer projected-kubernetes-jwt"
+    )
+    assert "authorization" not in configuration.api_key
 
 
 def test_history_attestation_sealer_delegates_to_canonical_pipeline_contract() -> None:
@@ -714,6 +735,48 @@ def test_d19_unfenced_admission_is_blocked_during_window_and_checks_logical_date
         admit_d19_run(
             dag_run_conf=conf,
             airflow_run={**_d19_airflow_run(), "logicalDate": "2026-07-17T00:00:01Z"},
+            fence_client=_AdmissionFenceClient(active=None),
+        )
+
+
+@pytest.mark.parametrize("run_id", ("event_d6_d19__release-17", "d6__scheduled__2026-07-17"))
+def test_d19_admission_binds_native_triggered_ids_to_operator_run_type(run_id: str) -> None:
+    airflow_run = {
+        **_d19_airflow_run(),
+        "runId": run_id,
+        "runType": "operator_triggered",
+    }
+
+    admitted = admit_d19_run(
+        dag_run_conf={"generated_at": "2026-07-17T00:00:00Z"},
+        airflow_run=airflow_run,
+        fence_client=_AdmissionFenceClient(active=None),
+    )
+
+    assert admitted["airflowRun"] == airflow_run
+
+
+@pytest.mark.parametrize(
+    ("run_id", "run_type"),
+    (
+        ("event_d6_d19__release-17", "manual"),
+        ("d6__scheduled__2026-07-17", "manual"),
+        ("manual__operator-spoof", "operator_triggered"),
+        ("unknown__run", "manual"),
+    ),
+)
+def test_d19_admission_rejects_run_id_and_type_provenance_mismatches(
+    run_id: str,
+    run_type: str,
+) -> None:
+    with pytest.raises(ValueError, match="runId and runType provenance"):
+        admit_d19_run(
+            dag_run_conf={"generated_at": "2026-07-17T00:00:00Z"},
+            airflow_run={
+                **_d19_airflow_run(),
+                "runId": run_id,
+                "runType": run_type,
+            },
             fence_client=_AdmissionFenceClient(active=None),
         )
 
@@ -846,7 +909,7 @@ class _ApiError(Exception):
         self.status = status
 
 
-class _LeaseApi:
+class _ConfigMapApi:
     def __init__(
         self,
         *,
@@ -859,7 +922,7 @@ class _LeaseApi:
         self.patch_response = patch_response
         self.patches: list[tuple[str, str, dict[str, Any]]] = []
 
-    def read_namespaced_lease(self, *, name: str, namespace: str) -> dict[str, Any]:
+    def read_namespaced_config_map(self, *, name: str, namespace: str) -> dict[str, Any]:
         assert name == "serp-d19-history-fence"
         assert namespace == "airflow"
         if self.read_error is not None:
@@ -867,7 +930,7 @@ class _LeaseApi:
         assert self.read_response is not None
         return self.read_response
 
-    def patch_namespaced_lease(
+    def patch_namespaced_config_map(
         self,
         *,
         name: str,
@@ -875,7 +938,7 @@ class _LeaseApi:
         body: dict[str, Any],
     ) -> dict[str, Any]:
         self.patches.append((name, namespace, body))
-        return self.patch_response or _lease(resource_version="17")
+        return self.patch_response or _config_map(resource_version="17")
 
 
 def _parent_run() -> dict[str, str]:
@@ -893,17 +956,17 @@ def _fence(*, resource_version: str) -> dict[str, Any]:
         "acquiredAt": "2026-07-17T00:00:05Z",
         "expiresAt": "2026-07-17T12:00:05Z",
         "holderIdentity": "d6:scheduled__2026-07-17",
-        "leaseDurationSeconds": 43200,
-        "leaseName": "serp-d19-history-fence",
+        "durationSeconds": 43200,
+        "resourceName": "serp-d19-history-fence",
         "namespace": "airflow",
         "parentDagId": "serp_nightly_regression_suite",
         "parentRunId": "scheduled__2026-07-17",
         "resourceVersion": resource_version,
-        "schema": "D19HistoryFence/v1",
+        "schema": "D19HistoryFence/v2",
     }
 
 
-def _lease(
+def _config_map(
     *,
     acquired_at: str = "2026-07-17T00:00:05Z",
     holder: str = "d6:scheduled__2026-07-17",
@@ -912,8 +975,8 @@ def _lease(
     transitions: int = 1,
 ) -> dict[str, Any]:
     return {
-        "apiVersion": "coordination.k8s.io/v1",
-        "kind": "Lease",
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
         "metadata": {
             "annotations": {
                 "serp.adapstory.ai/parent-dag-id": "serp_nightly_regression_suite",
@@ -923,11 +986,11 @@ def _lease(
             "namespace": "airflow",
             "resourceVersion": resource_version,
         },
-        "spec": {
-            "acquireTime": acquired_at,
+        "data": {
+            "acquiredAt": acquired_at,
             "holderIdentity": holder,
-            "leaseDurationSeconds": 43200,
-            "leaseTransitions": transitions,
+            "durationSeconds": "43200",
+            "transitions": str(transitions),
             "renewTime": renew_time,
         },
     }

@@ -879,7 +879,7 @@ def test_d6_history_observation_fails_closed_and_releases_fence(
     elif mutation == "expired_fence":
         fence["acquiredAt"] = "2026-07-17T00:00:04Z"
         fence["expiresAt"] = "2026-07-17T00:00:09Z"
-        fence["leaseDurationSeconds"] = 5
+        fence["durationSeconds"] = 5
     fence_client = _D6FenceClient(fence)
 
     def clock() -> datetime:
@@ -1226,6 +1226,7 @@ def test_catalog_materializer_accepts_dedicated_dataset_evidence_plan() -> None:
             "artifactVersionId": "version-20260713",
             "objectLockMode": "COMPLIANCE",
             "operationId": kwargs["operation_id"],
+            "retainUntil": "2027-07-13T19:30:00Z",
             "status": "written",
         }
 
@@ -1239,6 +1240,7 @@ def test_catalog_materializer_accepts_dedicated_dataset_evidence_plan() -> None:
             "artifactVersionId": "version-20260713",
             "objectLockMode": "COMPLIANCE",
             "operationId": kwargs["operation_id"],
+            "retainUntil": "2027-07-13T19:30:00Z",
             "status": "written",
         }
 
@@ -9699,6 +9701,52 @@ def _scheduled_d6_prior_runs() -> list[dict[str, str]]:
     ]
 
 
+@pytest.mark.parametrize(
+    ("run_id", "run_type"),
+    (
+        ("event_d6_d19__release-17", "operator_triggered"),
+        ("d6__scheduled__2026-07-17", "operator_triggered"),
+        ("manual__release-17", "manual"),
+    ),
+)
+def test_d19_airflow_run_normalization_binds_native_provenance(
+    run_id: str,
+    run_type: str,
+) -> None:
+    airflow_run = {
+        "dagId": "serp_benchmark_improvement_wave",
+        "logicalDate": "2026-07-17T00:00:00Z",
+        "runId": run_id,
+        "runType": run_type,
+    }
+
+    assert serp_eval_contracts_module._normalized_d19_airflow_run(airflow_run) == airflow_run
+
+
+@pytest.mark.parametrize(
+    ("run_id", "run_type"),
+    (
+        ("event_d6_d19__release-17", "manual"),
+        ("d6__scheduled__2026-07-17", "manual"),
+        ("manual__operator-spoof", "operator_triggered"),
+        ("unknown__run", "manual"),
+    ),
+)
+def test_d19_airflow_run_normalization_rejects_provenance_mismatches(
+    run_id: str,
+    run_type: str,
+) -> None:
+    with pytest.raises(ValueError, match="runId and runType provenance"):
+        serp_eval_contracts_module._normalized_d19_airflow_run(
+            {
+                "dagId": "serp_benchmark_improvement_wave",
+                "logicalDate": "2026-07-17T00:00:00Z",
+                "runId": run_id,
+                "runType": run_type,
+            }
+        )
+
+
 def _scheduled_d6_prior_pointer(
     index: int,
     run: Mapping[str, str],
@@ -9727,13 +9775,13 @@ def _scheduled_d6_fence(parent_run: Mapping[str, str]) -> dict[str, Any]:
         "acquiredAt": acquired_at.isoformat().replace("+00:00", "Z"),
         "expiresAt": (acquired_at + timedelta(hours=12)).isoformat().replace("+00:00", "Z"),
         "holderIdentity": f"d6:{parent_run['runId']}",
-        "leaseDurationSeconds": 43_200,
-        "leaseName": "serp-d19-history-fence",
+        "durationSeconds": 43_200,
+        "resourceName": "serp-d19-history-fence",
         "namespace": "airflow",
         "parentDagId": parent_run["dagId"],
         "parentRunId": parent_run["runId"],
         "resourceVersion": "812345",
-        "schema": "D19HistoryFence/v1",
+        "schema": "D19HistoryFence/v2",
     }
 
 
@@ -9988,7 +10036,7 @@ def _scheduled_d6_receipt_fixture(
         "dagId": "serp_benchmark_improvement_wave",
         "logicalDate": parent_run["logicalDate"],
         "runId": f"d6__{parent_run['runId']}",
-        "runType": "manual",
+        "runType": "operator_triggered",
     }
     current_verification_handle = _d19_worm_evidence(
         f"verification/current-{current_request_index}",

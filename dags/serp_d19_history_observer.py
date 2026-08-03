@@ -24,6 +24,8 @@ from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 from uuid import UUID
 
+from dags.serp_d19_run_identity import normalize_d19_run_type
+
 AIRFLOW_HISTORY_OBSERVER_USERNAME = "serp-d19-history-observer"
 AIRFLOW_HISTORY_DAG_ID = "serp_benchmark_improvement_wave"
 AIRFLOW_HISTORY_API_VERSION = "v2"
@@ -37,8 +39,8 @@ AIRFLOW_HISTORY_MAX_TIMEOUT_SECONDS = 30
 AIRFLOW_HISTORY_REQUIRED_ACCEPTED_RUNS = 3
 AIRFLOW_HISTORY_VERIFICATION_TASK_ID = "persist_paired_evaluation_verification_evidence"
 AIRFLOW_HISTORY_VERIFICATION_XCOM_KEY = "return_value"
-D19_HISTORY_FENCE_SCHEMA = "D19HistoryFence/v1"
-D19_HISTORY_FENCE_LEASE_NAME = "serp-d19-history-fence"
+D19_HISTORY_FENCE_SCHEMA = "D19HistoryFence/v2"
+D19_HISTORY_FENCE_RESOURCE_NAME = "serp-d19-history-fence"
 D19_HISTORY_FENCE_NAMESPACE = "airflow"
 D19_HISTORY_FENCE_DURATION_SECONDS = 43_200
 D19_HISTORY_PARENT_DAG_ID = "serp_nightly_regression_suite"
@@ -633,7 +635,11 @@ def _normalized_verification_pointer(
     expected_identity = {
         key: expected_run[key] for key in ("dagId", "logicalDate", "runId", "runType")
     }
-    if normalized_run != expected_identity or normalized_run["runType"] != "manual":
+    normalize_d19_run_type(
+        run_id=normalized_run["runId"],
+        run_type=normalized_run["runType"],
+    )
+    if normalized_run != expected_identity:
         raise ValueError("D19 verification pointer airflowRun does not match its history run")
     if _required_string(value, "receiptStatus") != "accepted":
         raise ValueError("D19 verification pointer receiptStatus must be accepted")
@@ -702,7 +708,7 @@ def _canonical_uuid(value: str, field_name: str) -> str:
 
 
 class KubernetesD19HistoryFenceClient:
-    """CAS-backed D19 exclusion fence on one fixed Kubernetes Lease."""
+    """CAS-backed D19 exclusion lease stored in one fixed Kubernetes ConfigMap."""
 
     def __init__(
         self,
@@ -711,7 +717,7 @@ class KubernetesD19HistoryFenceClient:
         clock: _Clock | None = None,
     ) -> None:
         if api is None:
-            raise ValueError("Kubernetes Coordination API client is required")
+            raise ValueError("Kubernetes Core API client is required")
         self._api = api
         self._clock = clock or (lambda: datetime.now(UTC))
 
@@ -736,7 +742,7 @@ class KubernetesD19HistoryFenceClient:
         ):
             if not path.is_absolute() or not path.is_file():
                 raise ValueError(f"{field_name} must be an existing absolute file")
-        factory = api_factory or _projected_coordination_api
+        factory = api_factory or _projected_core_api
         return cls(api=factory(token_path=token_path, ca_path=ca_path), clock=clock)
 
     def acquire(self, *, parent_airflow_run: Mapping[str, Any]) -> dict[str, Any]:
@@ -746,8 +752,8 @@ class KubernetesD19HistoryFenceClient:
         now = _aware_utc(self._clock(), "Kubernetes fence clock")
         holder = f"d6:{parent['runId']}"
         try:
-            raw_existing = self._api.read_namespaced_lease(
-                name=D19_HISTORY_FENCE_LEASE_NAME,
+            raw_existing = self._api.read_namespaced_config_map(
+                name=D19_HISTORY_FENCE_RESOURCE_NAME,
                 namespace=D19_HISTORY_FENCE_NAMESPACE,
             )
         except Exception as exc:
@@ -755,8 +761,8 @@ class KubernetesD19HistoryFenceClient:
                 raise ValueError("Kubernetes D19 fence read failed") from exc
             raise ValueError("Kubernetes D19 fence must be predeclared") from exc
 
-        existing = _normalized_lease(raw_existing)
-        if _lease_is_active(existing, observed_at=now):
+        existing = _normalized_fence_resource(raw_existing)
+        if _fence_is_active(existing, observed_at=now):
             if (
                 existing["holderIdentity"] == holder
                 and existing["parentDagId"] == parent["dagId"]
@@ -769,17 +775,17 @@ class KubernetesD19HistoryFenceClient:
                 )
             raise ValueError("Kubernetes D19 history fence is already active")
 
-        body = _lease_patch(
+        body = _fence_resource_patch(
             parent=parent,
             holder=holder,
             acquired_at=now,
             renew_time=now,
-            transitions=existing["leaseTransitions"] + 1,
+            transitions=existing["transitions"] + 1,
             resource_version=existing["resourceVersion"],
         )
         try:
-            patched = self._api.patch_namespaced_lease(
-                name=D19_HISTORY_FENCE_LEASE_NAME,
+            patched = self._api.patch_namespaced_config_map(
+                name=D19_HISTORY_FENCE_RESOURCE_NAME,
                 namespace=D19_HISTORY_FENCE_NAMESPACE,
                 body=body,
             )
@@ -793,25 +799,25 @@ class KubernetesD19HistoryFenceClient:
         return evidence
 
     def require_active(self, fence: Mapping[str, Any]) -> dict[str, Any]:
-        """Require the exact live Lease version supplied by scheduled D6."""
+        """Require the exact live fence version supplied by scheduled D6."""
 
         expected = _normalized_fence_evidence(fence)
         now = _aware_utc(self._clock(), "Kubernetes fence clock")
         try:
-            observed = _normalized_lease(
-                self._api.read_namespaced_lease(
-                    name=D19_HISTORY_FENCE_LEASE_NAME,
+            observed = _normalized_fence_resource(
+                self._api.read_namespaced_config_map(
+                    name=D19_HISTORY_FENCE_RESOURCE_NAME,
                     namespace=D19_HISTORY_FENCE_NAMESPACE,
                 )
             )
         except Exception as exc:
             raise ValueError("scheduled D19 requires its active Kubernetes fence") from exc
-        if not _lease_is_active(observed, observed_at=now):
+        if not _fence_is_active(observed, observed_at=now):
             raise ValueError("scheduled D19 requires its active Kubernetes fence")
         comparisons = {
             "acquiredAt": expected["acquiredAt"],
             "holderIdentity": expected["holderIdentity"],
-            "leaseDurationSeconds": expected["leaseDurationSeconds"],
+            "durationSeconds": expected["durationSeconds"],
             "parentDagId": expected["parentDagId"],
             "parentRunId": expected["parentRunId"],
             "resourceVersion": expected["resourceVersion"],
@@ -822,33 +828,33 @@ class KubernetesD19HistoryFenceClient:
         return expected
 
     def assert_unfenced_run_allowed(self) -> None:
-        """Block manual D19 admission while scheduled D6 owns the Lease."""
+        """Block manual D19 admission while scheduled D6 owns the fence."""
 
         now = _aware_utc(self._clock(), "Kubernetes fence clock")
         try:
-            raw = self._api.read_namespaced_lease(
-                name=D19_HISTORY_FENCE_LEASE_NAME,
+            raw = self._api.read_namespaced_config_map(
+                name=D19_HISTORY_FENCE_RESOURCE_NAME,
                 namespace=D19_HISTORY_FENCE_NAMESPACE,
             )
         except Exception as exc:
             if _api_error_status(exc) == 404:
                 raise ValueError("Kubernetes D19 fence must be predeclared") from exc
             raise ValueError("Kubernetes D19 fence read failed") from exc
-        if _lease_is_active(_normalized_lease(raw), observed_at=now):
+        if _fence_is_active(_normalized_fence_resource(raw), observed_at=now):
             raise ValueError("active scheduled D6 fence blocks unfenced D19 admission")
 
     def release(self, fence: Mapping[str, Any]) -> None:
         """CAS-release only the exact holder and resourceVersion we acquired."""
 
         expected = self.require_active(fence)
-        observed = _normalized_lease(
-            self._api.read_namespaced_lease(
-                name=D19_HISTORY_FENCE_LEASE_NAME,
+        observed = _normalized_fence_resource(
+            self._api.read_namespaced_config_map(
+                name=D19_HISTORY_FENCE_RESOURCE_NAME,
                 namespace=D19_HISTORY_FENCE_NAMESPACE,
             )
         )
         now = _aware_utc(self._clock(), "Kubernetes fence clock")
-        body = _lease_patch(
+        body = _fence_resource_patch(
             parent={
                 "dagId": expected["parentDagId"],
                 "runId": expected["parentRunId"],
@@ -856,13 +862,13 @@ class KubernetesD19HistoryFenceClient:
             holder="",
             acquired_at=_parse_datetime(expected["acquiredAt"]),
             renew_time=now,
-            transitions=observed["leaseTransitions"],
+            transitions=observed["transitions"],
             resource_version=expected["resourceVersion"],
         )
         try:
-            released = _normalized_lease(
-                self._api.patch_namespaced_lease(
-                    name=D19_HISTORY_FENCE_LEASE_NAME,
+            released = _normalized_fence_resource(
+                self._api.patch_namespaced_config_map(
+                    name=D19_HISTORY_FENCE_RESOURCE_NAME,
                     namespace=D19_HISTORY_FENCE_NAMESPACE,
                     body=body,
                 )
@@ -888,16 +894,19 @@ def admit_d19_run(
         raise ValueError("D19 airflowRun fields are unsupported")
     if _required_string(airflow_run, "dagId") != AIRFLOW_HISTORY_DAG_ID:
         raise ValueError("D19 airflowRun dagId is unsupported")
-    if _required_string(airflow_run, "runType") != "manual":
-        raise ValueError("D19 airflowRun runType must be manual")
+    run_id = _required_string(airflow_run, "runId")
+    run_type = normalize_d19_run_type(
+        run_id=run_id,
+        run_type=_required_string(airflow_run, "runType"),
+    )
     normalized_run = {
         "dagId": AIRFLOW_HISTORY_DAG_ID,
         "logicalDate": _datetime_string(
             _required_string(airflow_run, "logicalDate"),
             "D19 airflowRun.logicalDate",
         ),
-        "runId": _required_string(airflow_run, "runId"),
-        "runType": "manual",
+        "runId": run_id,
+        "runType": run_type,
     }
     generated_at = _datetime_string(
         _required_string(dag_run_conf, "generated_at"),
@@ -1017,7 +1026,7 @@ def _normalized_parent_run(value: Mapping[str, Any]) -> dict[str, str]:
     }
 
 
-def _lease_patch(
+def _fence_resource_patch(
     *,
     parent: Mapping[str, str],
     holder: str,
@@ -1027,7 +1036,7 @@ def _lease_patch(
     resource_version: str,
 ) -> dict[str, Any]:
     if transitions < 0:
-        raise ValueError("Kubernetes D19 fence leaseTransitions is invalid")
+        raise ValueError("Kubernetes D19 fence transitions is invalid")
     if not resource_version:
         raise ValueError("Kubernetes D19 fence resourceVersion is required")
     return {
@@ -1038,17 +1047,17 @@ def _lease_patch(
             },
             "resourceVersion": resource_version,
         },
-        "spec": {
-            "acquireTime": _utc_string(acquired_at),
+        "data": {
+            "acquiredAt": _utc_string(acquired_at),
             "holderIdentity": holder,
-            "leaseDurationSeconds": D19_HISTORY_FENCE_DURATION_SECONDS,
-            "leaseTransitions": transitions,
+            "durationSeconds": str(D19_HISTORY_FENCE_DURATION_SECONDS),
+            "transitions": str(transitions),
             "renewTime": _utc_string(renew_time),
         },
     }
 
 
-def _normalized_lease(raw: Any) -> dict[str, Any]:
+def _normalized_fence_resource(raw: Any) -> dict[str, Any]:
     if isinstance(raw, Mapping):
         value = raw
     else:
@@ -1059,41 +1068,43 @@ def _normalized_lease(raw: Any) -> dict[str, Any]:
         if not isinstance(value, Mapping):
             raise ValueError("Kubernetes D19 fence response is invalid")
     metadata = _mapping_field(value, "metadata")
-    spec = _mapping_field(value, "spec")
-    if _aliased_string(metadata, "name") != D19_HISTORY_FENCE_LEASE_NAME:
-        raise ValueError("Kubernetes D19 fence Lease name is unsupported")
+    data = _mapping_field(value, "data")
+    if _aliased_string(metadata, "name") != D19_HISTORY_FENCE_RESOURCE_NAME:
+        raise ValueError("Kubernetes D19 fence ConfigMap name is unsupported")
     if _aliased_string(metadata, "namespace") != D19_HISTORY_FENCE_NAMESPACE:
-        raise ValueError("Kubernetes D19 fence Lease namespace is unsupported")
+        raise ValueError("Kubernetes D19 fence ConfigMap namespace is unsupported")
     annotations = _mapping_field(metadata, "annotations")
     parent_dag_id = _aliased_string(annotations, _PARENT_DAG_ANNOTATION)
     parent_run_id = _aliased_string(annotations, _PARENT_RUN_ANNOTATION)
     if parent_dag_id != D19_HISTORY_PARENT_DAG_ID:
         raise ValueError("Kubernetes D19 fence parent annotation is unsupported")
     resource_version = _aliased_string(metadata, "resourceVersion", "resource_version")
-    acquired_at = _lease_datetime(_aliased_value(spec, "acquireTime", "acquire_time"))
-    renew_at = _lease_datetime(_aliased_value(spec, "renewTime", "renew_time"))
-    duration = _aliased_value(spec, "leaseDurationSeconds", "lease_duration_seconds")
-    if (
-        not isinstance(duration, int)
-        or isinstance(duration, bool)
-        or duration != D19_HISTORY_FENCE_DURATION_SECONDS
-    ):
+    if set(data) != {
+        "acquiredAt",
+        "holderIdentity",
+        "durationSeconds",
+        "transitions",
+        "renewTime",
+    }:
+        raise ValueError("Kubernetes D19 fence ConfigMap data fields are unsupported")
+    acquired_at = _parse_datetime(_aliased_string(data, "acquiredAt"))
+    renew_at = _parse_datetime(_aliased_string(data, "renewTime"))
+    duration_raw = _aliased_string(data, "durationSeconds")
+    if duration_raw != str(D19_HISTORY_FENCE_DURATION_SECONDS):
         raise ValueError("Kubernetes D19 fence lease duration is unsupported")
-    transitions = _aliased_value(spec, "leaseTransitions", "lease_transitions")
-    if not isinstance(transitions, int) or isinstance(transitions, bool) or transitions < 0:
-        raise ValueError("Kubernetes D19 fence leaseTransitions is invalid")
-    holder_value = _aliased_value(spec, "holderIdentity", "holder_identity")
-    if holder_value is None:
-        holder = ""
-    elif isinstance(holder_value, str):
-        holder = holder_value.strip()
-    else:
+    transitions_raw = _aliased_string(data, "transitions")
+    if not transitions_raw.isdecimal():
+        raise ValueError("Kubernetes D19 fence transitions is invalid")
+    transitions = int(transitions_raw)
+    holder_value = _aliased_value(data, "holderIdentity")
+    if not isinstance(holder_value, str):
         raise ValueError("Kubernetes D19 fence holderIdentity is invalid")
+    holder = holder_value.strip()
     return {
         "acquiredAt": _utc_string(acquired_at),
         "holderIdentity": holder,
-        "leaseDurationSeconds": duration,
-        "leaseTransitions": transitions,
+        "durationSeconds": D19_HISTORY_FENCE_DURATION_SECONDS,
+        "transitions": transitions,
         "parentDagId": parent_dag_id,
         "parentRunId": parent_run_id,
         "renewTime": _utc_string(renew_at),
@@ -1107,26 +1118,26 @@ def _fence_evidence(
     expected_parent: Mapping[str, str],
     expected_holder: str,
 ) -> dict[str, Any]:
-    lease = _normalized_lease(raw)
+    fence = _normalized_fence_resource(raw)
     if (
-        lease["holderIdentity"] != expected_holder
-        or lease["parentDagId"] != expected_parent["dagId"]
-        or lease["parentRunId"] != expected_parent["runId"]
+        fence["holderIdentity"] != expected_holder
+        or fence["parentDagId"] != expected_parent["dagId"]
+        or fence["parentRunId"] != expected_parent["runId"]
     ):
         raise ValueError("Kubernetes D19 fence response does not match its parent holder")
-    acquired_at = _parse_datetime(lease["acquiredAt"])
+    acquired_at = _parse_datetime(fence["acquiredAt"])
     return {
-        "acquiredAt": lease["acquiredAt"],
+        "acquiredAt": fence["acquiredAt"],
         "expiresAt": _utc_string(
             acquired_at + timedelta(seconds=D19_HISTORY_FENCE_DURATION_SECONDS)
         ),
         "holderIdentity": expected_holder,
-        "leaseDurationSeconds": D19_HISTORY_FENCE_DURATION_SECONDS,
-        "leaseName": D19_HISTORY_FENCE_LEASE_NAME,
+        "durationSeconds": D19_HISTORY_FENCE_DURATION_SECONDS,
+        "resourceName": D19_HISTORY_FENCE_RESOURCE_NAME,
         "namespace": D19_HISTORY_FENCE_NAMESPACE,
         "parentDagId": expected_parent["dagId"],
         "parentRunId": expected_parent["runId"],
-        "resourceVersion": lease["resourceVersion"],
+        "resourceVersion": fence["resourceVersion"],
         "schema": D19_HISTORY_FENCE_SCHEMA,
     }
 
@@ -1136,8 +1147,8 @@ def _normalized_fence_evidence(value: Mapping[str, Any]) -> dict[str, Any]:
         "acquiredAt",
         "expiresAt",
         "holderIdentity",
-        "leaseDurationSeconds",
-        "leaseName",
+        "durationSeconds",
+        "resourceName",
         "namespace",
         "parentDagId",
         "parentRunId",
@@ -1148,8 +1159,8 @@ def _normalized_fence_evidence(value: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("D19 history fence evidence fields are unsupported")
     if _required_string(value, "schema") != D19_HISTORY_FENCE_SCHEMA:
         raise ValueError("D19 history fence evidence schema is unsupported")
-    if _required_string(value, "leaseName") != D19_HISTORY_FENCE_LEASE_NAME:
-        raise ValueError("D19 history fence evidence leaseName is unsupported")
+    if _required_string(value, "resourceName") != D19_HISTORY_FENCE_RESOURCE_NAME:
+        raise ValueError("D19 history fence evidence resourceName is unsupported")
     if _required_string(value, "namespace") != D19_HISTORY_FENCE_NAMESPACE:
         raise ValueError("D19 history fence evidence namespace is unsupported")
     parent_dag_id = _required_string(value, "parentDagId")
@@ -1159,7 +1170,7 @@ def _normalized_fence_evidence(value: Mapping[str, Any]) -> dict[str, Any]:
     holder = _required_string(value, "holderIdentity")
     if holder != f"d6:{parent_run_id}":
         raise ValueError("D19 history fence evidence holderIdentity does not match")
-    duration = value.get("leaseDurationSeconds")
+    duration = value.get("durationSeconds")
     if duration != D19_HISTORY_FENCE_DURATION_SECONDS:
         raise ValueError("D19 history fence evidence duration is unsupported")
     acquired = _parse_datetime(_required_string(value, "acquiredAt"))
@@ -1170,8 +1181,8 @@ def _normalized_fence_evidence(value: Mapping[str, Any]) -> dict[str, Any]:
         "acquiredAt": _utc_string(acquired),
         "expiresAt": _utc_string(expires),
         "holderIdentity": holder,
-        "leaseDurationSeconds": D19_HISTORY_FENCE_DURATION_SECONDS,
-        "leaseName": D19_HISTORY_FENCE_LEASE_NAME,
+        "durationSeconds": D19_HISTORY_FENCE_DURATION_SECONDS,
+        "resourceName": D19_HISTORY_FENCE_RESOURCE_NAME,
         "namespace": D19_HISTORY_FENCE_NAMESPACE,
         "parentDagId": parent_dag_id,
         "parentRunId": parent_run_id,
@@ -1180,11 +1191,11 @@ def _normalized_fence_evidence(value: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _lease_is_active(lease: Mapping[str, Any], *, observed_at: datetime) -> bool:
-    holder = lease.get("holderIdentity")
+def _fence_is_active(fence: Mapping[str, Any], *, observed_at: datetime) -> bool:
+    holder = fence.get("holderIdentity")
     if not isinstance(holder, str) or not holder:
         return False
-    renew_time = _parse_datetime(_required_string(lease, "renewTime"))
+    renew_time = _parse_datetime(_required_string(fence, "renewTime"))
     return observed_at < renew_time + timedelta(seconds=D19_HISTORY_FENCE_DURATION_SECONDS)
 
 
@@ -1209,14 +1220,6 @@ def _aliased_string(value: Mapping[str, Any], *field_names: str) -> str:
     return item.strip()
 
 
-def _lease_datetime(value: Any) -> datetime:
-    if isinstance(value, datetime):
-        return _aware_utc(value, "Kubernetes D19 fence datetime")
-    if isinstance(value, str):
-        return _parse_datetime(value).astimezone(UTC)
-    raise ValueError("Kubernetes D19 fence datetime is invalid")
-
-
 def _aware_utc(value: datetime, field_name: str) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{field_name} must be timezone-aware")
@@ -1232,7 +1235,7 @@ def _api_error_status(exc: Exception) -> int | None:
     return status if isinstance(status, int) and not isinstance(status, bool) else None
 
 
-def _projected_coordination_api(*, token_path: Path, ca_path: Path) -> Any:
+def _projected_core_api(*, token_path: Path, ca_path: Path) -> Any:
     from kubernetes import client
 
     configuration = client.Configuration(
@@ -1242,16 +1245,16 @@ def _projected_coordination_api(*, token_path: Path, ca_path: Path) -> Any:
     configuration.verify_ssl = True
 
     def refresh_api_key(config: Any) -> None:
-        config.api_key["authorization"] = _read_credential_file(
+        config.api_key["BearerToken"] = _read_credential_file(
             token_path,
             field_name="projected Kubernetes API token",
             max_bytes=32_768,
         )
-        config.api_key_prefix["authorization"] = "Bearer"
+        config.api_key_prefix["BearerToken"] = "Bearer"
 
     configuration.refresh_api_key_hook = refresh_api_key
     refresh_api_key(configuration)
-    return client.CoordinationV1Api(client.ApiClient(configuration=configuration))
+    return client.CoreV1Api(client.ApiClient(configuration=configuration))
 
 
 def _validated_config(config: HistoryClientConfig) -> HistoryClientConfig:
@@ -1355,7 +1358,13 @@ def _normalized_dag_run(
     if _parse_datetime(logical_date) >= _parse_datetime(parent_logical_date):
         raise ValueError("Airflow history query returned a run outside logical_date_lt")
     run_type = _required_string(run, "run_type")
-    if run_type not in {"manual", "scheduled", "backfill", "asset_triggered"}:
+    if run_type not in {
+        "asset_triggered",
+        "backfill",
+        "manual",
+        "operator_triggered",
+        "scheduled",
+    }:
         raise ValueError("Airflow history run_type is unsupported")
     state = _required_string(run, "state")
     if state not in {
