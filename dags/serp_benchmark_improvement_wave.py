@@ -801,7 +801,7 @@ def verify_runtime_terminal_activation_admission(**context: Any) -> dict[str, An
 
     dag_run = context.get("dag_run")
     conf = getattr(dag_run, "conf", None) or {}
-    plan_json = write_airflow_plan_artifact(build_benchmark_improvement_wave_plan(conf))
+    plan_json = build_benchmark_improvement_wave_plan(conf).to_canonical_json()
     return verify_model_catalog_promotion_terminal_activation(plan_json)
 
 

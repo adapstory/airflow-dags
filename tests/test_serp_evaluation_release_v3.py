@@ -815,6 +815,27 @@ def test_event_d6_trigger_templates_consume_typed_invocation() -> None:
     assert "['d19_trigger_conf']" not in source
 
 
+def test_d19_terminal_activation_admission_is_read_only_and_aggregator_is_sole_writer() -> None:
+    source = (
+        Path(__file__).parents[1] / "dags" / "serp_benchmark_improvement_wave.py"
+    ).read_text(encoding="utf-8")
+    admission_source = source.split(
+        "def verify_runtime_terminal_activation_admission", maxsplit=1
+    )[1].split("def validate_d19_fence_admission", maxsplit=1)[0]
+    aggregator_source = source.split(
+        "def validate_benchmark_improvement_wave_plan", maxsplit=1
+    )[1].split("def verify_runtime_terminal_activation_admission", maxsplit=1)[0]
+
+    # Context: terminal activation admission runs as a read-only verifier identity.
+    # Decision: construct canonical D19 plan JSON in memory and reserve the single
+    # WORM write for the validate-plan aggregator.
+    # Reason: admission must prove provenance without requiring PutObject authority.
+    # Revisit when: terminal admission and aggregation intentionally share one writer SA.
+    assert "write_airflow_plan_artifact" not in admission_source
+    assert "build_benchmark_improvement_wave_plan(conf).to_canonical_json()" in admission_source
+    assert "write_airflow_plan_artifact" in aggregator_source
+
+
 def test_d17_promotion_writer_uses_canonical_retain_until_not_executor_receipt_alias(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
