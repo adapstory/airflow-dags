@@ -16,6 +16,7 @@ from dags.serp_benchmark_catalog import (
     BENCHMARK_CATALOG_CONTRACT_VERSION,
     MANDATORY_BENCHMARK_SUITE_CATALOG,
     MANDATORY_EXECUTION_SUBSTRATE_ROLES,
+    _immutable_dataset_snapshot,
     build_live_benchmark_catalog_evidence,
     mandatory_benchmark_adapters_ready,
 )
@@ -630,6 +631,7 @@ def test_live_catalog_retains_immutable_source_and_license_snapshots() -> None:
             "artifactSha256": sha256(payload).hexdigest(),
             "artifactVersionId": f"version-{suite_id}-{evidence_type}",
             "objectLockMode": "COMPLIANCE",
+            "retainUntil": "2027-07-13T00:00:00Z",
         }
 
     evidence = build_live_benchmark_catalog_evidence(
@@ -669,6 +671,32 @@ def test_live_catalog_retains_immutable_source_and_license_snapshots() -> None:
     )
 
 
+def test_native_adapter_boundary_projects_exact_canonical_worm_handle() -> None:
+    snapshot = {
+        "immutable_artifact": {
+            "artifactETag": "etag",
+            "artifactPath": "s3://airflow-serp-evidence/catalog/BEIR/dataset",
+            "artifactSha256": "a" * 64,
+            "artifactType": "benchmark_catalog_dataset",
+            "artifactVersionId": "version-BEIR-dataset",
+            "contractVersion": "airflow-artifact/v2",
+            "objectLockMode": "COMPLIANCE",
+            "operationId": "mandatory-catalog-1",
+            "retainUntil": "2027-08-03T00:00:00Z",
+            "retentionDays": 365,
+            "status": "written",
+        }
+    }
+
+    assert _immutable_dataset_snapshot(snapshot, "BEIR", "dataset") == {
+        "objectLockMode": "COMPLIANCE",
+        "retainUntil": "2027-08-03T00:00:00Z",
+        "s3Uri": "s3://airflow-serp-evidence/catalog/BEIR/dataset",
+        "sha256": "sha256:" + "a" * 64,
+        "versionId": "version-BEIR-dataset",
+    }
+
+
 def _snapshot_bytes(
     suite_id: str,
     evidence_type: str,
@@ -680,6 +708,7 @@ def _snapshot_bytes(
         "artifactSha256": sha256(payload).hexdigest(),
         "artifactVersionId": f"version-{suite_id}-{evidence_type}",
         "objectLockMode": "COMPLIANCE",
+        "retainUntil": "2027-07-13T00:00:00Z",
     }
 
 

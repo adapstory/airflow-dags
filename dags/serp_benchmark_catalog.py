@@ -818,7 +818,28 @@ def _immutable_dataset_snapshot(
         raise ValueError(
             f"native adapter requires immutable dataset snapshot: {suite_id}/{source_id}"
         )
-    return artifact
+    # Context: Airflow persists a rich internal artifact receipt, while the
+    # image-owned adapter accepts only the public exact-WORM handle contract.
+    # Decision: project the canonical five fields at this ownership boundary.
+    # Reason: leaking Airflow receipt fields makes the independently versioned
+    # adapter reject valid WORM evidence and couples it to orchestration details.
+    # Revisit when: both owners adopt a new versioned canonical WORM schema.
+    if artifact.get("objectLockMode") != "COMPLIANCE":
+        raise ValueError(
+            f"native adapter dataset snapshot is not COMPLIANCE WORM: {suite_id}/{source_id}"
+        )
+    digest = _required_catalog_str(artifact, "artifactSha256")
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        raise ValueError(
+            f"native adapter dataset snapshot has invalid SHA-256: {suite_id}/{source_id}"
+        )
+    return {
+        "objectLockMode": "COMPLIANCE",
+        "retainUntil": _required_catalog_str(artifact, "retainUntil"),
+        "s3Uri": _required_catalog_str(artifact, "artifactPath"),
+        "sha256": f"sha256:{digest}",
+        "versionId": _required_catalog_str(artifact, "artifactVersionId"),
+    }
 
 
 def _immutable_snapshot_artifact(
