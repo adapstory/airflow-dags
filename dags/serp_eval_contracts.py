@@ -3468,11 +3468,16 @@ def load_model_catalog_promotion_snapshot(
     if _required_str(plan, "dag_id") != "serp_benchmark_improvement_wave":
         raise ValueError("plan dag_id does not match D19 promotion receipt loader")
     receipt_evidence = _worm_evidence_reference(plan, "evaluation_release_promotion_evidence")
-    receipt_client = s3_client or _s3_read_client(receipt_evidence["s3Uri"])
+    # Context: the D17 receipt reveals baseline/candidate release roots whose
+    # immutable runtime and attestation children belong to other operations.
+    # Decision: traverse the entire D19 evidence graph with one read-only graph
+    # session. Reason: root-scoped STS cannot authorize child edges before the
+    # roots are read. Revisit when MinIO supports signed recursive graph reads.
+    client = s3_client or _s3_evidence_graph_read_client()
     receipt = _load_worm_json_evidence(
         receipt_evidence,
         field_name="evaluation_release_promotion_evidence",
-        s3_client=receipt_client,
+        s3_client=client,
     )
     normalized = _validated_evaluation_release_promotion_receipt(receipt, plan)
     release_evidence = tuple(
@@ -3482,14 +3487,11 @@ def load_model_catalog_promotion_snapshot(
         )
         for role in ("baselineRelease", "candidateRelease")
     )
-    release_client = s3_client or _s3_read_client(
-        *(evidence["s3Uri"] for _, evidence in release_evidence)
-    )
     actual_releases: dict[str, Mapping[str, Any]] = {}
     for role, evidence in release_evidence:
         recorded = normalized[role]
         actual = _load_governed_evaluation_release(
-            evidence, field_name=f"{role}.evidence", s3_client=release_client
+            evidence, field_name=f"{role}.evidence", s3_client=client
         )
         actual_releases[role] = actual["release"]
         if _required_str(actual["release"], "releaseDigest") != _required_str(
@@ -3499,7 +3501,7 @@ def load_model_catalog_promotion_snapshot(
     _validate_evaluation_release_pair(
         actual_releases["baselineRelease"],
         actual_releases["candidateRelease"],
-        s3_client=release_client,
+        s3_client=client,
     )
     expected_candidate_authority = {
         **_normalized_evaluation_release_authority(
@@ -3515,14 +3517,11 @@ def load_model_catalog_promotion_snapshot(
     evaluation_objective_evidence = _worm_evidence_reference(
         normalized, "evaluationObjectiveEvidence"
     )
-    evaluation_objective_client = s3_client or _s3_read_client(
-        evaluation_objective_evidence["s3Uri"]
-    )
     evaluation_objective = _validated_evaluation_objective_v6(
         _load_worm_json_evidence(
             evaluation_objective_evidence,
             field_name="D17 evaluation objective evidence",
-            s3_client=evaluation_objective_client,
+            s3_client=client,
         ),
         expected_evidence=evaluation_objective_evidence,
     )
@@ -3538,7 +3537,8 @@ def verify_model_catalog_promotion_terminal_activation(
 ) -> dict[str, Any]:
     """Re-verify D17's exact release runtime attestations before D19 starts."""
 
-    snapshot = load_model_catalog_promotion_snapshot(plan_json)
+    client = _s3_evidence_graph_read_client()
+    snapshot = load_model_catalog_promotion_snapshot(plan_json, s3_client=client)
     promotion = _required_mapping(snapshot, "promotion")
     release_evidence = tuple(
         (
@@ -3547,7 +3547,6 @@ def verify_model_catalog_promotion_terminal_activation(
         )
         for role in ("baselineRelease", "candidateRelease")
     )
-    client = _s3_read_client(*(evidence["s3Uri"] for _, evidence in release_evidence))
     for role, evidence in release_evidence:
         release = _load_governed_evaluation_release(
             evidence,

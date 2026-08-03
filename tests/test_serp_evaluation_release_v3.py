@@ -1162,27 +1162,26 @@ def test_d17_rejects_an_opaque_or_incomplete_evaluation_objective_v6() -> None:
         load_governed_model_releases(plan.to_canonical_json(), s3_client=_FakeS3(objects))
 
 
-def test_d17_uses_a_read_only_session_for_the_exact_ci_release_operation(
+def test_d17_uses_one_read_only_session_for_the_evidence_graph(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bundle, objects = _release_pair()
     plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
-    scopes: list[tuple[str, ...]] = []
+    clients: list[_FakeS3] = []
 
-    def read_client(*artifact_paths: str) -> _FakeS3:
-        scopes.append(artifact_paths)
-        return _FakeS3(objects)
+    def graph_read_client() -> _FakeS3:
+        client = _FakeS3(objects)
+        clients.append(client)
+        return client
 
-    monkeypatch.setattr(serp_eval_contracts, "_s3_read_client", read_client)
+    monkeypatch.setattr(
+        serp_eval_contracts,
+        "_s3_evidence_graph_read_client",
+        graph_read_client,
+    )
     load_governed_model_releases(plan.to_canonical_json())
 
-    assert scopes == [
-        (
-            bundle["baselineReleaseEvidence"]["s3Uri"],
-            bundle["candidateReleaseEvidence"]["s3Uri"],
-            bundle["evaluationObjectiveEvidence"]["s3Uri"],
-        )
-    ]
+    assert len(clients) == 1
 
 
 def test_d19_rereads_the_v7_promotion_and_both_release_manifests() -> None:
@@ -1237,6 +1236,109 @@ def test_d19_rereads_the_v7_promotion_and_both_release_manifests() -> None:
         snapshot["promotion"]["evaluationObjectiveAttestationEvidence"]
         == bundle["evaluationObjectiveAttestationEvidence"]
     )
+
+
+def test_d19_promotion_loader_uses_one_read_only_evidence_graph_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, objects = _release_pair()
+    d17_plan = build_model_catalog_promotion_plan(_promotion_conf(bundle))
+    releases = load_governed_model_releases(
+        d17_plan.to_canonical_json(), s3_client=_FakeS3(objects)
+    )
+    receipt = write_model_catalog_promotion_receipt(
+        d17_plan.to_canonical_json(), releases, snapshot_writer=_snapshot_writer
+    )
+    receipt_evidence = receipt["promotionEvidence"]
+    receipt_body = _canonical_bytes(receipt["payload"])
+    bucket = "airflow-serp-evidence"
+    receipt_key = receipt_evidence["s3Uri"].removeprefix(f"s3://{bucket}/")
+    objects[(bucket, receipt_key, receipt_evidence["versionId"])] = receipt_body
+    conf = _d19_conf()
+    conf["evaluation_release_promotion_evidence"] = receipt_evidence
+    d19_plan = build_benchmark_improvement_wave_plan(conf)
+    graph_clients: list[_FakeS3] = []
+
+    def graph_read_client() -> _FakeS3:
+        client = _FakeS3(objects)
+        graph_clients.append(client)
+        return client
+
+    monkeypatch.setattr(
+        serp_eval_contracts,
+        "_s3_evidence_graph_read_client",
+        graph_read_client,
+    )
+    monkeypatch.setattr(
+        serp_eval_contracts,
+        "_s3_read_client",
+        lambda *_paths: pytest.fail("D19 must not create a root-scoped S3 client"),
+    )
+
+    load_model_catalog_promotion_snapshot(d19_plan.to_canonical_json())
+
+    assert len(graph_clients) == 1
+
+
+def test_d19_terminal_verifier_reuses_one_evidence_graph_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = _reference("release", "a")
+    graph_client = object()
+    observed_clients: list[object] = []
+
+    monkeypatch.setattr(
+        serp_eval_contracts,
+        "_s3_evidence_graph_read_client",
+        lambda: graph_client,
+    )
+    monkeypatch.setattr(
+        serp_eval_contracts,
+        "_s3_read_client",
+        lambda *_paths: pytest.fail("D19 must not create a root-scoped S3 client"),
+    )
+
+    def load_snapshot(_plan_json: object, *, s3_client: object) -> dict[str, object]:
+        observed_clients.append(s3_client)
+        return {
+            "promotion": {
+                "baselineRelease": {"evidence": evidence},
+                "candidateRelease": {"evidence": evidence},
+            }
+        }
+
+    def load_release(
+        _evidence: object,
+        *,
+        field_name: str,
+        s3_client: object,
+    ) -> dict[str, object]:
+        assert field_name in {
+            "baselineRelease.evidence",
+            "candidateRelease.evidence",
+        }
+        observed_clients.append(s3_client)
+        return {"release": {"runtimeTerminalActivation": {}}}
+
+    monkeypatch.setattr(
+        serp_eval_contracts,
+        "load_model_catalog_promotion_snapshot",
+        load_snapshot,
+    )
+    monkeypatch.setattr(
+        serp_eval_contracts,
+        "_load_governed_evaluation_release",
+        load_release,
+    )
+    monkeypatch.setattr(
+        serp_eval_contracts,
+        "_verify_runtime_terminal_activation_with_vault",
+        lambda *_args, **_kwargs: None,
+    )
+
+    serp_eval_contracts.verify_model_catalog_promotion_terminal_activation({})
+
+    assert observed_clients == [graph_client, graph_client, graph_client]
 
 
 def test_d19_rejects_v5_promotion_receipt_without_compatibility_fallback() -> None:
