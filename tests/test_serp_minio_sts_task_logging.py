@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import io
 import json
+import logging
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -65,6 +66,74 @@ def _isolated_task_log_modules() -> Iterator[tuple[ModuleType, ModuleType]]:
         task_log_io = importlib.import_module("dags.serp_minio_sts_task_log_io")
         workload_identity = importlib.import_module("dags.serp_evidence_workload_identity")
         yield task_log_io, workload_identity
+    finally:
+        for name in module_names:
+            sys.modules.pop(name, None)
+        sys.modules.update(
+            {name: module for name, module in previous.items() if module is not None}
+        )
+
+
+@contextmanager
+def _isolated_airflow_logging_module() -> Iterator[tuple[ModuleType, ModuleType]]:
+    module_names = (
+        "airflow",
+        "airflow.config_templates",
+        "airflow.config_templates.airflow_local_settings",
+        "airflow.utils",
+        "airflow.utils.log",
+        "airflow.utils.log.file_task_handler",
+        "dags.serp_minio_sts_task_logging",
+    )
+    previous = {name: sys.modules.pop(name, None) for name in module_names}
+
+    class FakeFileTaskHandler(logging.Handler):
+        def __init__(
+            self,
+            base_log_folder: str,
+            max_bytes: int = 0,
+            backup_count: int = 0,
+            delay: bool = False,
+        ) -> None:
+            super().__init__()
+            del max_bytes, backup_count, delay
+            self.local_base = base_log_folder
+            self.handler: logging.Handler | None = None
+
+        def close(self) -> None:
+            if self.handler is not None:
+                self.handler.close()
+            super().close()
+
+    airflow = ModuleType("airflow")
+    config_templates = ModuleType("airflow.config_templates")
+    local_settings = ModuleType("airflow.config_templates.airflow_local_settings")
+    local_settings.DEFAULT_LOGGING_CONFIG = {
+        "handlers": {
+            "task": {
+                "class": "airflow.utils.log.file_task_handler.FileTaskHandler",
+                "base_log_folder": "/opt/airflow/logs",
+            }
+        }
+    }
+    airflow_utils = ModuleType("airflow.utils")
+    airflow_log = ModuleType("airflow.utils.log")
+    file_task_handler = ModuleType("airflow.utils.log.file_task_handler")
+    file_task_handler.FileTaskHandler = FakeFileTaskHandler
+    sys.modules.update(
+        {
+            "airflow": airflow,
+            "airflow.config_templates": config_templates,
+            "airflow.config_templates.airflow_local_settings": local_settings,
+            "airflow.utils": airflow_utils,
+            "airflow.utils.log": airflow_log,
+            "airflow.utils.log.file_task_handler": file_task_handler,
+        }
+    )
+    try:
+        logging_module = importlib.import_module("dags.serp_minio_sts_task_logging")
+        task_log_io = importlib.import_module("dags.serp_minio_sts_task_log_io")
+        yield logging_module, task_log_io
     finally:
         for name in module_names:
             sys.modules.pop(name, None)
@@ -289,6 +358,37 @@ def test_airflow_logging_module_exports_the_native_remote_log_object() -> None:
     )
     assert "LOGGING_CONFIG = deepcopy(DEFAULT_LOGGING_CONFIG)" in source
     assert "REMOTE_TASK_LOG = MinioStsTaskLogIO()" in source
+    assert 'LOGGING_CONFIG["handlers"]["task"]' in source
+    assert "MinioStsTaskHandler" in source
+
+
+def test_minio_sts_task_handler_uploads_complete_log_on_close(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    with _isolated_airflow_logging_module() as (logging_module, task_logging):
+        client = _S3(task_logging.TASK_LOG_BUCKET)
+        monkeypatch.setattr(task_logging, "task_log_s3_client", lambda: client)
+        base_log_folder = tmp_path / "logs"
+        relative_path = Path("dag_id=d17/task_id=verify/attempt=1.log")
+        local_log = base_log_folder / relative_path
+        local_log.parent.mkdir(parents=True)
+        local_log.write_text("root cause survives pod deletion", encoding="utf-8")
+
+        handler = logging_module.MinioStsTaskHandler(
+            base_log_folder=str(base_log_folder),
+            remote_base_log_folder="s3://airflow-serp-artifacts/airflow-task-logs",
+        )
+        handler.handler = logging.FileHandler(local_log)
+        handler.log_relative_path = relative_path.as_posix()
+        handler.ti = object()
+        handler.upload_on_close = True
+        handler.close()
+
+        assert client.objects == {
+            "airflow-task-logs/dag_id=d17/task_id=verify/attempt=1.log": (
+                b"root cause survives pod deletion"
+            )
+        }
 
 
 def test_kubernetes_pod_launcher_executor_config_keeps_minio_sts_and_api_access_separate() -> None:
