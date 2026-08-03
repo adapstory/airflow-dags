@@ -3315,11 +3315,11 @@ def load_governed_model_releases(
     baseline_evidence = _worm_evidence_reference(plan, "baseline_release_evidence")
     candidate_evidence = _worm_evidence_reference(plan, "candidate_release_evidence")
     evaluation_objective_evidence = _worm_evidence_reference(plan, "evaluation_objective_evidence")
-    client = s3_client or _s3_read_client(
-        baseline_evidence["s3Uri"],
-        candidate_evidence["s3Uri"],
-        evaluation_objective_evidence["s3Uri"],
-    )
+    # The release roots reveal immutable runtime, profile, substrate and
+    # attestation handles recursively. Exact root-operation STS scoping cannot
+    # authorize those child edges before the roots have been read, so D17 uses
+    # the dedicated read-only evidence graph session.
+    client = s3_client or _s3_evidence_graph_read_client()
     baseline = _load_governed_evaluation_release(
         baseline_evidence, field_name="baseline_release_evidence", s3_client=client
     )
@@ -14057,6 +14057,12 @@ def _s3_read_client(*artifact_paths: str) -> Any:
     from dags.serp_evidence_workload_identity import operation_prefix_read_s3_client
 
     return operation_prefix_read_s3_client(artifact_uris=artifact_paths)
+
+
+def _s3_evidence_graph_read_client() -> Any:
+    from dags.serp_evidence_workload_identity import evidence_graph_read_s3_client
+
+    return evidence_graph_read_s3_client()
 
 
 def _required_env(name: str) -> str:

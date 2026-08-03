@@ -255,6 +255,35 @@ def test_multi_operation_evidence_reader_is_read_only_and_prefix_bound(
     ]
 
 
+def test_evidence_graph_reader_is_read_only_across_discovered_operation_edges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _isolated_task_log_modules() as (_task_logging, workload_identity):
+        captured: dict[str, str] = {}
+        sentinel = object()
+
+        def capture_client(*, policy: str) -> object:
+            captured["policy"] = policy
+            return sentinel
+
+        monkeypatch.setattr(workload_identity, "_web_identity_s3_client", capture_client)
+
+        client = workload_identity.evidence_graph_read_s3_client()
+
+    assert client is sentinel
+    policy = json.loads(captured["policy"])
+    assert policy["Statement"] == [
+        {
+            "Action": ["s3:GetObject", "s3:GetObjectRetention", "s3:GetObjectVersion"],
+            "Effect": "Allow",
+            "Resource": ["arn:aws:s3:::airflow-serp-evidence/serp-evals/*"],
+        }
+    ]
+    assert "s3:PutObject" not in captured["policy"]
+    assert "s3:ListBucket" not in captured["policy"]
+    assert "s3:DeleteObject" not in captured["policy"]
+
+
 def test_task_log_sts_client_rejects_ambient_static_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

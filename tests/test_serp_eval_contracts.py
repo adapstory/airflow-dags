@@ -97,6 +97,38 @@ def _canonical_sha256(value: Mapping[str, Any]) -> str:
     )
 
 
+def test_d17_release_loader_uses_read_only_evidence_graph_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class EvidenceGraphProbe:
+        def head_object(self, **_kwargs: object) -> object:
+            raise RuntimeError("evidence-graph-client-used")
+
+    probe = EvidenceGraphProbe()
+    monkeypatch.setattr(
+        serp_eval_contracts_module,
+        "_s3_evidence_graph_read_client",
+        lambda: probe,
+    )
+    handle = {
+        "objectLockMode": "COMPLIANCE",
+        "retainUntil": "2027-08-03T00:00:00Z",
+        "s3Uri": "s3://airflow-serp-evidence/serp-evals/root/release.json",
+        "sha256": "sha256:" + "a" * 64,
+        "versionId": "version-1",
+    }
+    plan = {
+        "dag_id": "serp_model_catalog_promotion",
+        "ci_evaluation_release_contract_version": "serp-ci-evaluation-release-evidence/v8",
+        "baseline_release_evidence": handle,
+        "candidate_release_evidence": handle,
+        "evaluation_objective_evidence": handle,
+    }
+
+    with pytest.raises(RuntimeError, match="evidence-graph-client-used"):
+        serp_eval_contracts_module.load_governed_model_releases(plan)
+
+
 def _public_docs_source_snapshot(
     *,
     source_id: str,

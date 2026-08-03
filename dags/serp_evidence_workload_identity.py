@@ -606,6 +606,40 @@ def operation_prefix_read_s3_client(*, artifact_uris: Iterable[str]) -> Any:
     return _web_identity_s3_client(policy=policy)
 
 
+def evidence_graph_read_s3_client() -> Any:
+    """Read a governed WORM graph whose child handles are discovered in parents.
+
+    Context: an EvaluationRelease exposes runtime and attestation handles only
+    after its root object has been read and verified.
+    Decision: admission receives prefix-wide object reads in its short-lived
+    session, still intersected with the read-only ServiceAccount parent policy.
+    Reason: root-operation scoping cannot authorize immutable child operations
+    that are intentionally absent from the outer Airflow plan.
+    Revisit when: releases carry a signed, complete evidence-closure manifest.
+    """
+
+    policy = json.dumps(
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Action": [
+                        "s3:GetObject",
+                        "s3:GetObjectRetention",
+                        "s3:GetObjectVersion",
+                    ],
+                    "Effect": "Allow",
+                    "Resource": [
+                        f"arn:aws:s3:::{EVIDENCE_BUCKET}/{EVIDENCE_PREFIX}*"
+                    ],
+                }
+            ],
+        },
+        sort_keys=True,
+    )
+    return _web_identity_s3_client(policy=policy)
+
+
 def task_log_s3_client() -> Any:
     """Return an STS client constrained to the immutable Airflow task-log prefix."""
 
