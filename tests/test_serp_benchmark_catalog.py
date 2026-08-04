@@ -17,6 +17,7 @@ from dags.serp_benchmark_catalog import (
     MANDATORY_BENCHMARK_SUITE_CATALOG,
     MANDATORY_EXECUTION_SUBSTRATE_ROLES,
     _immutable_dataset_snapshot,
+    _validate_canonical_corpus_jsonl,
     build_live_benchmark_catalog_evidence,
     mandatory_benchmark_adapters_ready,
 )
@@ -27,6 +28,25 @@ from dags.serp_eval_contracts import (
     write_immutable_evidence_bytes_snapshot,
     write_immutable_evidence_snapshot,
 )
+
+
+def test_canonical_corpus_validation_is_line_bounded() -> None:
+    # Context: SWE exact-commit corpora exceed 3 GiB and a whole-payload decode was OOMKilled.
+    # Decision: validation must consume canonical JSONL one binary line at a time.
+    # Reason: WORM identity and canonical ordering do not require a second full payload copy.
+    # Revisit: only if the corpus contract moves to a natively streaming object format.
+    class NoWholePayloadDecode(bytes):
+        def decode(self, *_args: object, **_kwargs: object) -> str:
+            raise AssertionError("whole-payload decode is forbidden")
+
+        def splitlines(self, *_args: object, **_kwargs: object) -> list[bytes]:
+            raise AssertionError("whole-payload splitlines is forbidden")
+
+    payload = NoWholePayloadDecode(
+        b'{"documentId":"doc-1","text":"alpha"}\n' b'{"documentId":"doc-2","text":"beta"}\n'
+    )
+
+    assert _validate_canonical_corpus_jsonl(payload, "SWE-bench Verified", "corpus") == 2
 
 
 def test_benchmark_catalog_fetch_uses_configured_source_proxy(

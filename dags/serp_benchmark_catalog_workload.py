@@ -30,11 +30,11 @@ BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_LABELS = {
     "tier": "airflow",
 }
 BENCHMARK_CATALOG_ACQUISITION_RESOURCES = k8s.V1ResourceRequirements(
-    # ARES' pinned archive alone is roughly 400 MiB.  Native validation holds
-    # its object-locked source while streaming archive members, so the former
-    # 1 GiB ceiling could OOM before the catalog receipt was sealed.
-    requests={"cpu": "500m", "memory": "1Gi"},
-    limits={"cpu": "1000m", "memory": "3Gi"},
+    # The exact SWE source set emits a bounded but multi-gigabyte canonical
+    # payload. Line-bounded validation avoids a second copy; this reservation
+    # covers the one required payload plus the sliding archive window.
+    requests={"cpu": "500m", "memory": "6Gi"},
+    limits={"cpu": "1000m", "memory": "8Gi"},
 )
 BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS = 90
 _BENCHMARK_CATALOG_ACQUISITION_LITERAL_ENV_NAMES = (

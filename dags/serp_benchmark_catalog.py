@@ -8,6 +8,7 @@ upstream dataset and licensing evidence before an adapter is allowed to run.
 
 from __future__ import annotations
 
+import io
 import json
 import re
 from collections.abc import Callable, Mapping
@@ -1142,12 +1143,13 @@ def _validated_native_corpus_materialization(
     if manifest.get("datasetSha256BySource") != expected_dataset_digests:
         raise ValueError(f"native corpus manifest dataset lineage is invalid: {suite_id}")
     payloads: dict[str, bytes] = {}
+    document_counts: dict[str, int] = {}
     for source_id, payload in payloads_value.items():
         if not isinstance(source_id, str) or not source_id.strip():
             raise ValueError(f"native corpus payload sourceId is invalid: {suite_id}")
         if not isinstance(payload, bytes) or not payload:
             raise ValueError(f"native corpus payload is empty: {suite_id}/{source_id}")
-        _validate_canonical_corpus_jsonl(payload, suite_id, source_id)
+        document_counts[source_id] = _validate_canonical_corpus_jsonl(payload, suite_id, source_id)
         payloads[source_id] = payload
     sources = manifest.get("sources")
     if not isinstance(sources, list) or len(sources) != 1:
@@ -1168,22 +1170,23 @@ def _validated_native_corpus_materialization(
     document_count = source.get("documentCount")
     if not isinstance(document_count, int) or document_count <= 0:
         raise ValueError(f"native corpus document count is invalid: {suite_id}")
-    if document_count != len(payloads[source_id].splitlines()):
+    if document_count != document_counts[source_id]:
         raise ValueError(f"native corpus document count does not match payload: {suite_id}")
     if source.get("payloadSha256") != "sha256:" + sha256(payloads[source_id]).hexdigest():
         raise ValueError(f"native corpus payload digest is invalid: {suite_id}")
     return manifest, payloads
 
 
-def _validate_canonical_corpus_jsonl(payload: bytes, suite_id: str, source_id: str) -> None:
-    try:
-        text = payload.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ValueError(f"native corpus is not UTF-8: {suite_id}/{source_id}") from exc
-    if not text.endswith("\n") or not text.strip():
+def _validate_canonical_corpus_jsonl(payload: bytes, suite_id: str, source_id: str) -> int:
+    if not payload or not payload.endswith(b"\n"):
         raise ValueError(f"native corpus must be newline-terminated JSONL: {suite_id}/{source_id}")
-    documents: list[dict[str, str]] = []
-    for line in text.splitlines():
+    document_count = 0
+    previous_document_id: str | None = None
+    for raw_line in io.BytesIO(payload):
+        try:
+            line = raw_line.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"native corpus is not UTF-8: {suite_id}/{source_id}") from exc
         try:
             document = json.loads(line)
         except json.JSONDecodeError as exc:
@@ -1199,21 +1202,27 @@ def _validate_canonical_corpus_jsonl(payload: bytes, suite_id: str, source_id: s
             raise ValueError(
                 f"native corpus document must contain only documentId/text: {suite_id}/{source_id}"
             )
-        documents.append(document)
-    document_ids = [document["documentId"] for document in documents]
-    if document_ids != sorted(set(document_ids)):
-        raise ValueError(
-            f"native corpus documents must be unique and sorted: {suite_id}/{source_id}"
+        document_id = document["documentId"]
+        if previous_document_id is not None and document_id <= previous_document_id:
+            raise ValueError(
+                f"native corpus documents must be unique and sorted: {suite_id}/{source_id}"
+            )
+        canonical_line = (
+            json.dumps(
+                document,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            + b"\n"
         )
-    canonical = b"".join(
-        json.dumps(document, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode(
-            "utf-8"
-        )
-        + b"\n"
-        for document in documents
-    )
-    if canonical != payload:
-        raise ValueError(f"native corpus JSONL is not canonical: {suite_id}/{source_id}")
+        if canonical_line != raw_line:
+            raise ValueError(f"native corpus JSONL is not canonical: {suite_id}/{source_id}")
+        previous_document_id = document_id
+        document_count += 1
+    if document_count == 0:
+        raise ValueError(f"native corpus must be newline-terminated JSONL: {suite_id}/{source_id}")
+    return document_count
 
 
 def _corpus_snapshot(
