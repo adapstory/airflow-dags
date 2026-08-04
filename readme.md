@@ -75,7 +75,10 @@ SERP eval DAG contracts:
   native D19 fields (tenant/resource/actor identity, artifact root, generated
   timestamp, and promotion-evidence handle). Scores, release bodies, profiles,
   scheduled-D6 fences, legacy suite inputs, and aliases are rejected before
-  D19 is triggered.
+  D19 is triggered. D19 admits only provenance-bound Airflow identities:
+  `event_d6_d19__*` and scheduled `d6__*` children must be
+  `operator_triggered`, while direct manual runs must use `manual__*` and
+  `manual`; every prefix/type mismatch fails closed.
 - `serp_tenant_golden_set_regression` is the D13 scaffolded handoff contract
   DAG, not a native runtime-backed runner yet. Its
   `dag_run.conf` must provide tenant id, workflow id, golden set id/version,
