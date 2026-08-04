@@ -6,6 +6,7 @@ import io
 import json
 import math
 import sys
+import tarfile
 import types
 from collections.abc import Mapping
 from copy import deepcopy
@@ -20,6 +21,8 @@ from urllib.parse import parse_qs, urlparse
 from urllib.request import Request
 from uuid import UUID
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from adapstory_serp_pipeline.benchmark.native_suite_scoring import suite_metric_profile
 from adapstory_serp_pipeline.registry.evaluation_release_contract import (
@@ -1270,6 +1273,65 @@ def test_catalog_materializer_accepts_dedicated_dataset_evidence_plan() -> None:
         + 4
         + sum(len(roles) for roles in MANDATORY_EXECUTION_SUBSTRATE_ROLES.values())
     )
+
+
+def test_swe_native_corpus_materializer_fetches_exact_base_commit_without_task_leakage() -> None:
+    # Context: the frozen SWE dataset contains queries and patches but no
+    # query-independent repository corpus bytes.
+    # Decision: the isolated acquisition workload fetches each canonical mirror
+    # at the exact base commit and derives only allowed repository Python files.
+    # Reason: using task text or a mutable repository head would make the paired
+    # retrieval score both leaky and irreproducible.
+    # Revisit when: the sandbox supply publishes equivalent sealed corpus handles.
+    table = pa.Table.from_pylist(
+        [
+            {
+                "instance_id": "django__django-1",
+                "repo": "django/django",
+                "base_commit": "a" * 40,
+                "problem_statement": "SECRET task query",
+                "patch": "SECRET solution patch",
+                "test_patch": "SECRET tests",
+            }
+        ]
+    )
+    dataset_stream = io.BytesIO()
+    pq.write_table(table, dataset_stream)
+    dataset = dataset_stream.getvalue()
+    archive_stream = io.BytesIO()
+    with tarfile.open(fileobj=archive_stream, mode="w:gz") as archive:
+        payload = b"def production_code():\n    return 1\n"
+        info = tarfile.TarInfo("django-root/django/core.py")
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+    requested_urls: list[str] = []
+
+    def fetch_bytes(url: str) -> bytes:
+        requested_urls.append(url)
+        return archive_stream.getvalue()
+
+    result = serp_eval_contracts_module._native_corpus_materializer(
+        "SWE-bench Verified",
+        {"dataset": dataset},
+        {
+            "dataset": {
+                "objectLockMode": "COMPLIANCE",
+                "retainUntil": "2027-08-04T00:00:00Z",
+                "s3Uri": "s3://airflow-serp-evidence/swe-dataset.parquet",
+                "sha256": "sha256:" + sha256(dataset).hexdigest(),
+                "versionId": "version-1",
+            }
+        },
+        fetch_bytes=fetch_bytes,
+    )
+
+    assert requested_urls == [
+        "https://codeload.github.com/swe-bench/django__django/tar.gz/" + "a" * 40
+    ]
+    assert result["manifest"]["status"] == "materialized"
+    corpus = next(iter(cast(Mapping[str, bytes], result["payloads"]).values()))
+    assert b"production_code" in corpus
+    assert b"SECRET" not in corpus
 
 
 @pytest.mark.parametrize(

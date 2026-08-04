@@ -6258,6 +6258,7 @@ def materialize_live_benchmark_catalog_artifact(
     from dags.serp_benchmark_catalog import build_live_benchmark_catalog_evidence
 
     artifact_root_path = _artifact_parent_path(artifact_paths["benchmark_catalog"])
+    resolved_fetch_bytes = _fetch_https_bytes if fetch_bytes is None else fetch_bytes
     bytes_writer = (
         write_immutable_evidence_bytes_snapshot
         if snapshot_bytes_writer is None
@@ -6281,9 +6282,21 @@ def materialize_live_benchmark_catalog_artifact(
             content_type="application/octet-stream",
         )
 
+    def default_native_corpus_materializer(
+        suite_id: str,
+        dataset_payloads: Mapping[str, bytes],
+        dataset_snapshots: Mapping[str, Mapping[str, object]],
+    ) -> Mapping[str, object]:
+        return _native_corpus_materializer(
+            suite_id,
+            dataset_payloads,
+            dataset_snapshots,
+            fetch_bytes=resolved_fetch_bytes,
+        )
+
     evidence = build_live_benchmark_catalog_evidence(
         observed_at=_required_datetime_string(plan, "generated_at"),
-        fetch_bytes=_fetch_https_bytes if fetch_bytes is None else fetch_bytes,
+        fetch_bytes=resolved_fetch_bytes,
         snapshot_bytes=snapshot_bytes,
         native_adapter_materializer=(
             _native_adapter_materializer
@@ -6291,7 +6304,7 @@ def materialize_live_benchmark_catalog_artifact(
             else native_adapter_materializer
         ),
         native_corpus_materializer=(
-            _native_corpus_materializer
+            default_native_corpus_materializer
             if native_corpus_materializer is None
             else native_corpus_materializer
         ),
@@ -6353,22 +6366,66 @@ def _native_corpus_materializer(
     suite_id: str,
     dataset_payloads: Mapping[str, bytes],
     dataset_snapshots: Mapping[str, Mapping[str, object]],
+    *,
+    fetch_bytes: Callable[[str], bytes] | None = None,
 ) -> Mapping[str, object]:
     """Derive only query-independent corpus bytes inside the isolated workload."""
 
     from adapstory_serp_pipeline.benchmark.native_corpus import (
         derive_native_benchmark_corpus,
+        derive_swe_corpus_from_archives,
+        plan_swe_corpus_sources,
     )
 
-    materialization = derive_native_benchmark_corpus(
-        suite_id=suite_id,
-        dataset_payloads=dataset_payloads,
-        dataset_snapshots=dataset_snapshots,
-    )
+    if suite_id == "SWE-bench Verified":
+        if set(dataset_payloads) != {"dataset"} or set(dataset_snapshots) != {"dataset"}:
+            raise ValueError("SWE-bench Verified requires exactly one pinned dataset snapshot")
+        if fetch_bytes is None:
+            raise ValueError("SWE-bench Verified requires an exact commit archive fetcher")
+        plan = plan_swe_corpus_sources(dataset_payloads["dataset"], dataset_snapshots["dataset"])
+        sources = _required_object_list(plan, "sources")
+
+        def fetch_source(source: Mapping[str, Any]) -> tuple[str, bytes]:
+            source_id = _required_str(source, "sourceId")
+            archive = fetch_bytes(_swe_commit_archive_url(source))
+            if not isinstance(archive, bytes) or not archive:
+                raise ValueError("SWE corpus commit archive fetch returned no bytes")
+            return source_id, archive
+
+        with ThreadPoolExecutor(max_workers=min(8, len(sources))) as executor:
+            archives = dict(executor.map(fetch_source, sources))
+        materialization = derive_swe_corpus_from_archives(plan, archives)
+    else:
+        materialization = derive_native_benchmark_corpus(
+            suite_id=suite_id,
+            dataset_payloads=dataset_payloads,
+            dataset_snapshots=dataset_snapshots,
+        )
     return {
         "manifest": dict(materialization.manifest),
         "payloads": dict(materialization.payloads),
     }
+
+
+def _swe_commit_archive_url(source: Mapping[str, Any]) -> str:
+    repository_url = _required_str(source, "repositoryUrl")
+    base_commit = _required_str(source, "baseCommit")
+    parsed = urlparse(repository_url)
+    mirror_match = re.fullmatch(r"/swe-bench/([A-Za-z0-9_.-]+__[A-Za-z0-9_.-]+)\.git", parsed.path)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "github.com"
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.port is not None
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+        or mirror_match is None
+        or re.fullmatch(r"[0-9a-f]{40}", base_commit) is None
+    ):
+        raise ValueError("SWE corpus source archive identity is invalid")
+    return f"https://codeload.github.com/swe-bench/{mirror_match.group(1)}/tar.gz/{base_commit}"
 
 
 def _execution_substrate_materializer(
