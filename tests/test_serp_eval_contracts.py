@@ -1334,6 +1334,40 @@ def test_swe_native_corpus_materializer_fetches_exact_base_commit_without_task_l
     assert b"SECRET" not in corpus
 
 
+def test_swe_archive_fetch_stream_submits_only_one_bounded_window() -> None:
+    # Context: ThreadPoolExecutor.map submitted the complete 500-archive SWE
+    # fetch set, so completed byte results accumulated until the pod was OOMKilled.
+    # Decision: expose a sliding-window stream that cannot submit replacement
+    # fetches until the consumer has accepted a completed archive.
+    # Reason: concurrency stays useful while retained compressed bytes are bounded.
+    # Revisit when: exact archives are streamed directly into immutable storage.
+    sources = [
+        {
+            "baseCommit": f"{index:040x}",
+            "repositoryUrl": f"https://github.com/swe-bench/owner__repo{index}.git",
+            "sourceId": f"source-{index}",
+        }
+        for index in range(12)
+    ]
+    started: list[str] = []
+
+    def fetch_bytes(url: str) -> bytes:
+        started.append(url)
+        return b"archive"
+
+    stream = serp_eval_contracts_module._bounded_swe_archive_stream(
+        sources,
+        fetch_bytes,
+        max_workers=4,
+    )
+    first = next(stream)
+
+    assert first[0].startswith("source-")
+    assert len(started) <= 4
+    assert len(list(stream)) == 11
+    assert len(started) == 12
+
+
 @pytest.mark.parametrize(
     ("field_name", "invalid_value"),
     (

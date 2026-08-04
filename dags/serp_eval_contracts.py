@@ -8,7 +8,7 @@ import os
 import re
 import subprocess
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -6373,7 +6373,7 @@ def _native_corpus_materializer(
 
     from adapstory_serp_pipeline.benchmark.native_corpus import (
         derive_native_benchmark_corpus,
-        derive_swe_corpus_from_archives,
+        derive_swe_corpus_from_archive_stream,
         plan_swe_corpus_sources,
     )
 
@@ -6385,16 +6385,10 @@ def _native_corpus_materializer(
         plan = plan_swe_corpus_sources(dataset_payloads["dataset"], dataset_snapshots["dataset"])
         sources = _required_object_list(plan, "sources")
 
-        def fetch_source(source: Mapping[str, Any]) -> tuple[str, bytes]:
-            source_id = _required_str(source, "sourceId")
-            archive = fetch_bytes(_swe_commit_archive_url(source))
-            if not isinstance(archive, bytes) or not archive:
-                raise ValueError("SWE corpus commit archive fetch returned no bytes")
-            return source_id, archive
-
-        with ThreadPoolExecutor(max_workers=min(8, len(sources))) as executor:
-            archives = dict(executor.map(fetch_source, sources))
-        materialization = derive_swe_corpus_from_archives(plan, archives)
+        materialization = derive_swe_corpus_from_archive_stream(
+            plan,
+            _bounded_swe_archive_stream(sources, fetch_bytes, max_workers=8),
+        )
     else:
         materialization = derive_native_benchmark_corpus(
             suite_id=suite_id,
@@ -6405,6 +6399,42 @@ def _native_corpus_materializer(
         "manifest": dict(materialization.manifest),
         "payloads": dict(materialization.payloads),
     }
+
+
+def _bounded_swe_archive_stream(
+    sources: Sequence[Mapping[str, Any]],
+    fetch_bytes: Callable[[str], bytes],
+    *,
+    max_workers: int,
+) -> Iterable[tuple[str, bytes]]:
+    """Fetch exact SWE archives with a sliding window owned by the consumer."""
+
+    if not sources:
+        raise ValueError("SWE corpus source plan contains no sources")
+    if max_workers <= 0:
+        raise ValueError("SWE corpus archive worker count must be positive")
+
+    def fetch_source(source: Mapping[str, Any]) -> tuple[str, bytes]:
+        source_id = _required_str(source, "sourceId")
+        archive = fetch_bytes(_swe_commit_archive_url(source))
+        if not isinstance(archive, bytes) or not archive:
+            raise ValueError("SWE corpus commit archive fetch returned no bytes")
+        return source_id, archive
+
+    source_iterator = iter(sources)
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(sources))) as executor:
+        pending: set[Future[tuple[str, bytes]]] = set()
+        for _ in range(min(max_workers, len(sources))):
+            pending.add(executor.submit(fetch_source, next(source_iterator)))
+        while pending:
+            completed, pending = wait(pending, return_when="FIRST_COMPLETED")
+            for future in completed:
+                yield future.result()
+                try:
+                    source = next(source_iterator)
+                except StopIteration:
+                    continue
+                pending.add(executor.submit(fetch_source, source))
 
 
 def _swe_commit_archive_url(source: Mapping[str, Any]) -> str:
