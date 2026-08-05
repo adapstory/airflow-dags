@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from adapstory_serp_pipeline.benchmark.corpus_file import CanonicalCorpusFile
 
 import dags.serp_eval_contracts as serp_eval_contracts_module
 from dags.serp_benchmark_catalog import (
@@ -26,27 +27,29 @@ from dags.serp_eval_contracts import (
     MANDATORY_SERP_BENCHMARK_SUITES,
     _fetch_https_bytes,
     write_immutable_evidence_bytes_snapshot,
+    write_immutable_evidence_file_snapshot,
     write_immutable_evidence_snapshot,
 )
 
 
-def test_canonical_corpus_validation_is_line_bounded() -> None:
+def test_canonical_corpus_validation_is_line_bounded(tmp_path: Path) -> None:
     # Context: SWE exact-commit corpora exceed 3 GiB and a whole-payload decode was OOMKilled.
     # Decision: validation must consume canonical JSONL one binary line at a time.
     # Reason: WORM identity and canonical ordering do not require a second full payload copy.
     # Revisit: only if the corpus contract moves to a natively streaming object format.
-    class NoWholePayloadDecode(bytes):
-        def decode(self, *_args: object, **_kwargs: object) -> str:
-            raise AssertionError("whole-payload decode is forbidden")
-
-        def splitlines(self, *_args: object, **_kwargs: object) -> list[bytes]:
-            raise AssertionError("whole-payload splitlines is forbidden")
-
-    payload = NoWholePayloadDecode(
+    payload = (
         b'{"documentId":"doc-1","text":"alpha"}\n' b'{"documentId":"doc-2","text":"beta"}\n'
     )
+    path = tmp_path / "corpus.jsonl"
+    path.write_bytes(payload)
+    corpus_file = CanonicalCorpusFile(
+        path=path,
+        sha256="sha256:" + sha256(payload).hexdigest(),
+        byte_length=len(payload),
+        document_count=2,
+    )
 
-    assert _validate_canonical_corpus_jsonl(payload, "SWE-bench Verified", "corpus") == 2
+    assert _validate_canonical_corpus_jsonl(corpus_file, "SWE-bench Verified", "corpus") == 2
 
 
 def test_benchmark_catalog_fetch_uses_configured_source_proxy(
@@ -304,7 +307,7 @@ def test_catalog_pins_each_upstream_dataset_to_an_immutable_revision() -> None:
     )
 
 
-def test_live_catalog_allows_rights_unverified_internal_runs() -> None:
+def test_live_catalog_allows_rights_unverified_internal_runs(tmp_path: Path) -> None:
     payload_by_url = {
         entry.dataset_source_url: f"dataset-source:{entry.suite_id}".encode()
         for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
@@ -330,6 +333,8 @@ def test_live_catalog_allows_rights_unverified_internal_runs() -> None:
         observed_at="2026-07-13T00:00:00Z",
         fetch_bytes=payload_by_url.__getitem__,
         snapshot_bytes=_snapshot_bytes,
+        snapshot_file=_snapshot_file,
+        corpus_output_directory=tmp_path,
         native_adapter_materializer=_native_adapter_materializer,
         native_corpus_materializer=_native_corpus_materializer,
         execution_substrate_materializer=_execution_substrate_materializer,
@@ -427,7 +432,7 @@ def test_catalog_refuses_to_mark_a_snapshot_ready_without_native_adapter_evidenc
         )
 
 
-def test_catalog_blocks_suites_without_query_independent_corpus_evidence() -> None:
+def test_catalog_blocks_suites_without_query_independent_corpus_evidence(tmp_path: Path) -> None:
     payload_by_url = {
         entry.dataset_source_url: f"dataset-source:{entry.suite_id}".encode()
         for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
@@ -451,15 +456,18 @@ def test_catalog_blocks_suites_without_query_independent_corpus_evidence() -> No
         suite_id: str,
         payloads: Mapping[str, bytes],
         snapshots: Mapping[str, Mapping[str, object]],
+        output_directory: Path,
     ) -> Mapping[str, object]:
         if suite_id in {"CodeRAG-Bench", "RepoQA", "SWE-bench Verified"}:
             raise ValueError(f"{suite_id} requires pinned external corpus snapshots")
-        return _native_corpus_materializer(suite_id, payloads, snapshots)
+        return _native_corpus_materializer(suite_id, payloads, snapshots, output_directory)
 
     evidence = build_live_benchmark_catalog_evidence(
         observed_at="2026-07-13T00:00:00Z",
         fetch_bytes=payload_by_url.__getitem__,
         snapshot_bytes=_snapshot_bytes,
+        snapshot_file=_snapshot_file,
+        corpus_output_directory=tmp_path,
         native_adapter_materializer=_native_adapter_materializer,
         native_corpus_materializer=corpus_materializer,
         execution_substrate_materializer=_execution_substrate_materializer,
@@ -485,7 +493,9 @@ def test_catalog_blocks_suites_without_query_independent_corpus_evidence() -> No
     )
 
 
-def test_catalog_blocks_missing_execution_substrate_without_discarding_corpus() -> None:
+def test_catalog_blocks_missing_execution_substrate_without_discarding_corpus(
+    tmp_path: Path,
+) -> None:
     payload_by_url = {
         entry.dataset_source_url: f"dataset-source:{entry.suite_id}".encode()
         for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
@@ -509,17 +519,17 @@ def test_catalog_blocks_missing_execution_substrate_without_discarding_corpus() 
         suite_id: str,
         dataset_payloads: Mapping[str, bytes],
         dataset_snapshots: Mapping[str, Mapping[str, object]],
-        corpus_payloads: Mapping[str, bytes],
+        corpus_files: Mapping[str, CanonicalCorpusFile],
         corpus_snapshots: Mapping[str, Mapping[str, object]],
         official_harness_payloads: Mapping[str, bytes],
-    ) -> Mapping[str, bytes]:
+    ) -> Mapping[str, bytes | CanonicalCorpusFile]:
         if suite_id == "CodeRAG-Bench":
             raise ValueError("CodeRAG-Bench official execution-sandbox payload is required")
         return _execution_substrate_materializer(
             suite_id,
             dataset_payloads,
             dataset_snapshots,
-            corpus_payloads,
+            corpus_files,
             corpus_snapshots,
             official_harness_payloads,
         )
@@ -528,6 +538,8 @@ def test_catalog_blocks_missing_execution_substrate_without_discarding_corpus() 
         observed_at="2026-07-13T00:00:00Z",
         fetch_bytes=payload_by_url.__getitem__,
         snapshot_bytes=_snapshot_bytes,
+        snapshot_file=_snapshot_file,
+        corpus_output_directory=tmp_path,
         native_adapter_materializer=_native_adapter_materializer,
         native_corpus_materializer=_native_corpus_materializer,
         execution_substrate_materializer=substrate_materializer,
@@ -546,7 +558,7 @@ def test_catalog_blocks_missing_execution_substrate_without_discarding_corpus() 
     assert coderag["native_adapter_manifest"]["corpusManifest"]["status"] == "materialized"
 
 
-def test_catalog_forwards_only_authoritative_external_role_payloads() -> None:
+def test_catalog_forwards_only_authoritative_external_role_payloads(tmp_path: Path) -> None:
     payload_by_url = {
         entry.dataset_source_url: f"dataset-source:{entry.suite_id}".encode()
         for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
@@ -571,17 +583,17 @@ def test_catalog_forwards_only_authoritative_external_role_payloads() -> None:
         suite_id: str,
         dataset_payloads: Mapping[str, bytes],
         dataset_snapshots: Mapping[str, Mapping[str, object]],
-        corpus_payloads: Mapping[str, bytes],
+        corpus_files: Mapping[str, CanonicalCorpusFile],
         corpus_snapshots: Mapping[str, Mapping[str, object]],
         official_harness_payloads: Mapping[str, bytes],
-    ) -> Mapping[str, bytes]:
+    ) -> Mapping[str, bytes | CanonicalCorpusFile]:
         if suite_id == "ARES":
             observed.update(official_harness_payloads)
         return _execution_substrate_materializer(
             suite_id,
             dataset_payloads,
             dataset_snapshots,
-            corpus_payloads,
+            corpus_files,
             corpus_snapshots,
             official_harness_payloads,
         )
@@ -590,6 +602,8 @@ def test_catalog_forwards_only_authoritative_external_role_payloads() -> None:
         observed_at="2026-07-13T00:00:00Z",
         fetch_bytes=payload_by_url.__getitem__,
         snapshot_bytes=_snapshot_bytes,
+        snapshot_file=_snapshot_file,
+        corpus_output_directory=tmp_path,
         native_adapter_materializer=_native_adapter_materializer,
         native_corpus_materializer=_native_corpus_materializer,
         execution_substrate_materializer=substrate_materializer,
@@ -618,7 +632,7 @@ def test_catalog_forwards_only_authoritative_external_role_payloads() -> None:
     }
 
 
-def test_live_catalog_retains_immutable_source_and_license_snapshots() -> None:
+def test_live_catalog_retains_immutable_source_and_license_snapshots(tmp_path: Path) -> None:
     payload_by_url = {
         entry.dataset_source_url: f"dataset-source:{entry.suite_id}".encode()
         for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
@@ -638,6 +652,7 @@ def test_live_catalog_retains_immutable_source_and_license_snapshots() -> None:
     payload_by_url.update(_supplemental_dataset_payloads())
     payload_by_url.update(_official_harness_payloads())
     calls: list[tuple[str, str, str, bytes]] = []
+    file_calls: list[tuple[str, str, str, CanonicalCorpusFile]] = []
 
     def snapshot_bytes(
         suite_id: str,
@@ -654,23 +669,35 @@ def test_live_catalog_retains_immutable_source_and_license_snapshots() -> None:
             "retainUntil": "2027-07-13T00:00:00Z",
         }
 
+    def snapshot_file(
+        suite_id: str,
+        evidence_type: str,
+        url: str,
+        corpus_file: CanonicalCorpusFile,
+    ) -> dict[str, str]:
+        file_calls.append((suite_id, evidence_type, url, corpus_file))
+        return _snapshot_file(suite_id, evidence_type, url, corpus_file)
+
     evidence = build_live_benchmark_catalog_evidence(
         observed_at="2026-07-13T00:00:00Z",
         fetch_bytes=payload_by_url.__getitem__,
         snapshot_bytes=snapshot_bytes,
+        snapshot_file=snapshot_file,
+        corpus_output_directory=tmp_path,
         native_adapter_materializer=_native_adapter_materializer,
         native_corpus_materializer=_native_corpus_materializer,
         execution_substrate_materializer=_execution_substrate_materializer,
     )
     suites = cast(list[dict[str, Any]], evidence["suites"])
 
-    assert len(calls) == (
+    assert len(calls) + len(file_calls) == (
         sum(
             6 + len(entry.supplemental_dataset_artifacts)
             for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
         )
         + sum(len(roles) for roles in MANDATORY_EXECUTION_SUBSTRATE_ROLES.values())
     )
+    assert len(file_calls) == len(MANDATORY_BENCHMARK_SUITE_CATALOG) + 4
     beir = next(item for item in suites if item["suite_id"] == "BEIR")
     assert (
         beir["dataset_snapshots"]["dataset"]["immutable_artifact"]["objectLockMode"] == "COMPLIANCE"
@@ -732,6 +759,21 @@ def _snapshot_bytes(
     }
 
 
+def _snapshot_file(
+    suite_id: str,
+    evidence_type: str,
+    _url: str,
+    corpus_file: CanonicalCorpusFile,
+) -> dict[str, str]:
+    return {
+        "artifactPath": f"s3://airflow-serp-evidence/catalog/{suite_id}/{evidence_type}",
+        "artifactSha256": corpus_file.sha256.removeprefix("sha256:"),
+        "artifactVersionId": f"version-{suite_id}-{evidence_type}",
+        "objectLockMode": "COMPLIANCE",
+        "retainUntil": "2027-07-13T00:00:00Z",
+    }
+
+
 def _native_adapter_materializer(
     suite_id: str,
     payloads: Mapping[str, bytes],
@@ -752,6 +794,7 @@ def _native_corpus_materializer(
     suite_id: str,
     payloads: Mapping[str, bytes],
     _snapshots: Mapping[str, Mapping[str, object]],
+    output_directory: Path,
 ) -> dict[str, object]:
     role_by_suite = {
         "APIBench": "api-documentation",
@@ -766,6 +809,15 @@ def _native_corpus_materializer(
     }
     corpus_role = role_by_suite[suite_id]
     corpus_payload = b'{"documentId":"doc-1","text":"query-independent corpus"}\n'
+    output_directory.mkdir(parents=True, exist_ok=True)
+    corpus_path = output_directory / "corpus.jsonl"
+    corpus_path.write_bytes(corpus_payload)
+    corpus_file = CanonicalCorpusFile(
+        path=corpus_path,
+        sha256="sha256:" + sha256(corpus_payload).hexdigest(),
+        byte_length=len(corpus_payload),
+        document_count=1,
+    )
     return {
         "manifest": {
             "datasetSha256BySource": {
@@ -784,7 +836,7 @@ def _native_corpus_materializer(
             "status": "materialized",
             "suiteId": suite_id,
         },
-        "payloads": {corpus_role: corpus_payload},
+        "files": {corpus_role: corpus_file},
     }
 
 
@@ -792,14 +844,23 @@ def _execution_substrate_materializer(
     suite_id: str,
     _dataset_payloads: Mapping[str, bytes],
     _dataset_snapshots: Mapping[str, Mapping[str, object]],
-    _corpus_payloads: Mapping[str, bytes],
+    corpus_files: Mapping[str, CanonicalCorpusFile],
     _corpus_snapshots: Mapping[str, Mapping[str, object]],
     _official_harness_payloads: Mapping[str, bytes],
-) -> Mapping[str, bytes]:
-    payloads = {
+) -> Mapping[str, bytes | CanonicalCorpusFile]:
+    payloads: dict[str, bytes | CanonicalCorpusFile] = {
         role: f"pinned-execution-substrate:{suite_id}:{role}".encode()
         for role in MANDATORY_EXECUTION_SUBSTRATE_ROLES[suite_id]
     }
+    corpus_role_by_suite = {
+        "APIBench": "api-documentation-corpus",
+        "CodeRAG-Bench": "corpus",
+        "RepoQA": "repository-snapshots",
+        "SWE-bench Verified": "repository-snapshots",
+    }
+    corpus_role = corpus_role_by_suite.get(suite_id)
+    if corpus_role is not None:
+        payloads[corpus_role] = next(iter(corpus_files.values()))
     revision = next(
         entry.harness_revision
         for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
@@ -990,3 +1051,50 @@ def test_immutable_binary_snapshot_binds_raw_dataset_bytes_to_s3_version(
     assert client.calls[0]["ContentType"] == "application/zip"
     assert "ObjectLockMode" not in client.calls[0]
     assert client.head_calls[0]["VersionId"] == "version-scifact"
+
+
+def test_immutable_file_snapshot_streams_body_without_bytes_copy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    payload = b'{"documentId":"doc-1","text":"streamed"}\n'
+    payload_path = tmp_path / "corpus.jsonl"
+    payload_path.write_bytes(payload)
+
+    class S3Client:
+        def __init__(self) -> None:
+            self.body_was_bytes = True
+            self.uploaded = b""
+
+        def put_object(self, **kwargs: object) -> dict[str, str]:
+            body = kwargs["Body"]
+            self.body_was_bytes = isinstance(body, bytes)
+            assert hasattr(body, "read")
+            self.uploaded = cast(Any, body).read()
+            assert kwargs["ContentLength"] == len(payload)
+            return {"ETag": '"corpus"', "VersionId": "version-corpus"}
+
+        def head_object(self, **_kwargs: object) -> dict[str, object]:
+            return {
+                "ObjectLockMode": "COMPLIANCE",
+                "ObjectLockRetainUntilDate": datetime.now(UTC) + timedelta(days=366),
+                "VersionId": "version-corpus",
+            }
+
+    monkeypatch.setenv("ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS", "365")
+    client = S3Client()
+    digest = "sha256:" + sha256(payload).hexdigest()
+
+    result = write_immutable_evidence_file_snapshot(
+        "s3://airflow-serp-evidence/serp-evals/run/corpus.jsonl",
+        artifact_type="benchmark_catalog_corpus",
+        operation_id="run",
+        payload_path=payload_path,
+        payload_sha256=digest,
+        content_type="application/x-ndjson",
+        s3_client=client,
+    )
+
+    assert client.body_was_bytes is False
+    assert client.uploaded == payload
+    assert result["artifactSha256"] == digest.removeprefix("sha256:")

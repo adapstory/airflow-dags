@@ -264,12 +264,12 @@ def test_catalog_acquisition_workload_has_minimal_proxy_and_evidence_contract(
     }
     assert BENCHMARK_CATALOG_ACQUISITION_RESOURCES.to_dict() == {
         "claims": None,
-        # Context: the exact 499-commit SWE corpus is larger than the former 3 GiB limit.
-        # Decision: reserve 6 GiB and cap acquisition at 8 GiB.
-        # Reason: live node admission has room while the bounded implementation avoids copying it.
-        # Revisit: after file-backed WORM upload removes the final in-memory bytes object.
-        "limits": {"cpu": "1000m", "memory": "8Gi"},
-        "requests": {"cpu": "500m", "memory": "6Gi"},
+        # Context: the multi-gigabyte SWE corpus is now file-backed through WORM upload.
+        # Decision: restore the acquisition class to its pre-bytes-payload 1/3 GiB envelope.
+        # Reason: retained memory is bounded by the archive window and one JSONL line.
+        # Revisit: if live peak RSS evidence exceeds 80% of the 3 GiB limit.
+        "limits": {"cpu": "1000m", "memory": "3Gi"},
+        "requests": {"cpu": "500m", "memory": "1Gi"},
     }
     assert BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS == 90
 

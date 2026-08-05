@@ -24,6 +24,7 @@ from uuid import UUID
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from adapstory_serp_pipeline.benchmark.corpus_file import CanonicalCorpusFile
 from adapstory_serp_pipeline.benchmark.native_suite_scoring import suite_metric_profile
 from adapstory_serp_pipeline.registry.evaluation_release_contract import (
     BENCHMARK_EXECUTION_SUBSTRATE_ROLE_CONTRACTS,
@@ -1247,11 +1248,25 @@ def test_catalog_materializer_accepts_dedicated_dataset_evidence_plan() -> None:
             "status": "written",
         }
 
+    def snapshot_file_writer(**kwargs: object) -> dict[str, object]:
+        written.append(kwargs)
+        return {
+            "artifactPath": kwargs["artifact_path"],
+            "artifactSha256": cast(str, kwargs["payload_sha256"]).removeprefix("sha256:"),
+            "artifactType": kwargs["artifact_type"],
+            "artifactVersionId": "version-20260713",
+            "objectLockMode": "COMPLIANCE",
+            "operationId": kwargs["operation_id"],
+            "retainUntil": "2027-07-13T19:30:00Z",
+            "status": "written",
+        }
+
     result = materialize_live_benchmark_catalog_artifact(
         plan.to_canonical_json(),
         fetch_bytes=lambda url: url.encode("utf-8"),
         snapshot_writer=snapshot_writer,
         snapshot_bytes_writer=snapshot_bytes_writer,
+        snapshot_file_writer=snapshot_file_writer,
         native_adapter_materializer=_native_adapter_materializer,
         native_corpus_materializer=_native_corpus_materializer,
         execution_substrate_materializer=_execution_substrate_materializer,
@@ -1275,7 +1290,9 @@ def test_catalog_materializer_accepts_dedicated_dataset_evidence_plan() -> None:
     )
 
 
-def test_swe_native_corpus_materializer_fetches_exact_base_commit_without_task_leakage() -> None:
+def test_swe_native_corpus_materializer_fetches_exact_base_commit_without_task_leakage(
+    tmp_path: Path,
+) -> None:
     # Context: the frozen SWE dataset contains queries and patches but no
     # query-independent repository corpus bytes.
     # Decision: the isolated acquisition workload fetches each canonical mirror
@@ -1323,13 +1340,15 @@ def test_swe_native_corpus_materializer_fetches_exact_base_commit_without_task_l
             }
         },
         fetch_bytes=fetch_bytes,
+        output_directory=tmp_path,
     )
 
     assert requested_urls == [
         "https://codeload.github.com/swe-bench/django__django/tar.gz/" + "a" * 40
     ]
     assert result["manifest"]["status"] == "materialized"
-    corpus = next(iter(cast(Mapping[str, bytes], result["payloads"]).values()))
+    corpus_file = next(iter(cast(Mapping[str, CanonicalCorpusFile], result["files"]).values()))
+    corpus = corpus_file.path.read_bytes()
     assert b"production_code" in corpus
     assert b"SECRET" not in corpus
 
@@ -10906,6 +10925,7 @@ def _native_corpus_materializer(
     suite_id: str,
     payloads: Mapping[str, bytes],
     snapshots: Mapping[str, Mapping[str, object]],
+    output_directory: Path,
 ) -> Mapping[str, object]:
     assert set(payloads) == set(snapshots)
     role = {
@@ -10920,6 +10940,15 @@ def _native_corpus_materializer(
         "rusBEIR": "beir-corpus",
     }[suite_id]
     corpus = b'{"documentId":"doc-1","text":"query-independent corpus"}\n'
+    output_directory.mkdir(parents=True, exist_ok=True)
+    corpus_path = output_directory / "corpus.jsonl"
+    corpus_path.write_bytes(corpus)
+    corpus_file = CanonicalCorpusFile(
+        path=corpus_path,
+        sha256="sha256:" + sha256(corpus).hexdigest(),
+        byte_length=len(corpus),
+        document_count=1,
+    )
     return {
         "manifest": {
             "datasetSha256BySource": {
@@ -10938,7 +10967,7 @@ def _native_corpus_materializer(
             "status": "materialized",
             "suiteId": suite_id,
         },
-        "payloads": {"corpus": corpus},
+        "files": {"corpus": corpus_file},
     }
 
 
@@ -10946,14 +10975,23 @@ def _execution_substrate_materializer(
     suite_id: str,
     _dataset_payloads: Mapping[str, bytes],
     _dataset_snapshots: Mapping[str, Mapping[str, object]],
-    _corpus_payloads: Mapping[str, bytes],
+    corpus_files: Mapping[str, CanonicalCorpusFile],
     _corpus_snapshots: Mapping[str, Mapping[str, object]],
     _official_harness_payloads: Mapping[str, bytes],
-) -> Mapping[str, bytes]:
-    payloads = {
+) -> Mapping[str, bytes | CanonicalCorpusFile]:
+    payloads: dict[str, bytes | CanonicalCorpusFile] = {
         role: f"pinned-execution-substrate:{suite_id}:{role}".encode()
         for role in MANDATORY_EXECUTION_SUBSTRATE_ROLES[suite_id]
     }
+    corpus_role_by_suite = {
+        "APIBench": "api-documentation-corpus",
+        "CodeRAG-Bench": "corpus",
+        "RepoQA": "repository-snapshots",
+        "SWE-bench Verified": "repository-snapshots",
+    }
+    corpus_role = corpus_role_by_suite.get(suite_id)
+    if corpus_role is not None:
+        payloads[corpus_role] = next(iter(corpus_files.values()))
     revision = next(
         entry.harness_revision
         for entry in MANDATORY_BENCHMARK_SUITE_CATALOG

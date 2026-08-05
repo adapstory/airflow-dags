@@ -30,11 +30,10 @@ BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_LABELS = {
     "tier": "airflow",
 }
 BENCHMARK_CATALOG_ACQUISITION_RESOURCES = k8s.V1ResourceRequirements(
-    # The exact SWE source set emits a bounded but multi-gigabyte canonical
-    # payload. Line-bounded validation avoids a second copy; this reservation
-    # covers the one required payload plus the sliding archive window.
-    requests={"cpu": "500m", "memory": "6Gi"},
-    limits={"cpu": "1000m", "memory": "8Gi"},
+    # The canonical SWE JSONL is file-backed through validation and WORM upload;
+    # retained memory is bounded by the archive fetch window and one output line.
+    requests={"cpu": "500m", "memory": "1Gi"},
+    limits={"cpu": "1000m", "memory": "3Gi"},
 )
 BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS = 90
 _BENCHMARK_CATALOG_ACQUISITION_LITERAL_ENV_NAMES = (

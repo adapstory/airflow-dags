@@ -8,14 +8,15 @@ upstream dataset and licensing evidence before an adapter is allowed to run.
 
 from __future__ import annotations
 
-import io
 import json
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
+from pathlib import Path
 
+from adapstory_serp_pipeline.benchmark.corpus_file import CanonicalCorpusFile
 from adapstory_serp_pipeline.benchmark.ds1000_contract import (
     normalize_ds1000_base_image_provenance,
 )
@@ -508,12 +509,18 @@ def build_live_benchmark_catalog_evidence(
     observed_at: str,
     fetch_bytes: Callable[[str], bytes],
     snapshot_bytes: Callable[[str, str, str, bytes], Mapping[str, object]] | None = None,
+    snapshot_file: Callable[
+        [str, str, str, CanonicalCorpusFile], Mapping[str, object]
+    ]
+    | None = None,
+    corpus_output_directory: Path | None = None,
     native_adapter_materializer: Callable[
         [str, Mapping[str, bytes], Mapping[str, Mapping[str, object]]], Mapping[str, object]
     ]
     | None = None,
     native_corpus_materializer: Callable[
-        [str, Mapping[str, bytes], Mapping[str, Mapping[str, object]]], Mapping[str, object]
+        [str, Mapping[str, bytes], Mapping[str, Mapping[str, object]], Path],
+        Mapping[str, object],
     ]
     | None = None,
     execution_substrate_materializer: Callable[
@@ -521,11 +528,11 @@ def build_live_benchmark_catalog_evidence(
             str,
             Mapping[str, bytes],
             Mapping[str, Mapping[str, object]],
-            Mapping[str, bytes],
+            Mapping[str, CanonicalCorpusFile],
             Mapping[str, Mapping[str, object]],
             Mapping[str, bytes],
         ],
-        Mapping[str, bytes],
+        Mapping[str, bytes | CanonicalCorpusFile],
     ]
     | None = None,
     execution_substrate_role_payloads: Mapping[str, Mapping[str, bytes]] | None = None,
@@ -543,6 +550,10 @@ def build_live_benchmark_catalog_evidence(
         raise ValueError("native adapter materializer is required")
     if native_corpus_materializer is None:
         raise ValueError("native corpus materializer is required")
+    if snapshot_file is None:
+        raise ValueError("immutable file snapshot writer is required")
+    if corpus_output_directory is None:
+        raise ValueError("native corpus output directory is required")
     if execution_substrate_materializer is None:
         raise ValueError("execution substrate materializer is required")
     authoritative_roles = _validated_external_role_payloads(execution_substrate_role_payloads or {})
@@ -613,25 +624,27 @@ def build_live_benchmark_catalog_evidence(
                 entry.suite_id,
                 dataset_payloads,
                 immutable_dataset_snapshots,
+                corpus_output_directory
+                / sha256(entry.suite_id.encode("utf-8")).hexdigest(),
             )
-            corpus_manifest, corpus_payloads = _validated_native_corpus_materialization(
+            corpus_manifest, corpus_files = _validated_native_corpus_materialization(
                 corpus_materialization,
                 entry.suite_id,
                 dataset_payloads,
             )
         except ValueError as exc:
             corpus_manifest = None
-            corpus_payloads = {}
+            corpus_files = {}
             corpus_blocking_reason = f"query-independent-corpus-unavailable: {exc}"
         corpus_snapshots = {
             source_id: _corpus_snapshot(
                 entry.suite_id,
                 source_id,
                 _CORPUS_ROLE_BY_SUITE[entry.suite_id],
-                payload,
-                snapshot_bytes,
+                corpus_file,
+                snapshot_file,
             )
-            for source_id, payload in corpus_payloads.items()
+            for source_id, corpus_file in corpus_files.items()
         }
         execution_substrate_blocking_reason: str | None = None
         execution_substrate_artifacts: dict[str, dict[str, str]] = {}
@@ -642,7 +655,7 @@ def build_live_benchmark_catalog_evidence(
                         entry.suite_id,
                         dataset_payloads,
                         immutable_dataset_snapshots,
-                        corpus_payloads,
+                        corpus_files,
                         {
                             source_id: _immutable_dataset_snapshot(
                                 snapshot, entry.suite_id, source_id
@@ -665,7 +678,15 @@ def build_live_benchmark_catalog_evidence(
                 )
                 execution_substrate_artifacts = {
                     role: _compact_immutable_artifact(
-                        _snapshot(
+                        _snapshot_file(
+                            entry.suite_id,
+                            f"execution-substrate-{role}",
+                            f"derived://execution-substrate/{entry.suite_id}/{role}",
+                            payload,
+                            snapshot_file,
+                        )
+                        if isinstance(payload, CanonicalCorpusFile)
+                        else _snapshot(
                             entry.suite_id,
                             f"execution-substrate-{role}",
                             f"derived://execution-substrate/{entry.suite_id}/{role}",
@@ -885,8 +906,9 @@ def _validate_native_adapter_manifest(manifest: Mapping[str, object], suite_id: 
 
 
 def _validated_execution_substrate_materialization(
-    materialization: Mapping[str, bytes], entry: BenchmarkSuiteCatalogEntry
-) -> dict[str, bytes]:
+    materialization: Mapping[str, bytes | CanonicalCorpusFile],
+    entry: BenchmarkSuiteCatalogEntry,
+) -> dict[str, bytes | CanonicalCorpusFile]:
     if not isinstance(materialization, Mapping):
         raise ValueError(f"execution substrate materialization is invalid: {entry.suite_id}")
     expected_roles = MANDATORY_EXECUTION_SUBSTRATE_ROLES[entry.suite_id]
@@ -894,15 +916,23 @@ def _validated_execution_substrate_materialization(
         raise ValueError(
             f"execution substrate roles are incomplete or noncanonical: {entry.suite_id}"
         )
-    payloads: dict[str, bytes] = {}
+    payloads: dict[str, bytes | CanonicalCorpusFile] = {}
     for role, payload in materialization.items():
-        if not isinstance(payload, bytes) or not payload:
+        if not isinstance(payload, bytes | CanonicalCorpusFile) or (
+            isinstance(payload, bytes) and not payload
+        ):
             raise ValueError(f"execution substrate payload is empty: {entry.suite_id}/{role}")
         payloads[role] = payload
     if entry.suite_id == "CodeRAG-Bench":
-        _validate_ds1000_sandbox_inventory(payloads["execution-sandbox"], entry)
+        sandbox = payloads["execution-sandbox"]
+        if not isinstance(sandbox, bytes):
+            raise ValueError("CodeRAG-Bench execution sandbox inventory must be bytes")
+        _validate_ds1000_sandbox_inventory(sandbox, entry)
     if entry.suite_id == "SWE-bench Verified":
-        _validate_swe_bench_sandbox_inventory(payloads["sandbox-image-set"], entry)
+        sandbox = payloads["sandbox-image-set"]
+        if not isinstance(sandbox, bytes):
+            raise ValueError("SWE-bench sandbox image inventory must be bytes")
+        _validate_swe_bench_sandbox_inventory(sandbox, entry)
     return payloads
 
 
@@ -1113,15 +1143,15 @@ def _validated_native_corpus_materialization(
     materialization: Mapping[str, object],
     suite_id: str,
     dataset_payloads: Mapping[str, bytes],
-) -> tuple[dict[str, object], dict[str, bytes]]:
+) -> tuple[dict[str, object], dict[str, CanonicalCorpusFile]]:
     if not isinstance(materialization, Mapping) or set(materialization) != {
+        "files",
         "manifest",
-        "payloads",
     }:
         raise ValueError(f"native corpus materialization has an invalid shape: {suite_id}")
     manifest_value = materialization.get("manifest")
-    payloads_value = materialization.get("payloads")
-    if not isinstance(manifest_value, Mapping) or not isinstance(payloads_value, Mapping):
+    files_value = materialization.get("files")
+    if not isinstance(manifest_value, Mapping) or not isinstance(files_value, Mapping):
         raise ValueError(f"native corpus materialization is incomplete: {suite_id}")
     manifest = dict(manifest_value)
     if set(manifest) != {
@@ -1142,15 +1172,17 @@ def _validated_native_corpus_materialization(
     }
     if manifest.get("datasetSha256BySource") != expected_dataset_digests:
         raise ValueError(f"native corpus manifest dataset lineage is invalid: {suite_id}")
-    payloads: dict[str, bytes] = {}
+    files: dict[str, CanonicalCorpusFile] = {}
     document_counts: dict[str, int] = {}
-    for source_id, payload in payloads_value.items():
+    for source_id, corpus_file in files_value.items():
         if not isinstance(source_id, str) or not source_id.strip():
             raise ValueError(f"native corpus payload sourceId is invalid: {suite_id}")
-        if not isinstance(payload, bytes) or not payload:
-            raise ValueError(f"native corpus payload is empty: {suite_id}/{source_id}")
-        document_counts[source_id] = _validate_canonical_corpus_jsonl(payload, suite_id, source_id)
-        payloads[source_id] = payload
+        if not isinstance(corpus_file, CanonicalCorpusFile):
+            raise ValueError(f"native corpus file is invalid: {suite_id}/{source_id}")
+        document_counts[source_id] = _validate_canonical_corpus_jsonl(
+            corpus_file, suite_id, source_id
+        )
+        files[source_id] = corpus_file
     sources = manifest.get("sources")
     if not isinstance(sources, list) or len(sources) != 1:
         raise ValueError(f"native corpus manifest must expose one canonical source: {suite_id}")
@@ -1163,7 +1195,7 @@ def _validated_native_corpus_materialization(
     }:
         raise ValueError(f"native corpus source has an invalid shape: {suite_id}")
     source_id = source.get("sourceId")
-    if not isinstance(source_id, str) or set(payloads) != {source_id}:
+    if not isinstance(source_id, str) or set(files) != {source_id}:
         raise ValueError(f"native corpus source/payload identity mismatch: {suite_id}")
     if source.get("corpusRole") != _CORPUS_ROLE_BY_SUITE[suite_id]:
         raise ValueError(f"native corpus role is invalid: {suite_id}")
@@ -1172,56 +1204,72 @@ def _validated_native_corpus_materialization(
         raise ValueError(f"native corpus document count is invalid: {suite_id}")
     if document_count != document_counts[source_id]:
         raise ValueError(f"native corpus document count does not match payload: {suite_id}")
-    if source.get("payloadSha256") != "sha256:" + sha256(payloads[source_id]).hexdigest():
+    if source.get("payloadSha256") != files[source_id].sha256:
         raise ValueError(f"native corpus payload digest is invalid: {suite_id}")
-    return manifest, payloads
+    return manifest, files
 
 
-def _validate_canonical_corpus_jsonl(payload: bytes, suite_id: str, source_id: str) -> int:
-    if not payload or not payload.endswith(b"\n"):
-        raise ValueError(f"native corpus must be newline-terminated JSONL: {suite_id}/{source_id}")
+def _validate_canonical_corpus_jsonl(
+    corpus_file: CanonicalCorpusFile, suite_id: str, source_id: str
+) -> int:
+    digest = sha256()
+    byte_length = 0
     document_count = 0
     previous_document_id: str | None = None
-    for raw_line in io.BytesIO(payload):
-        try:
-            line = raw_line.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise ValueError(f"native corpus is not UTF-8: {suite_id}/{source_id}") from exc
-        try:
-            document = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"native corpus JSONL is invalid: {suite_id}/{source_id}") from exc
-        if (
-            not isinstance(document, dict)
-            or set(document) != {"documentId", "text"}
-            or not isinstance(document.get("documentId"), str)
-            or not document["documentId"].strip()
-            or not isinstance(document.get("text"), str)
-            or not document["text"].strip()
-        ):
-            raise ValueError(
-                f"native corpus document must contain only documentId/text: {suite_id}/{source_id}"
+    try:
+        stream = corpus_file.path.open("rb")
+    except OSError as exc:
+        raise ValueError(f"native corpus file is unreadable: {suite_id}/{source_id}") from exc
+    with stream:
+        for raw_line in stream:
+            digest.update(raw_line)
+            byte_length += len(raw_line)
+            try:
+                line = raw_line.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ValueError(f"native corpus is not UTF-8: {suite_id}/{source_id}") from exc
+            try:
+                document = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"native corpus JSONL is invalid: {suite_id}/{source_id}") from exc
+            if (
+                not isinstance(document, dict)
+                or set(document) != {"documentId", "text"}
+                or not isinstance(document.get("documentId"), str)
+                or not document["documentId"].strip()
+                or not isinstance(document.get("text"), str)
+                or not document["text"].strip()
+            ):
+                raise ValueError(
+                    "native corpus document must contain only documentId/text: "
+                    f"{suite_id}/{source_id}"
+                )
+            document_id = document["documentId"]
+            if previous_document_id is not None and document_id <= previous_document_id:
+                raise ValueError(
+                    f"native corpus documents must be unique and sorted: {suite_id}/{source_id}"
+                )
+            canonical_line = (
+                json.dumps(
+                    document,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+                + b"\n"
             )
-        document_id = document["documentId"]
-        if previous_document_id is not None and document_id <= previous_document_id:
-            raise ValueError(
-                f"native corpus documents must be unique and sorted: {suite_id}/{source_id}"
-            )
-        canonical_line = (
-            json.dumps(
-                document,
-                ensure_ascii=True,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
-            + b"\n"
-        )
-        if canonical_line != raw_line:
-            raise ValueError(f"native corpus JSONL is not canonical: {suite_id}/{source_id}")
-        previous_document_id = document_id
-        document_count += 1
+            if canonical_line != raw_line:
+                raise ValueError(f"native corpus JSONL is not canonical: {suite_id}/{source_id}")
+            previous_document_id = document_id
+            document_count += 1
     if document_count == 0:
         raise ValueError(f"native corpus must be newline-terminated JSONL: {suite_id}/{source_id}")
+    if (
+        byte_length != corpus_file.byte_length
+        or document_count != corpus_file.document_count
+        or "sha256:" + digest.hexdigest() != corpus_file.sha256
+    ):
+        raise ValueError(f"native corpus file metadata is invalid: {suite_id}/{source_id}")
     return document_count
 
 
@@ -1229,16 +1277,16 @@ def _corpus_snapshot(
     suite_id: str,
     source_id: str,
     corpus_role: str,
-    payload: bytes,
-    snapshot_bytes: Callable[[str, str, str, bytes], Mapping[str, object]],
+    corpus_file: CanonicalCorpusFile,
+    snapshot_file: Callable[[str, str, str, CanonicalCorpusFile], Mapping[str, object]],
 ) -> dict[str, object]:
     url = f"derived://native-corpus/{suite_id}/{source_id}"
-    snapshot = _snapshot(
+    snapshot = _snapshot_file(
         suite_id,
         f"corpus-{source_id}",
         url,
-        payload,
-        snapshot_bytes,
+        corpus_file,
+        snapshot_file,
     )
     return {
         "corpus_role": corpus_role,
@@ -1299,6 +1347,29 @@ def _snapshot(
     return snapshot
 
 
+def _snapshot_file(
+    suite_id: str,
+    evidence_type: str,
+    url: str,
+    corpus_file: CanonicalCorpusFile,
+    snapshot_file: Callable[
+        [str, str, str, CanonicalCorpusFile], Mapping[str, object]
+    ]
+    | None,
+) -> dict[str, object]:
+    snapshot: dict[str, object] = {
+        "byte_length": corpus_file.byte_length,
+        "sha256": corpus_file.sha256,
+        "url": url,
+    }
+    if snapshot_file is None:
+        return snapshot
+    immutable_artifact = dict(snapshot_file(suite_id, evidence_type, url, corpus_file))
+    _validate_immutable_file_artifact(immutable_artifact, corpus_file)
+    snapshot["immutable_artifact"] = immutable_artifact
+    return snapshot
+
+
 def _validate_immutable_artifact(artifact: Mapping[str, object], payload: bytes) -> None:
     artifact_path = artifact.get("artifactPath")
     if not isinstance(artifact_path, str) or not artifact_path.startswith("s3://"):
@@ -1310,6 +1381,21 @@ def _validate_immutable_artifact(artifact: Mapping[str, object], payload: bytes)
         raise ValueError("immutable catalog evidence must use COMPLIANCE object lock")
     if artifact.get("artifactSha256") != sha256(payload).hexdigest():
         raise ValueError("immutable catalog evidence SHA-256 does not match fetched payload")
+
+
+def _validate_immutable_file_artifact(
+    artifact: Mapping[str, object], corpus_file: CanonicalCorpusFile
+) -> None:
+    artifact_path = artifact.get("artifactPath")
+    if not isinstance(artifact_path, str) or not artifact_path.startswith("s3://"):
+        raise ValueError("immutable catalog evidence must be stored at an s3:// artifact path")
+    artifact_version_id = artifact.get("artifactVersionId")
+    if not isinstance(artifact_version_id, str) or not artifact_version_id.strip():
+        raise ValueError("immutable catalog evidence must include artifactVersionId")
+    if artifact.get("objectLockMode") != "COMPLIANCE":
+        raise ValueError("immutable catalog evidence must use COMPLIANCE object lock")
+    if artifact.get("artifactSha256") != corpus_file.sha256.removeprefix("sha256:"):
+        raise ValueError("immutable catalog evidence SHA-256 does not match corpus file")
 
 
 def _validate_observed_at(value: str) -> None:

@@ -24,6 +24,7 @@ from urllib.request import ProxyHandler, Request, build_opener, urlopen
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import rfc8785
+from adapstory_serp_pipeline.benchmark.corpus_file import CanonicalCorpusFile
 from adapstory_serp_pipeline.benchmark.ds1000_contract import (
     normalize_ds1000_base_image_provenance,
 )
@@ -5020,6 +5021,77 @@ def write_immutable_evidence_bytes_snapshot(
     }
 
 
+def write_immutable_evidence_file_snapshot(
+    artifact_path: str,
+    *,
+    artifact_type: str,
+    operation_id: str,
+    payload_path: Path,
+    payload_sha256: str,
+    content_type: str,
+    s3_client: Any | None = None,
+) -> dict[str, Any]:
+    """Stream one pre-hashed file to WORM storage without materializing it as bytes."""
+
+    _require_non_empty("artifact_type", artifact_type)
+    _require_non_empty("operation_id", operation_id)
+    _require_non_empty("content_type", content_type)
+    if (
+        not isinstance(payload_path, Path)
+        or not payload_path.is_file()
+        or payload_path.stat().st_size <= 0
+    ):
+        raise ValueError("immutable evidence file must be a non-empty regular file")
+    if (
+        not isinstance(payload_sha256, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", payload_sha256) is None
+    ):
+        raise ValueError("immutable evidence file SHA-256 is invalid")
+    artifact = _artifact_ref("artifact_path", artifact_path)
+    if artifact.kind != "s3":
+        raise ValueError("immutable evidence snapshots require an s3:// artifact path")
+    retention_days = _required_positive_int_env(_EVIDENCE_RETENTION_DAYS_ENV)
+    client = s3_client or _s3_client(artifact_path)
+    written_at = datetime.now(UTC)
+    with payload_path.open("rb") as payload_stream:
+        response = client.put_object(
+            Bucket=_required_str_ref(artifact.bucket),
+            Key=_required_str_ref(artifact.key),
+            Body=payload_stream,
+            ContentLength=payload_path.stat().st_size,
+            ContentType=content_type,
+        )
+    if not isinstance(response, Mapping):
+        raise ValueError("immutable evidence S3 response is invalid")
+    version_id = response.get("VersionId")
+    if not isinstance(version_id, str) or not version_id.strip():
+        raise ValueError("immutable evidence S3 response is missing VersionId")
+    retain_until = _verify_compliance_locked_evidence_version(
+        client,
+        bucket=_required_str_ref(artifact.bucket),
+        key=_required_str_ref(artifact.key),
+        version_id=version_id,
+        retention_days=retention_days,
+        written_at=written_at,
+    )
+    etag = response.get("ETag")
+    if not isinstance(etag, str) or not etag.strip():
+        raise ValueError("immutable evidence S3 response is missing ETag")
+    return {
+        "artifactETag": etag.strip('"'),
+        "artifactPath": artifact.location,
+        "artifactSha256": payload_sha256.removeprefix("sha256:"),
+        "artifactType": artifact_type,
+        "artifactVersionId": version_id,
+        "contractVersion": _AIRFLOW_ARTIFACT_CONTRACT_VERSION,
+        "objectLockMode": "COMPLIANCE",
+        "operationId": operation_id,
+        "retainUntil": retain_until,
+        "retentionDays": retention_days,
+        "status": "written",
+    }
+
+
 def _verify_compliance_locked_evidence_version(
     s3_client: Any,
     *,
@@ -6216,12 +6288,14 @@ def materialize_live_benchmark_catalog_artifact(
     fetch_bytes: Callable[[str], bytes] | None = None,
     snapshot_writer: Callable[..., dict[str, Any]] | None = None,
     snapshot_bytes_writer: Callable[..., dict[str, Any]] | None = None,
+    snapshot_file_writer: Callable[..., dict[str, Any]] | None = None,
     native_adapter_materializer: Callable[
         [str, Mapping[str, bytes], Mapping[str, Mapping[str, object]]], Mapping[str, object]
     ]
     | None = None,
     native_corpus_materializer: Callable[
-        [str, Mapping[str, bytes], Mapping[str, Mapping[str, object]]], Mapping[str, object]
+        [str, Mapping[str, bytes], Mapping[str, Mapping[str, object]], Path],
+        Mapping[str, object],
     ]
     | None = None,
     execution_substrate_materializer: Callable[
@@ -6229,11 +6303,11 @@ def materialize_live_benchmark_catalog_artifact(
             str,
             Mapping[str, bytes],
             Mapping[str, Mapping[str, object]],
-            Mapping[str, bytes],
+            Mapping[str, CanonicalCorpusFile],
             Mapping[str, Mapping[str, object]],
             Mapping[str, bytes],
         ],
-        Mapping[str, bytes],
+        Mapping[str, bytes | CanonicalCorpusFile],
     ]
     | None = None,
     execution_substrate_role_payload_loader: Callable[[], Mapping[str, Mapping[str, bytes]]]
@@ -6264,6 +6338,11 @@ def materialize_live_benchmark_catalog_artifact(
         if snapshot_bytes_writer is None
         else snapshot_bytes_writer
     )
+    file_writer = (
+        write_immutable_evidence_file_snapshot
+        if snapshot_file_writer is None
+        else snapshot_file_writer
+    )
 
     def snapshot_bytes(
         suite_id: str,
@@ -6282,43 +6361,66 @@ def materialize_live_benchmark_catalog_artifact(
             content_type="application/octet-stream",
         )
 
+    def snapshot_file(
+        suite_id: str,
+        evidence_type: str,
+        source_url: str,
+        corpus_file: CanonicalCorpusFile,
+    ) -> dict[str, Any]:
+        artifact_key = sha256(f"{suite_id}:{evidence_type}:{source_url}".encode()).hexdigest()
+        return file_writer(
+            artifact_path=(
+                f"{artifact_root_path}/benchmark-catalog-inputs/{artifact_key}-{evidence_type}.jsonl"
+            ),
+            artifact_type=f"benchmark_catalog_{evidence_type}",
+            operation_id=_required_str(plan, "operation_id"),
+            payload_path=corpus_file.path,
+            payload_sha256=corpus_file.sha256,
+            content_type="application/x-ndjson",
+        )
+
     def default_native_corpus_materializer(
         suite_id: str,
         dataset_payloads: Mapping[str, bytes],
         dataset_snapshots: Mapping[str, Mapping[str, object]],
+        output_directory: Path,
     ) -> Mapping[str, object]:
         return _native_corpus_materializer(
             suite_id,
             dataset_payloads,
             dataset_snapshots,
             fetch_bytes=resolved_fetch_bytes,
+            output_directory=output_directory,
         )
 
-    evidence = build_live_benchmark_catalog_evidence(
-        observed_at=_required_datetime_string(plan, "generated_at"),
-        fetch_bytes=resolved_fetch_bytes,
-        snapshot_bytes=snapshot_bytes,
-        native_adapter_materializer=(
-            _native_adapter_materializer
-            if native_adapter_materializer is None
-            else native_adapter_materializer
-        ),
-        native_corpus_materializer=(
-            default_native_corpus_materializer
-            if native_corpus_materializer is None
-            else native_corpus_materializer
-        ),
-        execution_substrate_materializer=(
-            _execution_substrate_materializer
-            if execution_substrate_materializer is None
-            else execution_substrate_materializer
-        ),
-        execution_substrate_role_payloads=(
-            _execution_substrate_source_set_from_env()
-            if execution_substrate_role_payload_loader is None
-            else execution_substrate_role_payload_loader()
-        ),
-    )
+    with TemporaryDirectory(prefix="serp-catalog-corpus-") as corpus_directory:
+        evidence = build_live_benchmark_catalog_evidence(
+            observed_at=_required_datetime_string(plan, "generated_at"),
+            fetch_bytes=resolved_fetch_bytes,
+            snapshot_bytes=snapshot_bytes,
+            snapshot_file=snapshot_file,
+            corpus_output_directory=Path(corpus_directory),
+            native_adapter_materializer=(
+                _native_adapter_materializer
+                if native_adapter_materializer is None
+                else native_adapter_materializer
+            ),
+            native_corpus_materializer=(
+                default_native_corpus_materializer
+                if native_corpus_materializer is None
+                else native_corpus_materializer
+            ),
+            execution_substrate_materializer=(
+                _execution_substrate_materializer
+                if execution_substrate_materializer is None
+                else execution_substrate_materializer
+            ),
+            execution_substrate_role_payloads=(
+                _execution_substrate_source_set_from_env()
+                if execution_substrate_role_payload_loader is None
+                else execution_substrate_role_payload_loader()
+            ),
+        )
     writer = write_immutable_evidence_snapshot if snapshot_writer is None else snapshot_writer
     snapshot = writer(
         artifact_path=artifact_paths["benchmark_catalog"],
@@ -6368,8 +6470,9 @@ def _native_corpus_materializer(
     dataset_snapshots: Mapping[str, Mapping[str, object]],
     *,
     fetch_bytes: Callable[[str], bytes] | None = None,
+    output_directory: Path,
 ) -> Mapping[str, object]:
-    """Derive only query-independent corpus bytes inside the isolated workload."""
+    """Derive a file-backed query-independent corpus inside the isolated workload."""
 
     from adapstory_serp_pipeline.benchmark.native_corpus import (
         derive_native_benchmark_corpus,
@@ -6388,16 +6491,18 @@ def _native_corpus_materializer(
         materialization = derive_swe_corpus_from_archive_stream(
             plan,
             _bounded_swe_archive_stream(sources, fetch_bytes, max_workers=8),
+            output_directory=output_directory,
         )
     else:
         materialization = derive_native_benchmark_corpus(
             suite_id=suite_id,
             dataset_payloads=dataset_payloads,
             dataset_snapshots=dataset_snapshots,
+            output_directory=output_directory,
         )
     return {
         "manifest": dict(materialization.manifest),
-        "payloads": dict(materialization.payloads),
+        "files": dict(materialization.files),
     }
 
 
@@ -6462,10 +6567,10 @@ def _execution_substrate_materializer(
     suite_id: str,
     dataset_payloads: Mapping[str, bytes],
     dataset_snapshots: Mapping[str, Mapping[str, object]],
-    corpus_payloads: Mapping[str, bytes],
+    corpus_files: Mapping[str, CanonicalCorpusFile],
     corpus_snapshots: Mapping[str, Mapping[str, object]],
     official_harness_payloads: Mapping[str, bytes],
-) -> Mapping[str, bytes]:
+) -> Mapping[str, bytes | CanonicalCorpusFile]:
     """Materialize exact role bytes only inside the isolated catalog workload."""
 
     from adapstory_serp_pipeline.benchmark.execution_substrate_materialization import (
@@ -6476,7 +6581,7 @@ def _execution_substrate_materializer(
         suite_id,
         dataset_payloads,
         dataset_snapshots,
-        corpus_payloads,
+        corpus_files,
         corpus_snapshots,
         official_harness_payloads,
     )
