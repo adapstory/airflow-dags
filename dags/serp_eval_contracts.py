@@ -2192,8 +2192,6 @@ def build_model_catalog_promotion_plan(conf: Mapping[str, Any]) -> SerpDagPlan:
                     "validate_model_catalog_promotion_plan",
                     "load_governed_model_releases",
                     "write_model_catalog_promotion_receipt",
-                    "build_d17_event_d6_trigger_conf",
-                    "trigger_model_promotion_regression_suite",
                 )
             ),
             "tenant_id": str(tenant_id),

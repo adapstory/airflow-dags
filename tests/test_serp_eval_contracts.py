@@ -7441,8 +7441,6 @@ def test_build_public_docs_seed_refresh_plan_rejects_unsafe_seed_registry() -> N
                 "validate_model_catalog_promotion_plan",
                 "verify_runtime_terminal_activation_admission",
                 "write_model_catalog_promotion_receipt",
-                "build_d17_event_d6_trigger_conf",
-                "trigger_model_promotion_regression_suite",
             ],
         ),
         (
@@ -7554,16 +7552,14 @@ def test_serp_dag_files_declare_expected_airflow_contracts(
             "trigger_benchmark_improvement_wave"
         ]
     elif dag_id == "serp_model_catalog_promotion":
-        assert _keyword_values(tree, "PythonOperator", "task_id") == [
-            task_id for task_id in task_ids if task_id != "trigger_model_promotion_regression_suite"
-        ]
-        assert _keyword_values(tree, "TriggerDagRunOperator", "task_id") == [
-            "trigger_model_promotion_regression_suite"
-        ]
-        assert 'trigger_dag_id="serp_model_promotion_regression_suite"' in source
-        assert "write_receipt\n    >> build_event_d6_conf" in source
-        assert "build_event_d6_conf\n    >> trigger_event_d6\n)" in source
-        assert "fail_when_dag_is_paused=True" in source
+        # Context: D17 used to inherit event-D6/D19 terminal failures.
+        # Decision: its graph ends at the immutable promotion receipt.
+        # Reason: promotion authority and benchmark completion have different owners.
+        # Revisit when: a versioned authority protocol explicitly composes both states.
+        assert _keyword_values(tree, "PythonOperator", "task_id") == task_ids
+        assert _keyword_values(tree, "TriggerDagRunOperator", "task_id") == []
+        assert "serp_model_promotion_regression_suite" not in source
+        assert "validate_plan >> verify_terminal_activation >> write_receipt" in source
     elif dag_id == "serp_model_promotion_regression_suite":
         assert _keyword_values(tree, "PythonOperator", "task_id") == [
             task_id for task_id in task_ids if task_id != "trigger_benchmark_improvement_wave"

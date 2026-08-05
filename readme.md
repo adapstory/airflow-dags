@@ -65,10 +65,11 @@ SERP eval DAG contracts:
   `nightly-registry-submissions.json` to BC-21 through the reviewed
   `bc21_base_url`. Local dry-run receipt writers are explicit dev/test
   fallback helpers only and are not the default DAG runtime path.
-- `serp_model_promotion_regression_suite` is the separate event-only D6 route
-  from D17 to D19. It never reads the scheduled-D6 environment contract and
-  accepts only the versioned `D17EventD6Trigger/v1` envelope built by D17 from
-  its canonical plan, authoritative D17 DagRun identity, and the exact
+- `serp_model_promotion_regression_suite` is a separately triggered event-only
+  D6-to-D19 handoff. D17 never starts or waits for it. It never reads the
+  scheduled-D6 environment contract and accepts only the versioned
+  `D17EventD6Trigger/v1` envelope derived after D17 acceptance from its
+  canonical plan, authoritative D17 DagRun identity, and the exact
   `EvaluationReleasePromotionReceipt/v8` COMPLIANCE WORM handle. Its manual
   trigger run ID and logical date are deterministic and must match the D17
   source identity and D17-derived `generated_at`; it then projects exactly the
@@ -117,7 +118,9 @@ SERP eval DAG contracts:
   `evaluationObjectiveEvidence`. It then seals the only accepted
   `EvaluationReleasePromotionReceipt/v8`, including the exact passed
   `candidateReleaseAuthority`. Runtime-image-only candidate releases
-  fail closed.
+  fail closed. The immutable receipt is D17's terminal authority boundary;
+  D17 neither launches event D6 nor waits for D19. Jenkins records
+  `D17_ACCEPTED_D19_PENDING` and owns the separately observable D19 handoff.
   Release manifest production belongs to the signed CI/release path: the
   `airflow-runtime` Jenkins build seals the active baseline and newly signed
   candidate under a build-scoped MinIO COMPLIANCE prefix using its projected
