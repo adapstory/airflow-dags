@@ -756,6 +756,34 @@ def test_d19_admission_binds_native_triggered_ids_to_operator_run_type(run_id: s
     assert admitted["airflowRun"] == airflow_run
 
 
+def test_d19_admission_accepts_only_the_canonical_authenticated_canary_identity() -> None:
+    canary = {
+        **_d19_airflow_run(),
+        "runId": "d19_canary__" + "a" * 32 + "__01",
+        "runType": "manual",
+    }
+
+    admitted = admit_d19_run(
+        dag_run_conf={"generated_at": "2026-07-17T00:00:00Z"},
+        airflow_run=canary,
+        fence_client=_AdmissionFenceClient(active=None),
+    )
+
+    assert admitted["airflowRun"] == canary
+
+    for run_id, run_type in (
+        ("d19_canary__" + "a" * 31 + "__01", "manual"),
+        ("d19_canary__" + "a" * 32 + "__02", "manual"),
+        ("d19_canary__" + "a" * 32 + "__01", "operator_triggered"),
+    ):
+        with pytest.raises(ValueError, match="runId and runType provenance"):
+            admit_d19_run(
+                dag_run_conf={"generated_at": "2026-07-17T00:00:00Z"},
+                airflow_run={**canary, "runId": run_id, "runType": run_type},
+                fence_client=_AdmissionFenceClient(active=None),
+            )
+
+
 @pytest.mark.parametrize(
     ("run_id", "run_type"),
     (
