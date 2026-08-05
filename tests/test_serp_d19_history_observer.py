@@ -69,7 +69,9 @@ def test_history_client_uses_one_short_lived_dedicated_jwt_and_complete_v2_pagin
             "airflowVersion": server_version,
             "serverAuthority": "airflow-api-server.airflow.svc.cluster.local:8080",
         },
-        "acceptedRunVerifications": [_verification_pointer(index) for index in range(1, 4)],
+        "acceptedRunVerifications": [
+            _verification_pointer(index) for index in range(1, 4)
+        ],
         "pagination": {
             "complete": True,
             "observedEntries": 3,
@@ -292,7 +294,9 @@ def test_history_client_from_environment_rejects_raw_credentials(
     environment = _history_environment(tmp_path)
     environment[raw_name] = "forbidden-raw-value"
 
-    with pytest.raises(ValueError, match="raw history-observer credentials are forbidden"):
+    with pytest.raises(
+        ValueError, match="raw history-observer credentials are forbidden"
+    ):
         AirflowD19HistoryClient.from_environment(environment=environment)
 
 
@@ -450,7 +454,9 @@ def test_history_client_fails_closed_on_non_contiguous_or_replayed_streak(
     if mutation == "missing_pointer":
         xcom_responses[-1] = {"detail": "XCom entry not found"}
     elif mutation == "replayed_request":
-        xcom_responses[-1]["value"]["requestId"] = xcom_responses[-2]["value"]["requestId"]
+        xcom_responses[-1]["value"]["requestId"] = xcom_responses[-2]["value"][
+            "requestId"
+        ]
     scripted: list[dict[str, Any]] = [
         {
             "access_token": _jwt(
@@ -486,14 +492,18 @@ def test_kubernetes_fence_requires_a_predeclared_config_map() -> None:
     assert api.patches == []
 
 
-def test_kubernetes_fence_rejects_active_holder_and_cas_replaces_expired_holder() -> None:
+def test_kubernetes_fence_rejects_active_holder_and_cas_replaces_expired_holder() -> (
+    None
+):
     active_api = _ConfigMapApi(read_response=_config_map(resource_version="17"))
     active = KubernetesD19HistoryFenceClient(
         api=active_api,
         clock=lambda: datetime(2026, 7, 17, 0, 0, 6, tzinfo=UTC),
     )
     with pytest.raises(ValueError, match="already active"):
-        active.acquire(parent_airflow_run={**_parent_run(), "runId": "scheduled__other"})
+        active.acquire(
+            parent_airflow_run={**_parent_run(), "runId": "scheduled__other"}
+        )
 
     expired_lease = _config_map(
         acquired_at="2026-07-16T00:00:00Z",
@@ -512,7 +522,9 @@ def test_kubernetes_fence_rejects_active_holder_and_cas_replaces_expired_holder(
         clock=lambda: datetime(2026, 7, 17, 0, 0, 5, tzinfo=UTC),
     )
 
-    assert client.acquire(parent_airflow_run=_parent_run()) == _fence(resource_version="22")
+    assert client.acquire(parent_airflow_run=_parent_run()) == _fence(
+        resource_version="22"
+    )
     patch = expired_api.patches[0][2]
     assert set(patch) == {"data", "metadata"}
     assert patch["metadata"] == {
@@ -635,7 +647,8 @@ def test_projected_core_api_uses_generated_client_bearer_auth_key(
 def test_history_attestation_sealer_delegates_to_canonical_pipeline_contract() -> None:
     written = {
         "artifactPath": (
-            "s3://airflow-serp-artifacts/serp-evals/op/" "d19-run-history-observation.json"
+            "s3://airflow-serp-artifacts/serp-evals/op/"
+            "d19-run-history-observation.json"
         ),
         "artifactSha256": "a" * 64,
         "artifactVersionId": "version-history",
@@ -646,7 +659,9 @@ def test_history_attestation_sealer_delegates_to_canonical_pipeline_contract() -
     s3_client = object()
     calls: list[dict[str, Any]] = []
 
-    def runtime_sealer(receipt: Any, **kwargs: Any) -> tuple[dict[str, str], dict[str, Any]]:
+    def runtime_sealer(
+        receipt: Any, **kwargs: Any
+    ) -> tuple[dict[str, str], dict[str, Any]]:
         calls.append({"receipt": receipt, **kwargs})
         return ({"s3Uri": "attestation"}, {"consumerVerification": {"valid": True}})
 
@@ -711,7 +726,9 @@ def test_d19_admission_requires_the_real_fence_for_scheduled_d6_child() -> None:
         )
 
 
-def test_d19_unfenced_admission_is_blocked_during_window_and_checks_logical_date() -> None:
+def test_d19_unfenced_admission_is_blocked_during_window_and_checks_logical_date() -> (
+    None
+):
     conf = {"generated_at": "2026-07-17T00:00:00Z"}
     with pytest.raises(ValueError, match="blocks unfenced D19"):
         admit_d19_run(
@@ -739,8 +756,12 @@ def test_d19_unfenced_admission_is_blocked_during_window_and_checks_logical_date
         )
 
 
-@pytest.mark.parametrize("run_id", ("event_d6_d19__release-17", "d6__scheduled__2026-07-17"))
-def test_d19_admission_binds_native_triggered_ids_to_operator_run_type(run_id: str) -> None:
+@pytest.mark.parametrize(
+    "run_id", ("event_d6_d19__release-17", "d6__scheduled__2026-07-17")
+)
+def test_d19_admission_binds_native_triggered_ids_to_operator_run_type(
+    run_id: str,
+) -> None:
     airflow_run = {
         **_d19_airflow_run(),
         "runId": run_id,
@@ -756,30 +777,46 @@ def test_d19_admission_binds_native_triggered_ids_to_operator_run_type(run_id: s
     assert admitted["airflowRun"] == airflow_run
 
 
-def test_d19_admission_accepts_only_the_canonical_authenticated_canary_identity() -> None:
-    canary = {
+@pytest.mark.parametrize(
+    "run_id",
+    (
+        "d19_canary__" + "a" * 32 + "__01__attempt_000038",
+        "d19_governance__" + "a" * 32 + "__01__attempt_000038",
+        "d19_governance__" + "a" * 32 + "__03__attempt_000038",
+    ),
+)
+def test_d19_admission_accepts_only_canonical_authenticated_bootstrap_attempts(
+    run_id: str,
+) -> None:
+    bootstrap_run = {
         **_d19_airflow_run(),
-        "runId": "d19_canary__" + "a" * 32 + "__01",
+        "runId": run_id,
         "runType": "manual",
     }
 
     admitted = admit_d19_run(
         dag_run_conf={"generated_at": "2026-07-17T00:00:00Z"},
-        airflow_run=canary,
+        airflow_run=bootstrap_run,
         fence_client=_AdmissionFenceClient(active=None),
     )
 
-    assert admitted["airflowRun"] == canary
+    assert admitted["airflowRun"] == bootstrap_run
 
-    for run_id, run_type in (
-        ("d19_canary__" + "a" * 31 + "__01", "manual"),
-        ("d19_canary__" + "a" * 32 + "__02", "manual"),
-        ("d19_canary__" + "a" * 32 + "__01", "operator_triggered"),
+    for malformed_run_id, run_type in (
+        ("d19_canary__" + "a" * 31 + "__01__attempt_000038", "manual"),
+        ("d19_canary__" + "a" * 32 + "__02__attempt_000038", "manual"),
+        ("d19_governance__" + "a" * 32 + "__04__attempt_000038", "manual"),
+        ("d19_canary__" + "a" * 32 + "__01__attempt_000000", "manual"),
+        ("d19_canary__" + "a" * 32 + "__01__attempt_000038", "operator_triggered"),
     ):
         with pytest.raises(ValueError, match="runId and runType provenance"):
             admit_d19_run(
                 dag_run_conf={"generated_at": "2026-07-17T00:00:00Z"},
-                airflow_run={**canary, "runId": run_id, "runType": run_type},
+                airflow_run={
+                    **bootstrap_run,
+                    "runId": malformed_run_id,
+                    "runType": run_type,
+                },
                 fence_client=_AdmissionFenceClient(active=None),
             )
 
@@ -887,7 +924,8 @@ def _verification_pointer(index: int) -> dict[str, Any]:
             "objectLockMode": "COMPLIANCE",
             "retainUntil": "2033-07-17T00:00:00Z",
             "s3Uri": (
-                "s3://airflow-serp-evidence/serp-evals/score-cells/" f"manual__d19-{index}.json"
+                "s3://airflow-serp-evidence/serp-evals/score-cells/"
+                f"manual__d19-{index}.json"
             ),
             "sha256": "sha256:" + f"{(index + 7) % 10}" * 64,
             "versionId": f"score-cells-version-d19-{index}",
@@ -896,7 +934,8 @@ def _verification_pointer(index: int) -> dict[str, Any]:
             "objectLockMode": "COMPLIANCE",
             "retainUntil": "2033-07-17T00:00:00Z",
             "s3Uri": (
-                "s3://airflow-serp-evidence/serp-evals/verification/" f"manual__d19-{index}.json"
+                "s3://airflow-serp-evidence/serp-evals/verification/"
+                f"manual__d19-{index}.json"
             ),
             "sha256": "sha256:" + f"{index}" * 64,
             "versionId": f"version-d19-{index}",
@@ -950,7 +989,9 @@ class _ConfigMapApi:
         self.patch_response = patch_response
         self.patches: list[tuple[str, str, dict[str, Any]]] = []
 
-    def read_namespaced_config_map(self, *, name: str, namespace: str) -> dict[str, Any]:
+    def read_namespaced_config_map(
+        self, *, name: str, namespace: str
+    ) -> dict[str, Any]:
         assert name == "serp-d19-history-fence"
         assert namespace == "airflow"
         if self.read_error is not None:
