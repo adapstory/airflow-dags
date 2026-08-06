@@ -8605,6 +8605,9 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeKubernetesPodOperator(FakePythonOperator):
         pass
 
+    class FakeKubernetesJobOperator(FakeKubernetesPodOperator):
+        pass
+
     class FakeTimeDeltaSensor(FakePythonOperator):
         pass
 
@@ -8667,6 +8670,9 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         "airflow.providers.cncf.kubernetes.operators": types.ModuleType(
             "airflow.providers.cncf.kubernetes.operators"
         ),
+        "airflow.providers.cncf.kubernetes.operators.job": types.ModuleType(
+            "airflow.providers.cncf.kubernetes.operators.job"
+        ),
         "airflow.providers.cncf.kubernetes.operators.pod": types.ModuleType(
             "airflow.providers.cncf.kubernetes.operators.pod"
         ),
@@ -8712,6 +8718,9 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     cast(
         Any, modules["airflow.providers.cncf.kubernetes.operators.pod"]
     ).KubernetesPodOperator = FakeKubernetesPodOperator
+    cast(
+        Any, modules["airflow.providers.cncf.kubernetes.operators.job"]
+    ).KubernetesJobOperator = FakeKubernetesJobOperator
     cast(Any, modules["airflow.sdk"]).DAG = FakeDAG
     cast(Any, modules["airflow.sdk"]).literal = lambda value: value
     cast(Any, modules["airflow.task.trigger_rule"]).TriggerRule = FakeTriggerRule
@@ -8735,6 +8744,7 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     models.V1SecretVolumeSource = FakeKubernetesModel
     models.V1SecurityContext = FakeKubernetesModel
     models.V1ServiceAccountTokenProjection = FakeKubernetesModel
+    models.V1Toleration = FakeKubernetesModel
     models.V1KeyToPath = FakeKubernetesModel
     models.V1Volume = FakeKubernetesModel
     models.V1VolumeMount = FakeKubernetesModel
@@ -8903,7 +8913,6 @@ def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_reque
         assert task["cmds"] == expected_module
         assert task["service_account_name"] == "airflow-serp-benchmark-builder"
         assert task["automount_service_account_token"] is False
-        assert task["do_xcom_push"] is True
         assert task["labels"]["adapstory.com/serp-network-profile"] == "benchmark-builder"
         assert task["security_context"].kwargs["run_as_non_root"] is True
         assert task["container_security_context"].kwargs["read_only_root_filesystem"] is True
@@ -8911,15 +8920,18 @@ def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_reque
         assert task["on_kill_action"] == "delete_pod"
     for (suite_id, side), builder_task in builders.items():
         arguments = builder_task.kwargs["arguments"]
+        assert builder_task.kwargs["do_xcom_push"] is False
         assert arguments[0] == "build-pack-side"
         assert arguments[arguments.index("--suite") + 1] == suite_id
         assert arguments[arguments.index("--side") + 1] == side
         assert "--shared-output-prefix" in arguments
         assert builder_task.kwargs["retries"] == 2
     assert aggregator["arguments"][0] == "aggregate-exact-nine"
-    assert "--side-result-handles-json-urlencoded" in aggregator["arguments"]
+    assert "--side-result-uris-json" in aggregator["arguments"]
+    assert aggregator["do_xcom_push"] is True
     assert aggregator["retries"] == 2
     assert registrar["arguments"][0] == "register-binding"
+    assert registrar["do_xcom_push"] is True
     assert "--lifecycle-input" in registrar["arguments"]
     assert "--result-output" in aggregator["arguments"]
     assert "--result-output" in registrar["arguments"]
@@ -8935,6 +8947,14 @@ def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_reque
     assert builder_env["ADAPSTORY_BC10_TOKEN_PATH"] == (
         "/var/run/secrets/adapstory/bc10-workload/token"
     )
+    for thread_env_name in (
+        "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+    ):
+        assert builder_env[thread_env_name] == str(module.D19_PACK_BUILDER_CPU_CORES)
+    assert builder_env["TOKENIZERS_PARALLELISM"] == "false"
     assert "ADAPSTORY_OLLAMA_BASE_URL" not in builder_env
     assert "ADAPSTORY_SERP_MCP_GATEWAY_BASE_URL" not in builder_env
     assert not any(
@@ -8971,10 +8991,52 @@ def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_reque
     assert '"--lifecycle-result-sha256"' in source
 
 
-def test_d19_xcom_kpos_delete_pods_when_the_controller_or_base_dies() -> None:
-    source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(
-        encoding="utf-8"
+def test_d19_pack_side_builders_are_controller_owned_remote_jobs() -> None:
+    # Context: two pack-side KPOs were placed on VM100 with the Kubernetes
+    # control plane; their fan-out saturated all vCPUs and made the API, SSH,
+    # and guest agent unavailable until the task pods exited with code 255.
+    # Decision: heavy side builds are controller-owned Jobs in the governed
+    # stateless remote compute class, with truthful CPU and local-disk budgets.
+    # Reason: workload failure must not remove the control plane that observes,
+    # retries, and cleans it up.
+    # Revisit when: the control plane has a separately scheduled worker pool
+    # with an equivalent isolation and admission contract.
+    source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    assert (
+        "from airflow.providers.cncf.kubernetes.operators.job import " "KubernetesJobOperator"
+    ) in source
+    builder_job = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and _matches_call(node, "KubernetesJobOperator")
+        and any(
+            keyword.arg == "task_id"
+            and isinstance(keyword.value, ast.Name)
+            and keyword.value.id == "task_id"
+            for keyword in node.keywords
+        )
     )
+    keywords = {keyword.arg: keyword.value for keyword in builder_job.keywords}
+
+    assert isinstance(keywords["node_selector"], ast.Name)
+    assert keywords["node_selector"].id == "D19_REMOTE_COMPUTE_NODE_SELECTOR"
+    assert isinstance(keywords["tolerations"], ast.Name)
+    assert keywords["tolerations"].id == "D19_REMOTE_COMPUTE_TOLERATIONS"
+    assert isinstance(keywords["wait_until_job_complete"], ast.Constant)
+    assert keywords["wait_until_job_complete"].value is True
+    assert isinstance(keywords["backoff_limit"], ast.Constant)
+    assert keywords["backoff_limit"].value == 0
+    assert isinstance(keywords["do_xcom_push"], ast.Constant)
+    assert keywords["do_xcom_push"].value is False
+    assert '"ephemeral-storage": "4Gi"' in source
+    assert '"ephemeral-storage": "12Gi"' in source
+
+
+def test_d19_xcom_kpos_delete_pods_when_the_controller_or_base_dies() -> None:
+    source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     xcom_calls: list[ast.Call] = []
     for node in ast.walk(tree):
@@ -8999,7 +9061,7 @@ def test_d19_xcom_kpos_delete_pods_when_the_controller_or_base_dies() -> None:
             assert constants.get("on_finish_action") == "delete_pod"
             assert constants.get("on_kill_action") == "delete_pod"
 
-    assert len(xcom_calls) == 11
+    assert len(xcom_calls) == 10
 
 
 def test_d19_runs_exact_ninety_server_owned_official_harness_work_items(

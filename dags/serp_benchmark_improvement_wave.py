@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from airflow.configuration import conf
+from airflow.providers.cncf.kubernetes.operators.job import KubernetesJobOperator
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 from airflow.providers.standard.operators.python import BranchPythonOperator, PythonOperator
 from airflow.sdk import DAG
@@ -161,10 +162,28 @@ D19_NATIVE_ADAPTER_RUNNER_RESOURCES = k8s.V1ResourceRequirements(
     requests={"cpu": "500m", "memory": "1Gi"},
     limits={"cpu": "1000m", "memory": "3Gi"},
 )
+D19_PACK_BUILDER_CPU_CORES = 4
 D19_PACK_BUILDER_RESOURCES = k8s.V1ResourceRequirements(
-    requests={"cpu": "1000m", "memory": "2Gi"},
-    limits={"cpu": "8000m", "memory": "16Gi"},
+    requests={
+        "cpu": str(D19_PACK_BUILDER_CPU_CORES),
+        "ephemeral-storage": "4Gi",
+        "memory": "4Gi",
+    },
+    limits={
+        "cpu": str(D19_PACK_BUILDER_CPU_CORES),
+        "ephemeral-storage": "12Gi",
+        "memory": "8Gi",
+    },
 )
+D19_REMOTE_COMPUTE_NODE_SELECTOR = {"adapstory.com/compute-class": "remote"}
+D19_REMOTE_COMPUTE_TOLERATIONS = [
+    k8s.V1Toleration(
+        effect="NoSchedule",
+        key="adapstory.com/compute-class",
+        operator="Equal",
+        value="remote",
+    )
+]
 D19_OFFICIAL_HARNESS_LIMITS: Mapping[str, Mapping[str, str]] = {
     "APIBench": {"cpu": "2000m", "memory": "4Gi"},
     "ARES": {"cpu": "4000m", "memory": "8Gi"},
@@ -458,6 +477,11 @@ def d19_builder_env_vars() -> list[k8s.V1EnvVar]:
         *minio_web_identity_env_vars(_D19_BUILDER_ENV_NAMES),
         *bc10_workload_env_vars(),
         *bc21_workload_env_vars(),
+        k8s.V1EnvVar(name="MKL_NUM_THREADS", value=str(D19_PACK_BUILDER_CPU_CORES)),
+        k8s.V1EnvVar(name="NUMEXPR_NUM_THREADS", value=str(D19_PACK_BUILDER_CPU_CORES)),
+        k8s.V1EnvVar(name="OMP_NUM_THREADS", value=str(D19_PACK_BUILDER_CPU_CORES)),
+        k8s.V1EnvVar(name="OPENBLAS_NUM_THREADS", value=str(D19_PACK_BUILDER_CPU_CORES)),
+        k8s.V1EnvVar(name="TOKENIZERS_PARALLELISM", value="false"),
     ]
 
 
@@ -1151,12 +1175,12 @@ D19_PACK_SIDE_IDENTITIES = tuple(
     for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
     for side in ("baseline", "candidate")
 )
-D19_PACK_SIDE_BUILD_TASKS: dict[tuple[str, str], KubernetesPodOperator] = {}
+D19_PACK_SIDE_BUILD_TASKS: dict[tuple[str, str], KubernetesJobOperator] = {}
 for suite_id, side in D19_PACK_SIDE_IDENTITIES:
     suite_slug = suite_id.casefold().replace(" ", "_").replace("-", "_")
     artifact_slug = suite_id.casefold().replace(" ", "-").replace("_", "-")
     task_id = f"build_pack_side_{suite_slug}_{side}"
-    D19_PACK_SIDE_BUILD_TASKS[(suite_id, side)] = KubernetesPodOperator(
+    D19_PACK_SIDE_BUILD_TASKS[(suite_id, side)] = KubernetesJobOperator(
         task_id=task_id,
         name=f"serp-d19-{task_id.replace('_', '-')}",
         namespace=conf.get("kubernetes_executor", "namespace"),
@@ -1221,24 +1245,36 @@ for suite_id, side in D19_PACK_SIDE_IDENTITIES:
         volume_mounts=D19_BUILDER_VOLUME_MOUNTS,
         labels=D19_BUILDER_WORKLOAD_LABELS,
         container_resources=D19_PACK_BUILDER_RESOURCES,
+        node_selector=D19_REMOTE_COMPUTE_NODE_SELECTOR,
+        tolerations=D19_REMOTE_COMPUTE_TOLERATIONS,
         security_context=hardened_runtime_pod_security_context(),
         container_security_context=hardened_runtime_container_security_context(),
-        do_xcom_push=True,
+        do_xcom_push=False,
         get_logs=True,
         log_events_on_failure=True,
         random_name_suffix=True,
         reattach_on_restart=True,
         on_kill_action="delete_pod",
         on_finish_action="delete_pod",
+        backoff_limit=0,
+        ttl_seconds_after_finished=300,
+        wait_until_job_complete=True,
         retries=2,
         retry_delay=timedelta(seconds=30),
         executor_config=kubernetes_pod_launcher_executor_config(),
         dag=dag,
     )
 
-_D19_PACK_SIDE_TASK_IDS_JSON = json.dumps(
+_D19_PACK_SIDE_RESULT_URIS_JSON = json.dumps(
     [
-        "build_pack_side_" + suite_id.casefold().replace(" ", "_").replace("-", "_") + "_" + side
+        (
+            "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan')"
+            "['artifact_paths']['benchmark_pack_build_result'] }}.sides/"
+            + suite_id.casefold().replace(" ", "-").replace("_", "-")
+            + "-"
+            + side
+            + ".json"
+        )
         for suite_id, side in D19_PACK_SIDE_IDENTITIES
     ],
     ensure_ascii=True,
@@ -1280,8 +1316,10 @@ aggregate_exact_nine_benchmark_packs = KubernetesPodOperator(
             "{{ ti.xcom_pull(task_ids='load_model_catalog_promotion')"
             "['promotionEvidence']['sha256'] }}"
         ),
-        "--side-result-handles-json-urlencoded",
-        ("{{ ti.xcom_pull(task_ids=" + _D19_PACK_SIDE_TASK_IDS_JSON + ") | tojson | urlencode }}"),
+        "--side-result-uris-json",
+        _D19_PACK_SIDE_RESULT_URIS_JSON,
+        "--xcom-output",
+        "/airflow/xcom/return.json",
         "--result-output",
         (
             "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan')"
@@ -1342,6 +1380,8 @@ register_exact_nine_evaluation_binding = KubernetesPodOperator(
             "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan')"
             "['artifact_paths']['benchmark_pack_lifecycle_result'] }}"
         ),
+        "--xcom-output",
+        "/airflow/xcom/return.json",
     ],
     env_vars=d19_builder_env_vars(),
     service_account_name=D19_BUILDER_WORKLOAD_SERVICE_ACCOUNT,

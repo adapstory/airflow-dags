@@ -166,12 +166,17 @@ SERP eval DAG contracts:
   pinned provenance, missing rights, or incomplete all-nine coverage are
   `blocked`.
   Exact-nine pack construction is a bounded map/aggregate graph rather than
-  one all-corpus process: eighteen `build-pack-side` pods each load one suite,
-  build one baseline or candidate index, seal a
-  `BC21BenchmarkPackSideBuildResult/v1`, and return only its compact WORM
-  handle. One `aggregate-exact-nine` pod validates the canonical eighteen
-  handles and seals the unchanged BC-21 lifecycle input. A retry first reuses
-  an exact matching sealed side result, so completed sides are never embedded
+  one all-corpus process: eighteen controller-owned `build-pack-side` Jobs
+  each load one suite, build one baseline or candidate index, seal a
+  `BC21BenchmarkPackSideBuildResult/v1` at a deterministic URI, and each emits
+  only its compact WORM handle to stdout. Heavy builders have no XCom sidecar: Job
+  completion is the control signal and WORM remains the data plane, so a dead
+  base container cannot leave a `Running` 1/2 pod behind. They run on the
+  governed stateless remote compute class with bounded CPU, memory, native
+  threads, and ephemeral storage, outside the control-plane failure domain.
+  One `aggregate-exact-nine` pod resolves and validates the canonical eighteen
+  immutable URIs and seals the unchanged BC-21 lifecycle input. A retry first
+  reuses an exact matching sealed side result, so completed sides are never embedded
   again; baseline precedes candidate per suite to share immutable paired
   substrate, rights, and partition handles.
   CodeRAG and SWE-bench use sealed `SandboxWorkItemSet/v1` fan-out. The selected
