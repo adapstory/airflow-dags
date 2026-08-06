@@ -473,14 +473,25 @@ def d19_code_sandbox_publisher_env_vars() -> list[k8s.V1EnvVar]:
 def d19_builder_env_vars() -> list[k8s.V1EnvVar]:
     """Expose isolated-artifact indexing through BC-10 and BC-21 only."""
 
+    def cpu_limit_env_var(name: str) -> k8s.V1EnvVar:
+        return k8s.V1EnvVar(
+            name=name,
+            value_from=k8s.V1EnvVarSource(
+                resource_field_ref=k8s.V1ResourceFieldSelector(
+                    resource="limits.cpu",
+                    divisor="1",
+                )
+            ),
+        )
+
     return [
         *minio_web_identity_env_vars(_D19_BUILDER_ENV_NAMES),
         *bc10_workload_env_vars(),
         *bc21_workload_env_vars(),
-        k8s.V1EnvVar(name="MKL_NUM_THREADS", value=str(D19_PACK_BUILDER_CPU_CORES)),
-        k8s.V1EnvVar(name="NUMEXPR_NUM_THREADS", value=str(D19_PACK_BUILDER_CPU_CORES)),
-        k8s.V1EnvVar(name="OMP_NUM_THREADS", value=str(D19_PACK_BUILDER_CPU_CORES)),
-        k8s.V1EnvVar(name="OPENBLAS_NUM_THREADS", value=str(D19_PACK_BUILDER_CPU_CORES)),
+        cpu_limit_env_var("MKL_NUM_THREADS"),
+        cpu_limit_env_var("NUMEXPR_NUM_THREADS"),
+        cpu_limit_env_var("OMP_NUM_THREADS"),
+        cpu_limit_env_var("OPENBLAS_NUM_THREADS"),
         k8s.V1EnvVar(name="TOKENIZERS_PARALLELISM", value="false"),
     ]
 

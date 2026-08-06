@@ -8739,6 +8739,7 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     models.V1PodSpec = FakeKubernetesModel
     models.V1PodSecurityContext = FakeKubernetesModel
     models.V1ResourceRequirements = FakeKubernetesModel
+    models.V1ResourceFieldSelector = FakeKubernetesModel
     models.V1SeccompProfile = FakeKubernetesModel
     models.V1SecretKeySelector = FakeKubernetesModel
     models.V1SecretVolumeSource = FakeKubernetesModel
@@ -8936,9 +8937,8 @@ def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_reque
     assert "--result-output" in aggregator["arguments"]
     assert "--result-output" in registrar["arguments"]
 
-    builder_env = {
-        item.kwargs["name"]: item.kwargs.get("value") for item in module.d19_builder_env_vars()
-    }
+    builder_env_vars = module.d19_builder_env_vars()
+    builder_env = {item.kwargs["name"]: item.kwargs.get("value") for item in builder_env_vars}
     assert builder_env["ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST"] == "sha256:" + "d" * 64
     assert builder_env["ADAPSTORY_SERP_BC21_BASE_URL"] == (
         "http://context-platform:8080/api/bc-21/serp/v1"
@@ -8953,7 +8953,16 @@ def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_reque
         "OMP_NUM_THREADS",
         "OPENBLAS_NUM_THREADS",
     ):
-        assert builder_env[thread_env_name] == str(module.D19_PACK_BUILDER_CPU_CORES)
+        thread_env = next(
+            item for item in builder_env_vars if item.kwargs["name"] == thread_env_name
+        )
+        assert thread_env.kwargs.get("value") is None
+        resource_field_ref = thread_env.kwargs["value_from"].kwargs["resource_field_ref"]
+        assert resource_field_ref.kwargs == {"divisor": "1", "resource": "limits.cpu"}
+    assert all(
+        item.kwargs.get("value") is None or isinstance(item.kwargs["value"], str)
+        for item in builder_env_vars
+    )
     assert builder_env["TOKENIZERS_PARALLELISM"] == "false"
     assert "ADAPSTORY_OLLAMA_BASE_URL" not in builder_env
     assert "ADAPSTORY_SERP_MCP_GATEWAY_BASE_URL" not in builder_env
