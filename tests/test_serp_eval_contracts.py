@@ -3362,7 +3362,15 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
         "materialize_live_benchmark_catalog",
         "load_materialized_benchmark_catalog",
         "load_model_catalog_promotion",
-        "build_exact_nine_benchmark_packs",
+        *[
+            "build_pack_side_"
+            + suite_id.casefold().replace(" ", "_").replace("-", "_")
+            + "_"
+            + side
+            for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+            for side in ("baseline", "candidate")
+        ],
+        "aggregate_exact_nine_benchmark_packs",
         "register_exact_nine_evaluation_binding",
         "load_exact_nine_evaluation_binding",
         "write_paired_eval_request",
@@ -7558,7 +7566,7 @@ def test_serp_dag_files_declare_expected_airflow_contracts(
         ]
         assert _keyword_values(tree, "KubernetesPodOperator", "task_id") == [
             "materialize_live_benchmark_catalog",
-            "build_exact_nine_benchmark_packs",
+            "aggregate_exact_nine_benchmark_packs",
             "register_exact_nine_evaluation_binding",
             "materialize_official_harness_work_items",
             "assemble_paired_execution_manifest",
@@ -8860,7 +8868,7 @@ def test_d19_serializes_runs_and_caps_expensive_parallelism() -> None:
     assert integer_keywords == {"max_active_runs": 1, "max_active_tasks": 2}
 
 
-def test_d19_builds_and_registers_server_owned_exact_nine_before_request(
+def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_airflow_import_stubs(monkeypatch)
@@ -8877,14 +8885,21 @@ def test_d19_builds_and_registers_server_owned_exact_nine_before_request(
     module = importlib.import_module("dags.serp_benchmark_improvement_wave")
     module = importlib.reload(module)
 
-    builder = module.build_exact_nine_benchmark_packs.kwargs
+    builders = module.D19_PACK_SIDE_BUILD_TASKS
+    assert tuple(builders) == tuple(
+        (suite_id, side)
+        for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+        for side in ("baseline", "candidate")
+    )
+    assert len(builders) == 18
+    aggregator = module.aggregate_exact_nine_benchmark_packs.kwargs
     registrar = module.register_exact_nine_evaluation_binding.kwargs
     expected_module = [
         "python",
         "-m",
         "adapstory_serp_pipeline.registry.bc21_benchmark_pack_lifecycle_cli",
     ]
-    for task in (builder, registrar):
+    for task in (*[value.kwargs for value in builders.values()], aggregator, registrar):
         assert task["cmds"] == expected_module
         assert task["service_account_name"] == "airflow-serp-benchmark-builder"
         assert task["automount_service_account_token"] is False
@@ -8892,10 +8907,19 @@ def test_d19_builds_and_registers_server_owned_exact_nine_before_request(
         assert task["labels"]["adapstory.com/serp-network-profile"] == "benchmark-builder"
         assert task["security_context"].kwargs["run_as_non_root"] is True
         assert task["container_security_context"].kwargs["read_only_root_filesystem"] is True
-    assert builder["arguments"][0] == "build-exact-nine"
+    for (suite_id, side), builder_task in builders.items():
+        arguments = builder_task.kwargs["arguments"]
+        assert arguments[0] == "build-pack-side"
+        assert arguments[arguments.index("--suite") + 1] == suite_id
+        assert arguments[arguments.index("--side") + 1] == side
+        assert "--shared-output-prefix" in arguments
+        assert builder_task.kwargs["retries"] == 2
+    assert aggregator["arguments"][0] == "aggregate-exact-nine"
+    assert "--side-result-handles-json-urlencoded" in aggregator["arguments"]
+    assert aggregator["retries"] == 2
     assert registrar["arguments"][0] == "register-binding"
     assert "--lifecycle-input" in registrar["arguments"]
-    assert "--result-output" in builder["arguments"]
+    assert "--result-output" in aggregator["arguments"]
     assert "--result-output" in registrar["arguments"]
 
     builder_env = {
@@ -8934,9 +8958,11 @@ def test_d19_builds_and_registers_server_owned_exact_nine_before_request(
             "benchmark-aggregator"
         )
     source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(encoding="utf-8")
-    assert "load_catalog >> build_exact_nine_benchmark_packs" in source
-    assert "load_promotion >> build_exact_nine_benchmark_packs" in source
-    assert "build_exact_nine_benchmark_packs >> register_exact_nine_evaluation_binding" in source
+    assert "build-exact-nine" not in source
+    assert "side_task >> aggregate_exact_nine_benchmark_packs" in source
+    assert (
+        "aggregate_exact_nine_benchmark_packs >> register_exact_nine_evaluation_binding" in source
+    )
     assert "register_exact_nine_evaluation_binding >> load_exact_nine_evaluation_binding" in source
     assert '"--lifecycle-result"' in source
     assert '"--lifecycle-result-version-id"' in source

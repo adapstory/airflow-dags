@@ -2573,7 +2573,8 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
                 "materialize_live_benchmark_catalog",
                 "load_materialized_benchmark_catalog",
                 "load_model_catalog_promotion",
-                "build_exact_nine_benchmark_packs",
+                *_d19_pack_side_task_ids(),
+                "aggregate_exact_nine_benchmark_packs",
                 "register_exact_nine_evaluation_binding",
                 "load_exact_nine_evaluation_binding",
                 "write_paired_eval_request",
@@ -2617,6 +2618,14 @@ def _d19_harness_task_ids() -> tuple[str, ...]:
                 else:
                     task_ids.append(f"run_official_harness_{slug}_{side}_{repetition}")
     return tuple(task_ids)
+
+
+def _d19_pack_side_task_ids() -> tuple[str, ...]:
+    return tuple(
+        "build_pack_side_" + suite_id.casefold().replace(" ", "_").replace("-", "_") + "_" + side
+        for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+        for side in ("baseline", "candidate")
+    )
 
 
 def _immutable_evidence_reference(payload: Mapping[str, Any], field_name: str) -> dict[str, str]:

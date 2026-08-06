@@ -165,6 +165,15 @@ SERP eval DAG contracts:
   than a synthetic score or a scoreless placeholder. Unavailable adapters, missing
   pinned provenance, missing rights, or incomplete all-nine coverage are
   `blocked`.
+  Exact-nine pack construction is a bounded map/aggregate graph rather than
+  one all-corpus process: eighteen `build-pack-side` pods each load one suite,
+  build one baseline or candidate index, seal a
+  `BC21BenchmarkPackSideBuildResult/v1`, and return only its compact WORM
+  handle. One `aggregate-exact-nine` pod validates the canonical eighteen
+  handles and seals the unchanged BC-21 lifecycle input. A retry first reuses
+  an exact matching sealed side result, so completed sides are never embedded
+  again; baseline precedes candidate per suite to share immutable paired
+  substrate, rights, and partition handles.
   CodeRAG and SWE-bench use sealed `SandboxWorkItemSet/v1` fan-out. The selected
   digest-pinned image runs only its suite-specific staged standalone runner as
   the second init container, with no Airflow/Pipeline import, credentials,

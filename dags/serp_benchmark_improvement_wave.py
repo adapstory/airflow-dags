@@ -1146,9 +1146,107 @@ load_promotion = PythonOperator(
     dag=dag,
 )
 
-build_exact_nine_benchmark_packs = KubernetesPodOperator(
-    task_id="build_exact_nine_benchmark_packs",
-    name="serp-d19-build-exact-nine-benchmark-packs",
+D19_PACK_SIDE_IDENTITIES = tuple(
+    (suite_id, side)
+    for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+    for side in ("baseline", "candidate")
+)
+D19_PACK_SIDE_BUILD_TASKS: dict[tuple[str, str], KubernetesPodOperator] = {}
+for suite_id, side in D19_PACK_SIDE_IDENTITIES:
+    suite_slug = suite_id.casefold().replace(" ", "_").replace("-", "_")
+    artifact_slug = suite_id.casefold().replace(" ", "-").replace("_", "-")
+    task_id = f"build_pack_side_{suite_slug}_{side}"
+    D19_PACK_SIDE_BUILD_TASKS[(suite_id, side)] = KubernetesPodOperator(
+        task_id=task_id,
+        name=f"serp-d19-{task_id.replace('_', '-')}",
+        namespace=conf.get("kubernetes_executor", "namespace"),
+        image=current_airflow_runtime_image(),
+        cmds=[
+            "python",
+            "-m",
+            "adapstory_serp_pipeline.registry.bc21_benchmark_pack_lifecycle_cli",
+        ],
+        arguments=[
+            "build-pack-side",
+            "--suite",
+            suite_id,
+            "--side",
+            side,
+            "--benchmark-catalog",
+            "{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog')['artifactPath'] }}",
+            "--benchmark-catalog-version-id",
+            (
+                "{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog')"
+                "['artifactVersionId'] }}"
+            ),
+            "--benchmark-catalog-sha256",
+            (
+                "sha256:{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog')"
+                "['artifactSha256'] }}"
+            ),
+            "--promotion",
+            (
+                "{{ ti.xcom_pull(task_ids='load_model_catalog_promotion')"
+                "['promotionEvidence']['s3Uri'] }}"
+            ),
+            "--promotion-version-id",
+            (
+                "{{ ti.xcom_pull(task_ids='load_model_catalog_promotion')"
+                "['promotionEvidence']['versionId'] }}"
+            ),
+            "--promotion-sha256",
+            (
+                "{{ ti.xcom_pull(task_ids='load_model_catalog_promotion')"
+                "['promotionEvidence']['sha256'] }}"
+            ),
+            "--shared-output-prefix",
+            (
+                "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan')"
+                "['artifact_paths']['benchmark_pack_build_result'] }}.shared/" + artifact_slug
+            ),
+            "--result-output",
+            (
+                "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan')"
+                "['artifact_paths']['benchmark_pack_build_result'] }}.sides/"
+                + artifact_slug
+                + "-"
+                + side
+                + ".json"
+            ),
+        ],
+        env_vars=d19_builder_env_vars(),
+        service_account_name=D19_BUILDER_WORKLOAD_SERVICE_ACCOUNT,
+        automount_service_account_token=False,
+        volumes=D19_BUILDER_VOLUMES,
+        volume_mounts=D19_BUILDER_VOLUME_MOUNTS,
+        labels=D19_BUILDER_WORKLOAD_LABELS,
+        container_resources=D19_PACK_BUILDER_RESOURCES,
+        security_context=hardened_runtime_pod_security_context(),
+        container_security_context=hardened_runtime_container_security_context(),
+        do_xcom_push=True,
+        get_logs=True,
+        log_events_on_failure=True,
+        random_name_suffix=True,
+        reattach_on_restart=True,
+        on_kill_action="keep_pod",
+        on_finish_action="delete_pod",
+        retries=2,
+        retry_delay=timedelta(seconds=30),
+        executor_config=kubernetes_pod_launcher_executor_config(),
+        dag=dag,
+    )
+
+_D19_PACK_SIDE_TASK_IDS_JSON = json.dumps(
+    [
+        "build_pack_side_" + suite_id.casefold().replace(" ", "_").replace("-", "_") + "_" + side
+        for suite_id, side in D19_PACK_SIDE_IDENTITIES
+    ],
+    ensure_ascii=True,
+    separators=(",", ":"),
+)
+aggregate_exact_nine_benchmark_packs = KubernetesPodOperator(
+    task_id="aggregate_exact_nine_benchmark_packs",
+    name="serp-d19-aggregate-exact-nine-benchmark-packs",
     namespace=conf.get("kubernetes_executor", "namespace"),
     image=current_airflow_runtime_image(),
     cmds=[
@@ -1157,11 +1255,11 @@ build_exact_nine_benchmark_packs = KubernetesPodOperator(
         "adapstory_serp_pipeline.registry.bc21_benchmark_pack_lifecycle_cli",
     ],
     arguments=[
-        "build-exact-nine",
+        "aggregate-exact-nine",
         "--benchmark-catalog",
         "{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog')['artifactPath'] }}",
         "--benchmark-catalog-version-id",
-        ("{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog')['artifactVersionId'] }}"),
+        "{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog')['artifactVersionId'] }}",
         "--benchmark-catalog-sha256",
         (
             "sha256:{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog')"
@@ -1182,6 +1280,8 @@ build_exact_nine_benchmark_packs = KubernetesPodOperator(
             "{{ ti.xcom_pull(task_ids='load_model_catalog_promotion')"
             "['promotionEvidence']['sha256'] }}"
         ),
+        "--side-result-handles-json-urlencoded",
+        ("{{ ti.xcom_pull(task_ids=" + _D19_PACK_SIDE_TASK_IDS_JSON + ") | tojson | urlencode }}"),
         "--result-output",
         (
             "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan')"
@@ -1204,7 +1304,8 @@ build_exact_nine_benchmark_packs = KubernetesPodOperator(
     reattach_on_restart=True,
     on_kill_action="keep_pod",
     on_finish_action="delete_pod",
-    retries=0,
+    retries=2,
+    retry_delay=timedelta(seconds=30),
     executor_config=kubernetes_pod_launcher_executor_config(),
     dag=dag,
 )
@@ -1223,17 +1324,17 @@ register_exact_nine_evaluation_binding = KubernetesPodOperator(
         "register-binding",
         "--lifecycle-input",
         (
-            "{{ ti.xcom_pull(task_ids='build_exact_nine_benchmark_packs')"
+            "{{ ti.xcom_pull(task_ids='aggregate_exact_nine_benchmark_packs')"
             "['packBuildResultEvidence']['artifactPath'] }}"
         ),
         "--lifecycle-input-version-id",
         (
-            "{{ ti.xcom_pull(task_ids='build_exact_nine_benchmark_packs')"
+            "{{ ti.xcom_pull(task_ids='aggregate_exact_nine_benchmark_packs')"
             "['packBuildResultEvidence']['artifactVersionId'] }}"
         ),
         "--lifecycle-input-sha256",
         (
-            "{{ ti.xcom_pull(task_ids='build_exact_nine_benchmark_packs')"
+            "{{ ti.xcom_pull(task_ids='aggregate_exact_nine_benchmark_packs')"
             "['packBuildResultEvidence']['artifactSha256'] }}"
         ),
         "--result-output",
@@ -1897,9 +1998,14 @@ publish_official_measurement = PythonOperator(
     >> load_catalog
 )
 validate_plan >> load_promotion
-load_catalog >> build_exact_nine_benchmark_packs
-load_promotion >> build_exact_nine_benchmark_packs
-build_exact_nine_benchmark_packs >> register_exact_nine_evaluation_binding
+for suite_id, side in D19_PACK_SIDE_IDENTITIES:
+    side_task = D19_PACK_SIDE_BUILD_TASKS[(suite_id, side)]
+    load_catalog >> side_task
+    load_promotion >> side_task
+    side_task >> aggregate_exact_nine_benchmark_packs
+    if side == "candidate":
+        D19_PACK_SIDE_BUILD_TASKS[(suite_id, "baseline")] >> side_task
+aggregate_exact_nine_benchmark_packs >> register_exact_nine_evaluation_binding
 register_exact_nine_evaluation_binding >> load_exact_nine_evaluation_binding
 load_catalog >> write_request
 load_promotion >> write_request
