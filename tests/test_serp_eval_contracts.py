@@ -8548,6 +8548,7 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     # contract test. Remove that cached module for this test scope so the DAG
     # under test resolves every Kubernetes model from the stubs below.
     monkeypatch.delitem(sys.modules, "dags.serp_evidence_workload_identity", raising=False)
+    monkeypatch.delitem(sys.modules, "dags.serp_kubernetes_job_operator", raising=False)
 
     class FakeAirflowSkipException(Exception):
         pass
@@ -8676,6 +8677,11 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         "airflow.providers.cncf.kubernetes.operators.pod": types.ModuleType(
             "airflow.providers.cncf.kubernetes.operators.pod"
         ),
+        "airflow.providers.common": types.ModuleType("airflow.providers.common"),
+        "airflow.providers.common.compat": types.ModuleType("airflow.providers.common.compat"),
+        "airflow.providers.common.compat.sdk": types.ModuleType(
+            "airflow.providers.common.compat.sdk"
+        ),
         "airflow.providers.standard": types.ModuleType("airflow.providers.standard"),
         "airflow.providers.standard.operators": types.ModuleType(
             "airflow.providers.standard.operators"
@@ -8709,6 +8715,14 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     ).BranchPythonOperator = FakeBranchPythonOperator
     cast(Any, modules["airflow.sdk.exceptions"]).AirflowSkipException = FakeAirflowSkipException
     cast(Any, modules["airflow.exceptions"]).AirflowException = FakeAirflowException
+    # Context: the bounded Job operator uses the provider compatibility SDK,
+    # while this DAG contract intentionally replaces the installed Airflow tree.
+    # Decision: model the public compat import with the same fake exception.
+    # Reason: the 18-Job contract must exercise DAG construction, not fail in its stub.
+    # Revisit when: the bounded operator migrates to a different public Airflow API.
+    cast(Any, modules["airflow.providers.common.compat.sdk"]).AirflowException = (
+        FakeAirflowException
+    )
     cast(
         Any, modules["airflow.providers.standard.operators.trigger_dagrun"]
     ).TriggerDagRunOperator = FakeTriggerDagRunOperator
