@@ -166,15 +166,25 @@ D19_NATIVE_ADAPTER_RUNNER_RESOURCES = k8s.V1ResourceRequirements(
     limits={"cpu": "1000m", "memory": "3Gi"},
 )
 D19_PACK_BUILDER_CPU_CORES = 4
+D19_PACK_BUILDER_SCRATCH_PATH = "/var/lib/adapstory/serp-pack"
+D19_PACK_BUILDER_SCRATCH_VOLUME = k8s.V1Volume(
+    name="d19-pack-builder-scratch",
+    empty_dir=k8s.V1EmptyDirVolumeSource(size_limit="24Gi"),
+)
+D19_PACK_BUILDER_SCRATCH_VOLUME_MOUNT = k8s.V1VolumeMount(
+    name="d19-pack-builder-scratch",
+    mount_path=D19_PACK_BUILDER_SCRATCH_PATH,
+    read_only=False,
+)
 D19_PACK_BUILDER_RESOURCES = k8s.V1ResourceRequirements(
     requests={
         "cpu": str(D19_PACK_BUILDER_CPU_CORES),
-        "ephemeral-storage": "4Gi",
+        "ephemeral-storage": "8Gi",
         "memory": "4Gi",
     },
     limits={
         "cpu": str(D19_PACK_BUILDER_CPU_CORES),
-        "ephemeral-storage": "12Gi",
+        "ephemeral-storage": "28Gi",
         "memory": "8Gi",
     },
 )
@@ -231,12 +241,14 @@ D19_BUILDER_VOLUMES = [
     *bc10_workload_volumes(),
     *bc21_workload_volumes(),
     *hardened_runtime_volumes(),
+    D19_PACK_BUILDER_SCRATCH_VOLUME,
 ]
 D19_BUILDER_VOLUME_MOUNTS = [
     *minio_web_identity_volume_mounts(),
     *bc10_workload_volume_mounts(),
     *bc21_workload_volume_mounts(),
     *hardened_runtime_volume_mounts(),
+    D19_PACK_BUILDER_SCRATCH_VOLUME_MOUNT,
 ]
 D19_MODEL_RUNNER_VOLUMES = [
     *minio_web_identity_volumes(),
@@ -496,6 +508,10 @@ def d19_builder_env_vars() -> list[k8s.V1EnvVar]:
         cpu_limit_env_var("OMP_NUM_THREADS"),
         cpu_limit_env_var("OPENBLAS_NUM_THREADS"),
         k8s.V1EnvVar(name="TOKENIZERS_PARALLELISM", value="false"),
+        k8s.V1EnvVar(
+            name="ADAPSTORY_SERP_LOCAL_WORK_DIR",
+            value=D19_PACK_BUILDER_SCRATCH_PATH,
+        ),
     ]
 
 

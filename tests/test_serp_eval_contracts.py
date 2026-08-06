@@ -8978,6 +8978,7 @@ def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_reque
         for item in builder_env_vars
     )
     assert builder_env["TOKENIZERS_PARALLELISM"] == "false"
+    assert builder_env["ADAPSTORY_SERP_LOCAL_WORK_DIR"] == ("/var/lib/adapstory/serp-pack")
     assert "ADAPSTORY_OLLAMA_BASE_URL" not in builder_env
     assert "ADAPSTORY_SERP_MCP_GATEWAY_BASE_URL" not in builder_env
     assert not any(
@@ -8986,7 +8987,15 @@ def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_reque
     builder_volume_names = {item.kwargs["name"] for item in module.D19_BUILDER_VOLUMES}
     builder_mount_paths = {item.kwargs["mount_path"] for item in module.D19_BUILDER_VOLUME_MOUNTS}
     assert "bc10-workload-token" in builder_volume_names
+    assert "d19-pack-builder-scratch" in builder_volume_names
     assert "/var/run/secrets/adapstory/bc10-workload" in builder_mount_paths
+    assert "/var/lib/adapstory/serp-pack" in builder_mount_paths
+    scratch = next(
+        item
+        for item in module.D19_BUILDER_VOLUMES
+        if item.kwargs["name"] == "d19-pack-builder-scratch"
+    )
+    assert scratch.kwargs["empty_dir"].kwargs["size_limit"] == "24Gi"
 
     aggregator_env = {
         item.kwargs["name"]: item.kwargs.get("value") for item in module.d19_aggregator_env_vars()
@@ -9059,8 +9068,8 @@ def test_d19_pack_side_builders_are_controller_owned_remote_jobs() -> None:
         keywords["pod_discovery_timeout_seconds"].id == "DEFAULT_JOB_POD_DISCOVERY_TIMEOUT_SECONDS"
     )
     assert keywords["pod_discovery_poll_interval_seconds"].value == 1
-    assert '"ephemeral-storage": "4Gi"' in source
-    assert '"ephemeral-storage": "12Gi"' in source
+    assert '"ephemeral-storage": "8Gi"' in source
+    assert '"ephemeral-storage": "28Gi"' in source
 
 
 def test_d19_xcom_kpos_delete_pods_when_the_controller_or_base_dies() -> None:
