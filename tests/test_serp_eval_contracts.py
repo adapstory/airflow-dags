@@ -8907,6 +8907,8 @@ def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_reque
         assert task["labels"]["adapstory.com/serp-network-profile"] == "benchmark-builder"
         assert task["security_context"].kwargs["run_as_non_root"] is True
         assert task["container_security_context"].kwargs["read_only_root_filesystem"] is True
+        assert task["on_finish_action"] == "delete_pod"
+        assert task["on_kill_action"] == "delete_pod"
     for (suite_id, side), builder_task in builders.items():
         arguments = builder_task.kwargs["arguments"]
         assert arguments[0] == "build-pack-side"
@@ -8967,6 +8969,37 @@ def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_reque
     assert '"--lifecycle-result"' in source
     assert '"--lifecycle-result-version-id"' in source
     assert '"--lifecycle-result-sha256"' in source
+
+
+def test_d19_xcom_kpos_delete_pods_when_the_controller_or_base_dies() -> None:
+    source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+    xcom_calls: list[ast.Call] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        is_kpo = _matches_call(node, "KubernetesPodOperator")
+        is_mapped_kpo = (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "partial"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "KubernetesPodOperator"
+        )
+        if not (is_kpo or is_mapped_kpo):
+            continue
+        constants = {
+            keyword.arg: keyword.value.value
+            for keyword in node.keywords
+            if keyword.arg is not None and isinstance(keyword.value, ast.Constant)
+        }
+        if constants.get("do_xcom_push") is True:
+            xcom_calls.append(node)
+            assert constants.get("on_finish_action") == "delete_pod"
+            assert constants.get("on_kill_action") == "delete_pod"
+
+    assert len(xcom_calls) == 11
 
 
 def test_d19_runs_exact_ninety_server_owned_official_harness_work_items(
