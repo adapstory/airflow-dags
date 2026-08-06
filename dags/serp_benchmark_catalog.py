@@ -20,6 +20,7 @@ from adapstory_serp_pipeline.benchmark.corpus_file import CanonicalCorpusFile
 from adapstory_serp_pipeline.benchmark.ds1000_contract import (
     normalize_ds1000_base_image_provenance,
 )
+from adapstory_serp_pipeline.benchmark.pack_builder_policy import RIGHTS_POLICIES
 
 from dags.serp_ds1000_contract import (
     DS1000_DATASET_FIELD_NAMES,
@@ -38,8 +39,6 @@ from dags.serp_eval_contracts import MANDATORY_SERP_BENCHMARK_SUITES
 
 BENCHMARK_CATALOG_CONTRACT_VERSION = "serp-benchmark-catalog/v5"
 _READY = "ready"
-_RIGHTS_ATTESTED = "attested"
-_RIGHTS_UNVERIFIED = "rights-unverified"
 _HARNESS_LICENSE_ATTESTED = "ATTESTED"
 _HARNESS_LICENSE_UNDECLARED = "UNDECLARED"
 _IMAGE_REFERENCE = re.compile(
@@ -164,9 +163,9 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         harness_license_id="Apache-2.0",
         harness_license_status=_HARNESS_LICENSE_ATTESTED,
         harness_distribution_rule="public-share-allowed",
-        dataset_license_id="Apache-2.0",
-        distribution_rule="public-share-allowed",
-        rights_status=_RIGHTS_ATTESTED,
+        dataset_license_id=RIGHTS_POLICIES["APIBench"][2],
+        distribution_rule=RIGHTS_POLICIES["APIBench"][1],
+        rights_status=RIGHTS_POLICIES["APIBench"][0],
         legal_boundary="The Apache-2.0 dataset card governs the captured APIBench snapshot.",
     ),
     BenchmarkSuiteCatalogEntry(
@@ -201,9 +200,9 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         harness_license_id="Apache-2.0",
         harness_license_status=_HARNESS_LICENSE_ATTESTED,
         harness_distribution_rule="public-share-allowed",
-        dataset_license_id="Apache-2.0",
-        distribution_rule="internal-only",
-        rights_status=_RIGHTS_ATTESTED,
+        dataset_license_id=RIGHTS_POLICIES["ARES"][2],
+        distribution_rule=RIGHTS_POLICIES["ARES"][1],
+        rights_status=RIGHTS_POLICIES["ARES"][0],
         legal_boundary=(
             "ARES is a licensed synthetic-data generator; every generated run must also "
             "retain its generation manifest and model/provider policy evidence."
@@ -240,9 +239,9 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         harness_license_id="Apache-2.0",
         harness_license_status=_HARNESS_LICENSE_ATTESTED,
         harness_distribution_rule="public-share-allowed",
-        dataset_license_id="CC-BY-SA-4.0",
-        distribution_rule="internal-only",
-        rights_status=_RIGHTS_ATTESTED,
+        dataset_license_id=RIGHTS_POLICIES["BEIR"][2],
+        distribution_rule=RIGHTS_POLICIES["BEIR"][1],
+        rights_status=RIGHTS_POLICIES["BEIR"][0],
         legal_boundary=(
             "SciFact corpus, queries, and qrels are retained internally with attribution."
         ),
@@ -281,9 +280,9 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         harness_license_id="CC-BY-SA-4.0",
         harness_license_status=_HARNESS_LICENSE_ATTESTED,
         harness_distribution_rule="public-share-allowed",
-        dataset_license_id="CC-BY-SA-4.0",
-        distribution_rule="internal-only",
-        rights_status=_RIGHTS_ATTESTED,
+        dataset_license_id=RIGHTS_POLICIES["CodeRAG-Bench"][2],
+        distribution_rule=RIGHTS_POLICIES["CodeRAG-Bench"][1],
+        rights_status=RIGHTS_POLICIES["CodeRAG-Bench"][0],
         legal_boundary=(
             "The official simplified DS-1000 dataset and evaluator are retained at the "
             "pinned upstream revision; CodeRAG retrieval corpus evidence remains separately "
@@ -323,9 +322,9 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         harness_license_id="LicenseRef-RAGBench-Harness-Undeclared",
         harness_license_status=_HARNESS_LICENSE_UNDECLARED,
         harness_distribution_rule="internal-only-no-redistribution",
-        dataset_license_id="CC-BY-4.0",
-        distribution_rule="internal-only-no-redistribution",
-        rights_status=_RIGHTS_ATTESTED,
+        dataset_license_id=RIGHTS_POLICIES["RAGBench"][2],
+        distribution_rule=RIGHTS_POLICIES["RAGBench"][1],
+        rights_status=RIGHTS_POLICIES["RAGBench"][0],
         legal_boundary="RAGBench dataset card's CC-BY-4.0 terms apply to the retained snapshot.",
     ),
     BenchmarkSuiteCatalogEntry(
@@ -360,9 +359,9 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         harness_license_id="Apache-2.0",
         harness_license_status=_HARNESS_LICENSE_ATTESTED,
         harness_distribution_rule="public-share-allowed",
-        dataset_license_id="Apache-2.0",
-        distribution_rule="internal-only",
-        rights_status=_RIGHTS_ATTESTED,
+        dataset_license_id=RIGHTS_POLICIES["RepoQA"][2],
+        distribution_rule=RIGHTS_POLICIES["RepoQA"][1],
+        rights_status=RIGHTS_POLICIES["RepoQA"][0],
         legal_boundary=(
             "The RepoQA project is Apache-2.0; source repositories selected by a run must "
             "be individually recorded in that run's dataset manifest."
@@ -401,9 +400,9 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         harness_license_id="MIT",
         harness_license_status=_HARNESS_LICENSE_ATTESTED,
         harness_distribution_rule="public-share-allowed",
-        dataset_license_id="LicenseRef-SWE-Bench-Verified-Rights-Unverified",
-        distribution_rule="internal-only-no-redistribution",
-        rights_status=_RIGHTS_UNVERIFIED,
+        dataset_license_id=RIGHTS_POLICIES["SWE-bench Verified"][2],
+        distribution_rule=RIGHTS_POLICIES["SWE-bench Verified"][1],
+        rights_status=RIGHTS_POLICIES["SWE-bench Verified"][0],
         legal_boundary=(
             "Rights are unverified: the MIT harness license does not license the instances; "
             "execution is internal-only and evidence must not be redistributed."
@@ -441,9 +440,9 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         harness_license_id="Apache-2.0",
         harness_license_status=_HARNESS_LICENSE_ATTESTED,
         harness_distribution_rule="public-share-allowed",
-        dataset_license_id="Apache-2.0",
-        distribution_rule="public-share-allowed",
-        rights_status=_RIGHTS_ATTESTED,
+        dataset_license_id=RIGHTS_POLICIES["cwd-benchmark-data"][2],
+        distribution_rule=RIGHTS_POLICIES["cwd-benchmark-data"][1],
+        rights_status=RIGHTS_POLICIES["cwd-benchmark-data"][0],
         legal_boundary=(
             "The repository's Apache-2.0 license governs the captured CWD dataset snapshot."
         ),
@@ -493,9 +492,9 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         harness_license_id="Apache-2.0",
         harness_license_status=_HARNESS_LICENSE_ATTESTED,
         harness_distribution_rule="public-share-allowed",
-        dataset_license_id="LicenseRef-rusBEIR-Rights-Unverified",
-        distribution_rule="internal-only-no-redistribution",
-        rights_status=_RIGHTS_UNVERIFIED,
+        dataset_license_id=RIGHTS_POLICIES["rusBEIR"][2],
+        distribution_rule=RIGHTS_POLICIES["rusBEIR"][1],
+        rights_status=RIGHTS_POLICIES["rusBEIR"][0],
         legal_boundary=(
             "Rights are unverified: execution is internal-only, evidence is retained, and "
             "the upstream corpus snapshot must not be redistributed as licensed."
@@ -509,9 +508,7 @@ def build_live_benchmark_catalog_evidence(
     observed_at: str,
     fetch_bytes: Callable[[str], bytes],
     snapshot_bytes: Callable[[str, str, str, bytes], Mapping[str, object]] | None = None,
-    snapshot_file: Callable[
-        [str, str, str, CanonicalCorpusFile], Mapping[str, object]
-    ]
+    snapshot_file: Callable[[str, str, str, CanonicalCorpusFile], Mapping[str, object]]
     | None = None,
     corpus_output_directory: Path | None = None,
     native_adapter_materializer: Callable[
@@ -624,8 +621,7 @@ def build_live_benchmark_catalog_evidence(
                 entry.suite_id,
                 dataset_payloads,
                 immutable_dataset_snapshots,
-                corpus_output_directory
-                / sha256(entry.suite_id.encode("utf-8")).hexdigest(),
+                corpus_output_directory / sha256(entry.suite_id.encode("utf-8")).hexdigest(),
             )
             corpus_manifest, corpus_files = _validated_native_corpus_materialization(
                 corpus_materialization,
@@ -1352,10 +1348,7 @@ def _snapshot_file(
     evidence_type: str,
     url: str,
     corpus_file: CanonicalCorpusFile,
-    snapshot_file: Callable[
-        [str, str, str, CanonicalCorpusFile], Mapping[str, object]
-    ]
-    | None,
+    snapshot_file: Callable[[str, str, str, CanonicalCorpusFile], Mapping[str, object]] | None,
 ) -> dict[str, object]:
     snapshot: dict[str, object] = {
         "byte_length": corpus_file.byte_length,

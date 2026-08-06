@@ -11,6 +11,7 @@ from typing import Any, cast
 
 import pytest
 from adapstory_serp_pipeline.benchmark.corpus_file import CanonicalCorpusFile
+from adapstory_serp_pipeline.benchmark.pack_builder_policy import RIGHTS_POLICIES
 
 import dags.serp_eval_contracts as serp_eval_contracts_module
 from dags.serp_benchmark_catalog import (
@@ -37,9 +38,7 @@ def test_canonical_corpus_validation_is_line_bounded(tmp_path: Path) -> None:
     # Decision: validation must consume canonical JSONL one binary line at a time.
     # Reason: WORM identity and canonical ordering do not require a second full payload copy.
     # Revisit: only if the corpus contract moves to a natively streaming object format.
-    payload = (
-        b'{"documentId":"doc-1","text":"alpha"}\n' b'{"documentId":"doc-2","text":"beta"}\n'
-    )
+    payload = b'{"documentId":"doc-1","text":"alpha"}\n' b'{"documentId":"doc-2","text":"beta"}\n'
     path = tmp_path / "corpus.jsonl"
     path.write_bytes(payload)
     corpus_file = CanonicalCorpusFile(
@@ -244,6 +243,39 @@ def test_catalog_covers_every_mandatory_suite_with_explicit_licensing_boundary()
         for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
         if entry.harness_license_status == "UNDECLARED"
     )
+
+
+def test_catalog_and_pack_validator_share_exact_nine_rights_policy() -> None:
+    expected = {
+        "APIBench": ("attested", "public-share-allowed", "Apache-2.0"),
+        "ARES": ("attested", "internal-only", "Apache-2.0"),
+        "BEIR": ("attested", "internal-only", "CC-BY-SA-4.0"),
+        "CodeRAG-Bench": ("attested", "internal-only", "CC-BY-SA-4.0"),
+        "RAGBench": ("attested", "internal-only-no-redistribution", "CC-BY-4.0"),
+        "RepoQA": ("attested", "internal-only", "Apache-2.0"),
+        "SWE-bench Verified": (
+            "rights-unverified",
+            "internal-only-no-redistribution",
+            "LicenseRef-SWE-Bench-Verified-Rights-Unverified",
+        ),
+        "cwd-benchmark-data": ("attested", "public-share-allowed", "Apache-2.0"),
+        "rusBEIR": (
+            "rights-unverified",
+            "internal-only-no-redistribution",
+            "LicenseRef-rusBEIR-Rights-Unverified",
+        ),
+    }
+    produced = {
+        entry.suite_id: (
+            entry.rights_status,
+            entry.distribution_rule,
+            entry.dataset_license_id,
+        )
+        for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+    }
+
+    assert dict(RIGHTS_POLICIES) == expected
+    assert produced == expected
 
 
 def test_catalog_exposes_fail_closed_d6_schedule_readiness() -> None:
