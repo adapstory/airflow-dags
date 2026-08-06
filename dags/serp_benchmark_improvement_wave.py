@@ -8,7 +8,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from airflow.configuration import conf
-from airflow.providers.cncf.kubernetes.operators.job import KubernetesJobOperator
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 from airflow.providers.standard.operators.python import BranchPythonOperator, PythonOperator
 from airflow.sdk import DAG
@@ -68,6 +67,7 @@ from dags.serp_evidence_workload_identity import (
     vault_transit_volume_mounts,
     vault_transit_volumes,
 )
+from dags.serp_kubernetes_job_operator import BoundedKubernetesJobOperator
 from dags.serp_web_seed_crawl_refresh import current_airflow_runtime_image
 
 D19_DAG_ID = "serp_benchmark_improvement_wave"
@@ -1186,12 +1186,12 @@ D19_PACK_SIDE_IDENTITIES = tuple(
     for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
     for side in ("baseline", "candidate")
 )
-D19_PACK_SIDE_BUILD_TASKS: dict[tuple[str, str], KubernetesJobOperator] = {}
+D19_PACK_SIDE_BUILD_TASKS: dict[tuple[str, str], BoundedKubernetesJobOperator] = {}
 for suite_id, side in D19_PACK_SIDE_IDENTITIES:
     suite_slug = suite_id.casefold().replace(" ", "_").replace("-", "_")
     artifact_slug = suite_id.casefold().replace(" ", "-").replace("_", "-")
     task_id = f"build_pack_side_{suite_slug}_{side}"
-    D19_PACK_SIDE_BUILD_TASKS[(suite_id, side)] = KubernetesJobOperator(
+    D19_PACK_SIDE_BUILD_TASKS[(suite_id, side)] = BoundedKubernetesJobOperator(
         task_id=task_id,
         name=f"serp-d19-{task_id.replace('_', '-')}",
         namespace=conf.get("kubernetes_executor", "namespace"),
@@ -1270,6 +1270,8 @@ for suite_id, side in D19_PACK_SIDE_IDENTITIES:
         backoff_limit=0,
         ttl_seconds_after_finished=300,
         wait_until_job_complete=True,
+        pod_discovery_timeout_seconds=60,
+        pod_discovery_poll_interval_seconds=1,
         retries=2,
         retry_delay=timedelta(seconds=30),
         executor_config=kubernetes_pod_launcher_executor_config(),

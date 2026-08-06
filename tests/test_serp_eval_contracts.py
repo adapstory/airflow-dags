@@ -9013,14 +9013,12 @@ def test_d19_pack_side_builders_are_controller_owned_remote_jobs() -> None:
     source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
 
-    assert (
-        "from airflow.providers.cncf.kubernetes.operators.job import " "KubernetesJobOperator"
-    ) in source
+    assert "from dags.serp_kubernetes_job_operator import BoundedKubernetesJobOperator" in source
     builder_job = next(
         node
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
-        and _matches_call(node, "KubernetesJobOperator")
+        and _matches_call(node, "BoundedKubernetesJobOperator")
         and any(
             keyword.arg == "task_id"
             and isinstance(keyword.value, ast.Name)
@@ -9040,6 +9038,8 @@ def test_d19_pack_side_builders_are_controller_owned_remote_jobs() -> None:
     assert keywords["backoff_limit"].value == 0
     assert isinstance(keywords["do_xcom_push"], ast.Constant)
     assert keywords["do_xcom_push"].value is False
+    assert keywords["pod_discovery_timeout_seconds"].value == 60
+    assert keywords["pod_discovery_poll_interval_seconds"].value == 1
     assert '"ephemeral-storage": "4Gi"' in source
     assert '"ephemeral-storage": "12Gi"' in source
 
