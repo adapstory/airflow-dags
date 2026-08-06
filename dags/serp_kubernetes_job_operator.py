@@ -10,6 +10,8 @@ from airflow.providers.cncf.kubernetes.operators.job import KubernetesJobOperato
 from airflow.providers.common.compat.sdk import AirflowException
 from kubernetes.client import models as k8s
 
+DEFAULT_JOB_POD_DISCOVERY_TIMEOUT_SECONDS = 6 * 60 * 60
+
 
 class BoundedKubernetesJobOperator(KubernetesJobOperator):  # type: ignore[misc]
     """Wait for the Job controller to create observable pods."""
@@ -17,7 +19,7 @@ class BoundedKubernetesJobOperator(KubernetesJobOperator):  # type: ignore[misc]
     def __init__(
         self,
         *,
-        pod_discovery_timeout_seconds: float = 60,
+        pod_discovery_timeout_seconds: float = DEFAULT_JOB_POD_DISCOVERY_TIMEOUT_SECONDS,
         pod_discovery_poll_interval_seconds: float = 1,
         **kwargs: Any,
     ) -> None:

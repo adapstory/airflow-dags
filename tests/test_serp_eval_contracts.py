@@ -1504,7 +1504,7 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
         role_entries: list[dict[str, Any]] = []
         for role in roles:
             payload = role_payloads[(suite_id, role)]
-            key = f"serp-evals/{operation_id}/roles/" f"{role_file_names[(suite_id, role)]}"
+            key = f"serp-evals/{operation_id}/roles/{role_file_names[(suite_id, role)]}"
             version_id = f"version-{suite_id.casefold().replace(' ', '-')}-{role}"
             objects[(key, version_id)] = payload
             role_entries.append(
@@ -1528,7 +1528,7 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
         ),
         "platform": "linux/amd64",
         "promotionReference": (
-            "harbor.adapstory.com/benchmark-sandboxes/" "ds1000-base:python-3.10-slim-bookworm-v1"
+            "harbor.adapstory.com/benchmark-sandboxes/ds1000-base:python-3.10-slim-bookworm-v1"
         ),
         "schema": "Ds1000BaseImageProvenance/v2",
         "sourceImageReference": (
@@ -1551,7 +1551,7 @@ def test_execution_substrate_source_set_loads_only_exact_worm_role_versions() ->
             "objectLockMode": "COMPLIANCE",
             "retainUntil": "2027-07-15T00:00:00Z",
             "s3Uri": (
-                f"{source_root}/sboms/swe/" f"{sha256(instance_id.encode()).hexdigest()}.cdx.json"
+                f"{source_root}/sboms/swe/{sha256(instance_id.encode()).hexdigest()}.cdx.json"
             ),
             "sha256": "sha256:" + "e" * 64,
             "versionId": f"sbom-swe-{instance_id}-v1",
@@ -8720,9 +8720,9 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     # Decision: model the public compat import with the same fake exception.
     # Reason: the 18-Job contract must exercise DAG construction, not fail in its stub.
     # Revisit when: the bounded operator migrates to a different public Airflow API.
-    cast(Any, modules["airflow.providers.common.compat.sdk"]).AirflowException = (
-        FakeAirflowException
-    )
+    cast(
+        Any, modules["airflow.providers.common.compat.sdk"]
+    ).AirflowException = FakeAirflowException
     cast(
         Any, modules["airflow.providers.standard.operators.trigger_dagrun"]
     ).TriggerDagRunOperator = FakeTriggerDagRunOperator
@@ -9027,7 +9027,9 @@ def test_d19_pack_side_builders_are_controller_owned_remote_jobs() -> None:
     source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
 
-    assert "from dags.serp_kubernetes_job_operator import BoundedKubernetesJobOperator" in source
+    assert "from dags.serp_kubernetes_job_operator import (" in source
+    assert "BoundedKubernetesJobOperator," in source
+    assert "DEFAULT_JOB_POD_DISCOVERY_TIMEOUT_SECONDS," in source
     builder_job = next(
         node
         for node in ast.walk(tree)
@@ -9052,7 +9054,10 @@ def test_d19_pack_side_builders_are_controller_owned_remote_jobs() -> None:
     assert keywords["backoff_limit"].value == 0
     assert isinstance(keywords["do_xcom_push"], ast.Constant)
     assert keywords["do_xcom_push"].value is False
-    assert keywords["pod_discovery_timeout_seconds"].value == 60
+    assert isinstance(keywords["pod_discovery_timeout_seconds"], ast.Name)
+    assert (
+        keywords["pod_discovery_timeout_seconds"].id == "DEFAULT_JOB_POD_DISCOVERY_TIMEOUT_SECONDS"
+    )
     assert keywords["pod_discovery_poll_interval_seconds"].value == 1
     assert '"ephemeral-storage": "4Gi"' in source
     assert '"ephemeral-storage": "12Gi"' in source
@@ -11192,7 +11197,7 @@ def _execution_substrate_materializer(
             {
                 "baseImage": {
                     "imageReference": (
-                        "harbor.adapstory.com/benchmark-sandboxes/" "ds1000-base@sha256:" + "2" * 64
+                        "harbor.adapstory.com/benchmark-sandboxes/ds1000-base@sha256:" + "2" * 64
                     ),
                     "platform": "linux/amd64",
                     "promotionReference": (
@@ -11201,10 +11206,10 @@ def _execution_substrate_materializer(
                     ),
                     "schema": "Ds1000BaseImageProvenance/v2",
                     "sourceImageReference": (
-                        "harbor.adapstory.com/dockerhub-cache/" "library/python@sha256:" + "2" * 64
+                        "harbor.adapstory.com/dockerhub-cache/library/python@sha256:" + "2" * 64
                     ),
                     "sourceReference": (
-                        "harbor.adapstory.com/dockerhub-cache/library/python:" "3.10-slim-bookworm"
+                        "harbor.adapstory.com/dockerhub-cache/library/python:3.10-slim-bookworm"
                     ),
                 },
                 "datasetProvenance": {

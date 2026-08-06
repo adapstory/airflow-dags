@@ -47,9 +47,9 @@ def _install_airflow_job_operator_stub(monkeypatch: pytest.MonkeyPatch) -> type[
         "airflow.providers.common.compat": ModuleType("airflow.providers.common.compat"),
         "airflow.providers.common.compat.sdk": ModuleType("airflow.providers.common.compat.sdk"),
     }
-    modules["airflow.providers.cncf.kubernetes.operators.job"].KubernetesJobOperator = (
-        KubernetesJobOperator
-    )
+    modules[
+        "airflow.providers.cncf.kubernetes.operators.job"
+    ].KubernetesJobOperator = KubernetesJobOperator
     modules["airflow.providers.common.compat.sdk"].AirflowException = AirflowException
     for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)
@@ -100,6 +100,42 @@ def test_job_operator_waits_between_polls_until_delayed_pod_exists(
     assert sleeps == [2, 2]
     assert len(client.calls) == 3
     assert operator.logged_pods == [pod]
+
+
+def test_job_operator_observes_quota_delayed_pod_after_old_sixty_second_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Context: live quota admission delayed Job-controller pod creation for
+    # roughly 74 seconds while the owning Job remained valid and later completed.
+    # Decision: preserve a finite discovery deadline, but prove the governed
+    # D19 bound observes reconciliation beyond the former 60-second cutoff.
+    # Reason: retrying a successfully completing Job creates cleanup races and
+    # consumes the exact-nine retry budget without changing the workload.
+    # Revisit when: Kubernetes exposes an event-driven Job pod watch contract.
+    _install_airflow_job_operator_stub(monkeypatch)
+    sys.modules.pop("dags.serp_kubernetes_job_operator", None)
+    module = importlib.import_module("dags.serp_kubernetes_job_operator")
+    clock = SimpleNamespace(now=100.0)
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock.now += seconds
+
+    monkeypatch.setattr(module, "monotonic", lambda: clock.now)
+    monkeypatch.setattr(module, "sleep", sleep)
+    pod = SimpleNamespace(metadata=SimpleNamespace(name="quota-delayed-pod"))
+    client = _DelayedPodClient([*([[]] * 75), [pod]])
+    operator = module.BoundedKubernetesJobOperator(task_id="quota-delayed-pod")
+    operator.client = client
+
+    result = operator.get_pods(
+        SimpleNamespace(metadata=SimpleNamespace(namespace="airflow")),
+        {"run_id": "delayed-pod"},
+    )
+
+    assert result == [pod]
+    assert sum(sleeps) > 60
 
 
 def test_job_operator_pod_discovery_has_a_bounded_deadline(

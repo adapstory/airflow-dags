@@ -67,7 +67,10 @@ from dags.serp_evidence_workload_identity import (
     vault_transit_volume_mounts,
     vault_transit_volumes,
 )
-from dags.serp_kubernetes_job_operator import BoundedKubernetesJobOperator
+from dags.serp_kubernetes_job_operator import (
+    DEFAULT_JOB_POD_DISCOVERY_TIMEOUT_SECONDS,
+    BoundedKubernetesJobOperator,
+)
 from dags.serp_web_seed_crawl_refresh import current_airflow_runtime_image
 
 D19_DAG_ID = "serp_benchmark_improvement_wave"
@@ -1270,7 +1273,7 @@ for suite_id, side in D19_PACK_SIDE_IDENTITIES:
         backoff_limit=0,
         ttl_seconds_after_finished=300,
         wait_until_job_complete=True,
-        pod_discovery_timeout_seconds=60,
+        pod_discovery_timeout_seconds=DEFAULT_JOB_POD_DISCOVERY_TIMEOUT_SECONDS,
         pod_discovery_poll_interval_seconds=1,
         retries=2,
         retry_delay=timedelta(seconds=30),
