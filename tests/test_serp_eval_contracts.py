@@ -3374,6 +3374,12 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
             for side in ("baseline", "candidate")
             for task_id in (
                 (
+                    "branch_code_sandbox_"
+                    f"{suite_id.casefold().replace(' ', '_').replace('-', '_')}_"
+                    f"{side}_{repetition}",
+                    "reuse_code_sandbox_"
+                    f"{suite_id.casefold().replace(' ', '_').replace('-', '_')}_"
+                    f"{side}_{repetition}",
                     "prepare_code_sandbox_"
                     f"{suite_id.casefold().replace(' ', '_').replace('-', '_')}_"
                     f"{side}_{repetition}",
@@ -3387,6 +3393,8 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
                     f"{suite_id.casefold().replace(' ', '_').replace('-', '_')}_"
                     f"{side}_{repetition}",
                     f"seal_code_sandbox_{suite_id.casefold().replace(' ', '_').replace('-', '_')}_"
+                    f"{side}_{repetition}",
+                    f"join_code_sandbox_{suite_id.casefold().replace(' ', '_').replace('-', '_')}_"
                     f"{side}_{repetition}",
                 )
                 if suite_id in {"CodeRAG-Bench", "SWE-bench Verified"}
@@ -3412,6 +3420,18 @@ def test_build_benchmark_improvement_wave_plan_rejects_caller_supplied_candidate
 
     with pytest.raises(ValueError, match="inline D19 field is forbidden"):
         build_benchmark_improvement_wave_plan(conf)
+
+
+def test_build_benchmark_improvement_wave_plan_binds_exact_resume_manifest() -> None:
+    conf = _improvement_wave_conf()
+    resume_evidence = _d19_worm_evidence("resume/d19-work-items", "e")
+    conf["resume_manifest_evidence"] = resume_evidence
+
+    resumed = build_benchmark_improvement_wave_plan(conf)
+    fresh = build_benchmark_improvement_wave_plan(_improvement_wave_conf())
+
+    assert resumed.payload["resume_manifest_evidence"] == resume_evidence
+    assert resumed.payload["operation_id"] != fresh.payload["operation_id"]
 
 
 def test_d19_persists_observed_normalized_score_cells_and_identity_bound_verification(
@@ -8998,12 +9018,33 @@ def test_d19_routes_code_suites_through_credential_isolated_sandbox_chains(
 
     assert module.D19_CODE_SANDBOX_SUITES == frozenset({"CodeRAG-Bench", "SWE-bench Verified"})
     assert len(module.D19_STANDARD_HARNESS_RUN_TASKS) == 70
+    assert len(module.D19_CODE_SANDBOX_BRANCH_TASKS) == 20
+    assert len(module.D19_CODE_SANDBOX_REUSE_TASKS) == 20
     assert len(module.D19_CODE_SANDBOX_PREPARE_TASKS) == 20
     assert len(module.D19_CODE_SANDBOX_FANOUT_TASKS) == 20
     assert len(module.D19_CODE_SANDBOX_TASKS) == 20
     assert len(module.D19_CODE_SANDBOX_RESULT_SET_PLAN_TASKS) == 20
     assert len(module.D19_CODE_SANDBOX_SEAL_TASKS) == 20
+    assert len(module.D19_CODE_SANDBOX_JOIN_TASKS) == 20
     assert len(module.D19_OFFICIAL_HARNESS_RUN_TASKS) == 90
+    assert (
+        module.select_code_sandbox_execution_path(
+            {"workItems": [{"disposition": "reuse"}]},
+            work_item_index=0,
+            execute_task_id="execute",
+            reuse_task_id="reuse",
+        )
+        == "reuse"
+    )
+    assert (
+        module.select_code_sandbox_execution_path(
+            {"workItems": [{"disposition": "execute"}]},
+            work_item_index=0,
+            execute_task_id="execute",
+            reuse_task_id="reuse",
+        )
+        == "execute"
+    )
     for identity, sandbox_task in module.D19_CODE_SANDBOX_TASKS.items():
         suite_id, _side, _repetition = identity
         assert suite_id in module.D19_CODE_SANDBOX_SUITES
@@ -9097,12 +9138,21 @@ def test_d19_routes_code_suites_through_credential_isolated_sandbox_chains(
             module.D19_CODE_SANDBOX_SEAL_TASKS[identity].kwargs["service_account_name"]
             == "airflow-serp-benchmark-aggregator"
         )
+        branch = module.D19_CODE_SANDBOX_BRANCH_TASKS[identity]
+        assert branch.kwargs["python_callable"] is module.select_code_sandbox_execution_path
+        reuse = module.D19_CODE_SANDBOX_REUSE_TASKS[identity].kwargs
+        assert reuse["arguments"][0] == "run-suite"
+        assert reuse["service_account_name"] == "airflow-serp-benchmark-aggregator"
+        join = module.D19_CODE_SANDBOX_JOIN_TASKS[identity]
+        assert join.kwargs["python_callable"] is module.select_code_sandbox_result
+        assert join.kwargs["trigger_rule"] == "none_failed_min_one_success"
 
     source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(encoding="utf-8")
     assert "KubernetesPodOperator.partial(" in source
     assert ").expand_kwargs(fanout_task.output)" in source
+    assert "branch_task >> reuse_task >> join_task" in source
     assert "prepare_task >> fanout_task >> sandbox_task >> result_set_plan_task" in source
-    assert "result_set_plan_task >> seal_task >> write_assembly_plan" in source
+    assert "result_set_plan_task >> seal_task >> join_task >> write_assembly_plan" in source
 
 
 def test_d19_maps_ds1000_from_one_sealed_suite_specific_sandbox_work_item(

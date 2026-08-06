@@ -2489,6 +2489,11 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
     registry_resource_type = _required_resource_type(payload, "registry_resource_type")
     registry_resource_id = _required_uuid(payload, "registry_resource_id")
     promotion_evidence = _worm_evidence_reference(payload, "evaluation_release_promotion_evidence")
+    resume_manifest_evidence = (
+        _worm_evidence_reference(payload, "resume_manifest_evidence")
+        if "resume_manifest_evidence" in payload
+        else None
+    )
     artifact_root_path = _required_artifact_root_path(payload)
     if not artifact_root_path.startswith("s3://"):
         raise ValueError("benchmark improvement wave requires an s3:// artifact_root_path")
@@ -2497,10 +2502,17 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
         artifact_root_path,
         "evaluation_release_promotion_evidence",
     )
+    if resume_manifest_evidence is not None:
+        _require_worm_evidence_within_artifact_root(
+            resume_manifest_evidence,
+            artifact_root_path,
+            "resume_manifest_evidence",
+        )
     operation_id = _operation_id(
         "serp-airflow-benchmark-improvement-wave",
         tenant_id,
         promotion_evidence["sha256"],
+        resume_manifest_evidence["sha256"] if resume_manifest_evidence else "no-resume",
         generated_at,
     )
     plan_payload = {
@@ -2577,6 +2589,8 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
         ),
         "tenant_id": str(tenant_id),
     }
+    if resume_manifest_evidence is not None:
+        plan_payload["resume_manifest_evidence"] = resume_manifest_evidence
     return SerpDagPlan(plan_payload)
 
 
@@ -2590,11 +2604,14 @@ def _d19_harness_task_ids() -> tuple[str, ...]:
                     task_ids.extend(
                         f"{phase}_code_sandbox_{slug}_{side}_{repetition}"
                         for phase in (
+                            "branch",
+                            "reuse",
                             "prepare",
                             "fanout",
                             "execute",
                             "result_set_plan",
                             "seal",
+                            "join",
                         )
                     )
                 else:

@@ -9,8 +9,9 @@ from typing import Any
 
 from airflow.configuration import conf
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
-from airflow.providers.standard.operators.python import PythonOperator
+from airflow.providers.standard.operators.python import BranchPythonOperator, PythonOperator
 from airflow.sdk import DAG
+from airflow.task.trigger_rule import TriggerRule
 from kubernetes.client import models as k8s
 
 from dags.serp_benchmark_catalog_workload import (
@@ -1326,6 +1327,21 @@ materialize_official_harness_work_items = KubernetesPodOperator(
             "{{ ti.xcom_pull(task_ids='register_exact_nine_evaluation_binding')"
             "['lifecycleResultEvidence']['artifactSha256'] }}"
         ),
+        "--resume-manifest",
+        (
+            "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan')"
+            ".get('resume_manifest_evidence', {}).get('s3Uri', '') }}"
+        ),
+        "--resume-manifest-version-id",
+        (
+            "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan')"
+            ".get('resume_manifest_evidence', {}).get('versionId', '') }}"
+        ),
+        "--resume-manifest-sha256",
+        (
+            "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan')"
+            ".get('resume_manifest_evidence', {}).get('sha256', '') }}"
+        ),
     ],
     env_vars=d19_aggregator_env_vars(),
     service_account_name=D19_AGGREGATOR_WORKLOAD_SERVICE_ACCOUNT,
@@ -1361,17 +1377,51 @@ def _code_sandbox_task_id(phase: str, suite_id: str, side: str, repetition: int)
 
 def _final_harness_task_id(suite_id: str, side: str, repetition: int) -> str:
     if suite_id in D19_CODE_SANDBOX_SUITES:
-        return _code_sandbox_task_id("seal", suite_id, side, repetition)
+        return _code_sandbox_task_id("join", suite_id, side, repetition)
     return _official_harness_task_id(suite_id, side, repetition)
+
+
+def select_code_sandbox_execution_path(
+    work_item_plan: Mapping[str, Any],
+    *,
+    work_item_index: int,
+    execute_task_id: str,
+    reuse_task_id: str,
+) -> str:
+    work_items = work_item_plan.get("workItems")
+    if not isinstance(work_items, list) or work_item_index >= len(work_items):
+        raise ValueError("D19 code resume selector requires the canonical work-item plan")
+    item = work_items[work_item_index]
+    if not isinstance(item, Mapping):
+        raise ValueError("D19 code resume selector work item must be an object")
+    disposition = item.get("disposition")
+    if disposition == "execute":
+        return execute_task_id
+    if disposition == "reuse":
+        return reuse_task_id
+    raise ValueError("D19 code work item disposition is unsupported")
+
+
+def select_code_sandbox_result(
+    reuse_result: Mapping[str, Any] | None,
+    executed_result: Mapping[str, Any] | None,
+) -> Mapping[str, Any]:
+    available = [result for result in (reuse_result, executed_result) if result is not None]
+    if len(available) != 1 or not isinstance(available[0], Mapping):
+        raise ValueError("D19 code work item must produce exactly one execute or reuse result")
+    return available[0]
 
 
 D19_STANDARD_HARNESS_RUN_TASKS: dict[tuple[str, str, int], KubernetesPodOperator] = {}
 D19_CODE_SANDBOX_PREPARE_TASKS: dict[tuple[str, str, int], KubernetesPodOperator] = {}
+D19_CODE_SANDBOX_BRANCH_TASKS: dict[tuple[str, str, int], BranchPythonOperator] = {}
+D19_CODE_SANDBOX_REUSE_TASKS: dict[tuple[str, str, int], KubernetesPodOperator] = {}
 D19_CODE_SANDBOX_FANOUT_TASKS: dict[tuple[str, str, int], PythonOperator] = {}
 D19_CODE_SANDBOX_TASKS: dict[tuple[str, str, int], Any] = {}
 D19_CODE_SANDBOX_RESULT_SET_PLAN_TASKS: dict[tuple[str, str, int], PythonOperator] = {}
 D19_CODE_SANDBOX_SEAL_TASKS: dict[tuple[str, str, int], KubernetesPodOperator] = {}
-D19_OFFICIAL_HARNESS_RUN_TASKS: dict[tuple[str, str, int], KubernetesPodOperator] = {}
+D19_CODE_SANDBOX_JOIN_TASKS: dict[tuple[str, str, int], PythonOperator] = {}
+D19_OFFICIAL_HARNESS_RUN_TASKS: dict[tuple[str, str, int], Any] = {}
 for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARNESS_WORK_ITEMS):
     identity = (suite_id, side, repetition)
     work_item_root = (
@@ -1379,6 +1429,8 @@ for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARN
         f"['workItems'][{work_item_index}]['workItemEvidence']"
     )
     if suite_id in D19_CODE_SANDBOX_SUITES:
+        branch_task_id = _code_sandbox_task_id("branch", suite_id, side, repetition)
+        reuse_task_id = _code_sandbox_task_id("reuse", suite_id, side, repetition)
         prepare_task_id = _code_sandbox_task_id("prepare", suite_id, side, repetition)
         fanout_task_id = _code_sandbox_task_id("fanout", suite_id, side, repetition)
         sandbox_task_id = _code_sandbox_task_id("execute", suite_id, side, repetition)
@@ -1386,6 +1438,58 @@ for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARN
             "result_set_plan", suite_id, side, repetition
         )
         seal_task_id = _code_sandbox_task_id("seal", suite_id, side, repetition)
+        join_task_id = _code_sandbox_task_id("join", suite_id, side, repetition)
+        branch_task = BranchPythonOperator(
+            task_id=branch_task_id,
+            python_callable=select_code_sandbox_execution_path,
+            op_args=["{{ ti.xcom_pull(task_ids='materialize_official_harness_work_items') }}"],
+            op_kwargs={
+                "execute_task_id": prepare_task_id,
+                "reuse_task_id": reuse_task_id,
+                "work_item_index": work_item_index,
+            },
+            executor_config=D19_AGGREGATOR_EXECUTOR_CONFIG,
+            dag=dag,
+        )
+        reuse_task = KubernetesPodOperator(
+            task_id=reuse_task_id,
+            name=f"serp-d19-reuse-code-receipt-{work_item_index + 1:02d}",
+            namespace=conf.get("kubernetes_executor", "namespace"),
+            image=current_airflow_runtime_image(),
+            cmds=[
+                "python",
+                "-m",
+                "adapstory_serp_pipeline.orchestration.official_harness_execution",
+            ],
+            arguments=[
+                "run-suite",
+                "--work-item",
+                work_item_root + "['artifactPath'] }}",
+                "--work-item-version-id",
+                work_item_root + "['artifactVersionId'] }}",
+                "--work-item-sha256",
+                work_item_root + "['artifactSha256'] }}",
+            ],
+            env_vars=d19_aggregator_env_vars(),
+            service_account_name=D19_AGGREGATOR_WORKLOAD_SERVICE_ACCOUNT,
+            automount_service_account_token=False,
+            volumes=D19_AGGREGATOR_VOLUMES,
+            volume_mounts=D19_AGGREGATOR_VOLUME_MOUNTS,
+            labels=D19_AGGREGATOR_WORKLOAD_LABELS,
+            container_resources=D19_NATIVE_ADAPTER_RUNNER_RESOURCES,
+            security_context=hardened_runtime_pod_security_context(),
+            container_security_context=hardened_runtime_container_security_context(),
+            do_xcom_push=True,
+            get_logs=True,
+            log_events_on_failure=True,
+            random_name_suffix=True,
+            reattach_on_restart=True,
+            on_kill_action="keep_pod",
+            on_finish_action="delete_pod",
+            retries=0,
+            executor_config=kubernetes_pod_launcher_executor_config(),
+            dag=dag,
+        )
         prepare_task = KubernetesPodOperator(
             task_id=prepare_task_id,
             name=f"serp-d19-prepare-code-sandbox-{work_item_index + 1:02d}",
@@ -1534,12 +1638,23 @@ for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARN
             executor_config=kubernetes_pod_launcher_executor_config(),
             dag=dag,
         )
+        join_task = PythonOperator(
+            task_id=join_task_id,
+            python_callable=select_code_sandbox_result,
+            op_args=[reuse_task.output, seal_task.output],
+            trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
+            executor_config=D19_AGGREGATOR_EXECUTOR_CONFIG,
+            dag=dag,
+        )
+        D19_CODE_SANDBOX_BRANCH_TASKS[identity] = branch_task
+        D19_CODE_SANDBOX_REUSE_TASKS[identity] = reuse_task
         D19_CODE_SANDBOX_PREPARE_TASKS[identity] = prepare_task
         D19_CODE_SANDBOX_FANOUT_TASKS[identity] = fanout_task
         D19_CODE_SANDBOX_TASKS[identity] = sandbox_task
         D19_CODE_SANDBOX_RESULT_SET_PLAN_TASKS[identity] = result_set_plan_task
         D19_CODE_SANDBOX_SEAL_TASKS[identity] = seal_task
-        D19_OFFICIAL_HARNESS_RUN_TASKS[identity] = seal_task
+        D19_CODE_SANDBOX_JOIN_TASKS[identity] = join_task
+        D19_OFFICIAL_HARNESS_RUN_TASKS[identity] = join_task
         continue
     runner = KubernetesPodOperator(
         task_id=_official_harness_task_id(suite_id, side, repetition),
@@ -1793,13 +1908,18 @@ write_request >> materialize_official_harness_work_items
 for standard_runner in D19_STANDARD_HARNESS_RUN_TASKS.values():
     materialize_official_harness_work_items >> standard_runner >> write_assembly_plan
 for identity, prepare_task in D19_CODE_SANDBOX_PREPARE_TASKS.items():
+    branch_task = D19_CODE_SANDBOX_BRANCH_TASKS[identity]
+    reuse_task = D19_CODE_SANDBOX_REUSE_TASKS[identity]
     fanout_task = D19_CODE_SANDBOX_FANOUT_TASKS[identity]
     sandbox_task = D19_CODE_SANDBOX_TASKS[identity]
     result_set_plan_task = D19_CODE_SANDBOX_RESULT_SET_PLAN_TASKS[identity]
     seal_task = D19_CODE_SANDBOX_SEAL_TASKS[identity]
-    materialize_official_harness_work_items >> prepare_task
+    join_task = D19_CODE_SANDBOX_JOIN_TASKS[identity]
+    materialize_official_harness_work_items >> branch_task
+    branch_task >> reuse_task >> join_task
+    branch_task >> prepare_task
     prepare_task >> fanout_task >> sandbox_task >> result_set_plan_task
-    result_set_plan_task >> seal_task >> write_assembly_plan
+    result_set_plan_task >> seal_task >> join_task >> write_assembly_plan
 write_assembly_plan >> assemble_paired_execution_manifest
 (
     assemble_paired_execution_manifest
