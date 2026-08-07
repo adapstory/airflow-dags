@@ -7565,13 +7565,15 @@ def test_serp_dag_files_declare_expected_airflow_contracts(
             "publish_official_serp_mcp_measurement",
         ]
         assert _keyword_values(tree, "KubernetesPodOperator", "task_id") == [
-            "materialize_live_benchmark_catalog",
             "aggregate_exact_nine_benchmark_packs",
             "register_exact_nine_evaluation_binding",
             "materialize_official_harness_work_items",
             "assemble_paired_execution_manifest",
             "run_paired_benchmark_evaluation",
         ]
+        assert "materialize_live_benchmark_catalog" in _keyword_values(
+            tree, "BoundedKubernetesJobOperator", "task_id"
+        )
     elif dag_id == "serp_nightly_regression_suite":
         assert _keyword_values(tree, "PythonOperator", "task_id") == [
             task_id for task_id in task_ids if task_id != "trigger_benchmark_improvement_wave"
@@ -7605,7 +7607,7 @@ def test_serp_dag_files_declare_expected_airflow_contracts(
             "wait_for_benchmark_substrate_source_set",
             "validate_mandatory_benchmark_dataset_evidence_plan",
         ]
-        assert _keyword_values(tree, "KubernetesPodOperator", "task_id") == [
+        assert _keyword_values(tree, "BoundedKubernetesJobOperator", "task_id") == [
             "materialize_mandatory_benchmark_dataset_evidence"
         ]
         assert "BENCHMARK_CATALOG_ACQUISITION_RESOURCES" in source
@@ -9079,13 +9081,13 @@ def test_d19_pack_side_builders_are_controller_owned_remote_jobs() -> None:
         "serp_mandatory_benchmark_dataset_evidence_snapshot.py",
     ),
 )
-def test_benchmark_catalog_acquisition_runs_off_the_control_plane(dag_file: str) -> None:
+def test_benchmark_catalog_acquisition_is_a_bounded_remote_job(dag_file: str) -> None:
     # Context: catalog acquisition reached about 2.5 GiB RSS while the
     # control-plane node had less than 4 GiB available.  K3s restarted during
     # both attempts, so Airflow lost terminal pod observation to API 503 and
     # transient RBAC-bootstrap 403 responses.
-    # Decision: every catalog acquisition KPO runs in the governed remote
-    # compute class, using the same explicit selector and toleration contract.
+    # Decision: every catalog acquisition is a controller-owned Job in the
+    # governed remote compute class, with bounded pod discovery and disk budget.
     # Reason: a data-acquisition peak must not remove the control plane that
     # observes, retries, and records the immutable result.
     # Revisit when: the control plane has an isolated worker pool or catalog
@@ -9096,7 +9098,7 @@ def test_benchmark_catalog_acquisition_runs_off_the_control_plane(dag_file: str)
         node
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
-        and _matches_call(node, "KubernetesPodOperator")
+        and _matches_call(node, "BoundedKubernetesJobOperator")
         and any(
             keyword.arg == "task_id"
             and isinstance(keyword.value, ast.Constant)
@@ -9114,6 +9116,21 @@ def test_benchmark_catalog_acquisition_runs_off_the_control_plane(dag_file: str)
     assert keywords["node_selector"].id == "BENCHMARK_CATALOG_ACQUISITION_NODE_SELECTOR"
     assert isinstance(keywords["tolerations"], ast.Name)
     assert keywords["tolerations"].id == "BENCHMARK_CATALOG_ACQUISITION_TOLERATIONS"
+    assert keywords["wait_until_job_complete"].value is True
+    assert keywords["backoff_limit"].value == 0
+    assert keywords["ttl_seconds_after_finished"].value == 300
+    assert keywords["on_finish_action"].value == "keep_pod"
+    assert isinstance(keywords["pod_discovery_timeout_seconds"], ast.Name)
+    assert (
+        keywords["pod_discovery_timeout_seconds"].id == "DEFAULT_JOB_POD_DISCOVERY_TIMEOUT_SECONDS"
+    )
+    assert keywords["pod_discovery_poll_interval_seconds"].value == 1
+
+    workload_source = (REPO_ROOT / "dags" / "serp_benchmark_catalog_workload.py").read_text(
+        encoding="utf-8"
+    )
+    assert '"ephemeral-storage": "2Gi"' in workload_source
+    assert '"ephemeral-storage": "8Gi"' in workload_source
 
 
 def test_d19_xcom_kpos_delete_pods_when_the_controller_or_base_dies() -> None:

@@ -32,8 +32,8 @@ BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_LABELS = {
 BENCHMARK_CATALOG_ACQUISITION_RESOURCES = k8s.V1ResourceRequirements(
     # The canonical SWE JSONL is file-backed through validation and WORM upload;
     # retained memory is bounded by the archive fetch window and one output line.
-    requests={"cpu": "500m", "memory": "1Gi"},
-    limits={"cpu": "1000m", "memory": "3Gi"},
+    requests={"cpu": "500m", "ephemeral-storage": "2Gi", "memory": "1Gi"},
+    limits={"cpu": "1000m", "ephemeral-storage": "8Gi", "memory": "3Gi"},
 )
 BENCHMARK_CATALOG_ACQUISITION_NODE_SELECTOR = {"adapstory.com/compute-class": "remote"}
 BENCHMARK_CATALOG_ACQUISITION_TOLERATIONS = [

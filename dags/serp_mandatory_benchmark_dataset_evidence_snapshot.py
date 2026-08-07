@@ -7,7 +7,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from airflow.configuration import conf
-from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
 from airflow.sdk.exceptions import AirflowSkipException
@@ -35,6 +34,10 @@ from dags.serp_eval_contracts import (
 from dags.serp_evidence_workload_identity import (
     kubernetes_pod_launcher_executor_config,
     minio_web_identity_executor_config,
+)
+from dags.serp_kubernetes_job_operator import (
+    DEFAULT_JOB_POD_DISCOVERY_TIMEOUT_SECONDS,
+    BoundedKubernetesJobOperator,
 )
 from dags.serp_web_seed_crawl_refresh import current_airflow_runtime_image
 
@@ -115,7 +118,7 @@ validate_plan = PythonOperator(
     dag=dag,
 )
 
-materialize_evidence = KubernetesPodOperator(
+materialize_evidence = BoundedKubernetesJobOperator(
     task_id="materialize_mandatory_benchmark_dataset_evidence",
     name="serp-mandatory-benchmark-dataset-acquisition",
     namespace=conf.get("kubernetes_executor", "namespace"),
@@ -144,7 +147,12 @@ materialize_evidence = KubernetesPodOperator(
     random_name_suffix=True,
     reattach_on_restart=True,
     on_kill_action="keep_pod",
-    on_finish_action="delete_pod",
+    on_finish_action="keep_pod",
+    backoff_limit=0,
+    ttl_seconds_after_finished=300,
+    wait_until_job_complete=True,
+    pod_discovery_timeout_seconds=DEFAULT_JOB_POD_DISCOVERY_TIMEOUT_SECONDS,
+    pod_discovery_poll_interval_seconds=1,
     retries=1,
     retry_delay=timedelta(seconds=BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS),
     executor_config=kubernetes_pod_launcher_executor_config(),

@@ -1152,7 +1152,7 @@ validate_plan = PythonOperator(
     dag=dag,
 )
 
-materialize_catalog = KubernetesPodOperator(
+materialize_catalog = BoundedKubernetesJobOperator(
     task_id="materialize_live_benchmark_catalog",
     name="serp-d19-benchmark-catalog-acquisition",
     namespace=conf.get("kubernetes_executor", "namespace"),
@@ -1181,7 +1181,12 @@ materialize_catalog = KubernetesPodOperator(
     random_name_suffix=True,
     reattach_on_restart=True,
     on_kill_action="delete_pod",
-    on_finish_action="delete_pod",
+    on_finish_action="keep_pod",
+    backoff_limit=0,
+    ttl_seconds_after_finished=300,
+    wait_until_job_complete=True,
+    pod_discovery_timeout_seconds=DEFAULT_JOB_POD_DISCOVERY_TIMEOUT_SECONDS,
+    pod_discovery_poll_interval_seconds=1,
     retries=1,
     retry_delay=timedelta(seconds=BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS),
     executor_config=kubernetes_pod_launcher_executor_config(),
