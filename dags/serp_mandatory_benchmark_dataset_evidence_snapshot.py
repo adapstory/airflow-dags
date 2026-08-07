@@ -13,8 +13,10 @@ from airflow.sdk import DAG
 from airflow.sdk.exceptions import AirflowSkipException
 
 from dags.serp_benchmark_catalog_workload import (
+    BENCHMARK_CATALOG_ACQUISITION_NODE_SELECTOR,
     BENCHMARK_CATALOG_ACQUISITION_RESOURCES,
     BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS,
+    BENCHMARK_CATALOG_ACQUISITION_TOLERATIONS,
     BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_LABELS,
     BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_SERVICE_ACCOUNT,
     benchmark_catalog_acquisition_container_security_context,
@@ -133,6 +135,8 @@ materialize_evidence = KubernetesPodOperator(
     volume_mounts=benchmark_catalog_acquisition_web_identity_volume_mounts(),
     labels=BENCHMARK_CATALOG_ACQUISITION_WORKLOAD_LABELS,
     container_resources=BENCHMARK_CATALOG_ACQUISITION_RESOURCES,
+    node_selector=BENCHMARK_CATALOG_ACQUISITION_NODE_SELECTOR,
+    tolerations=BENCHMARK_CATALOG_ACQUISITION_TOLERATIONS,
     security_context=benchmark_catalog_acquisition_pod_security_context(),
     container_security_context=benchmark_catalog_acquisition_container_security_context(),
     get_logs=True,

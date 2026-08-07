@@ -9072,6 +9072,50 @@ def test_d19_pack_side_builders_are_controller_owned_remote_jobs() -> None:
     assert '"ephemeral-storage": "28Gi"' in source
 
 
+@pytest.mark.parametrize(
+    "dag_file",
+    (
+        "serp_benchmark_improvement_wave.py",
+        "serp_mandatory_benchmark_dataset_evidence_snapshot.py",
+    ),
+)
+def test_benchmark_catalog_acquisition_runs_off_the_control_plane(dag_file: str) -> None:
+    # Context: catalog acquisition reached about 2.5 GiB RSS while the
+    # control-plane node had less than 4 GiB available.  K3s restarted during
+    # both attempts, so Airflow lost terminal pod observation to API 503 and
+    # transient RBAC-bootstrap 403 responses.
+    # Decision: every catalog acquisition KPO runs in the governed remote
+    # compute class, using the same explicit selector and toleration contract.
+    # Reason: a data-acquisition peak must not remove the control plane that
+    # observes, retries, and records the immutable result.
+    # Revisit when: the control plane has an isolated worker pool or catalog
+    # acquisition has a lower peak-RSS proof that preserves adequate headroom.
+    source = (REPO_ROOT / "dags" / dag_file).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    acquisition = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and _matches_call(node, "KubernetesPodOperator")
+        and any(
+            keyword.arg == "task_id"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value
+            in {
+                "materialize_live_benchmark_catalog",
+                "materialize_mandatory_benchmark_dataset_evidence",
+            }
+            for keyword in node.keywords
+        )
+    )
+    keywords = {keyword.arg: keyword.value for keyword in acquisition.keywords}
+
+    assert isinstance(keywords["node_selector"], ast.Name)
+    assert keywords["node_selector"].id == "BENCHMARK_CATALOG_ACQUISITION_NODE_SELECTOR"
+    assert isinstance(keywords["tolerations"], ast.Name)
+    assert keywords["tolerations"].id == "BENCHMARK_CATALOG_ACQUISITION_TOLERATIONS"
+
+
 def test_d19_xcom_kpos_delete_pods_when_the_controller_or_base_dies() -> None:
     source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(encoding="utf-8")
     tree = ast.parse(source)

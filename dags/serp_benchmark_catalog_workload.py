@@ -35,6 +35,15 @@ BENCHMARK_CATALOG_ACQUISITION_RESOURCES = k8s.V1ResourceRequirements(
     requests={"cpu": "500m", "memory": "1Gi"},
     limits={"cpu": "1000m", "memory": "3Gi"},
 )
+BENCHMARK_CATALOG_ACQUISITION_NODE_SELECTOR = {"adapstory.com/compute-class": "remote"}
+BENCHMARK_CATALOG_ACQUISITION_TOLERATIONS = [
+    k8s.V1Toleration(
+        effect="NoSchedule",
+        key="adapstory.com/compute-class",
+        operator="Equal",
+        value="remote",
+    )
+]
 BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS = 90
 _BENCHMARK_CATALOG_ACQUISITION_LITERAL_ENV_NAMES = (
     "ADAPSTORY_AIRFLOW_ARTIFACT_S3_PATH_STYLE",
