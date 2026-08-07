@@ -7690,7 +7690,7 @@ def test_no_airflow_dag_keeps_the_retired_pending_governance_marker() -> None:
             assert marker not in source, dag_path.name
 
 
-def test_every_kubernetes_pod_operator_uses_the_dedicated_controller_executor_identity() -> None:
+def test_every_kubernetes_workload_operator_uses_the_dedicated_controller_executor_identity() -> None:
     for dag_file in (
         "serp_benchmark_improvement_wave.py",
         "serp_beir_scifact_live_benchmark.py",
@@ -7698,16 +7698,16 @@ def test_every_kubernetes_pod_operator_uses_the_dedicated_controller_executor_id
         "serp_web_seed_crawl_refresh.py",
     ):
         tree = ast.parse((REPO_ROOT / "dags" / dag_file).read_text(encoding="utf-8"))
-        pod_operator_calls = [
+        workload_operator_calls = [
             node
             for node in ast.walk(tree)
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
-            and node.func.id == "KubernetesPodOperator"
+            and node.func.id in {"BoundedKubernetesJobOperator", "KubernetesPodOperator"}
         ]
 
-        assert pod_operator_calls, dag_file
-        for call in pod_operator_calls:
+        assert workload_operator_calls, dag_file
+        for call in workload_operator_calls:
             executor_config = next(
                 (keyword.value for keyword in call.keywords if keyword.arg == "executor_config"),
                 None,
@@ -9067,6 +9067,27 @@ def test_d19_pack_side_builders_are_controller_owned_remote_jobs() -> None:
     assert keywords["backoff_limit"].value == 0
     assert isinstance(keywords["do_xcom_push"], ast.Constant)
     assert keywords["do_xcom_push"].value is False
+    resource_call = next(
+        node.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "D19_PACK_BUILDER_RESOURCES"
+            for target in node.targets
+        )
+        and isinstance(node.value, ast.Call)
+    )
+    resource_keywords = {keyword.arg: keyword.value for keyword in resource_call.keywords}
+    assert ast.literal_eval(resource_keywords["requests"]) == {
+        "cpu": "1000m",
+        "ephemeral-storage": "8Gi",
+        "memory": "2Gi",
+    }
+    assert ast.literal_eval(resource_keywords["limits"]) == {
+        "cpu": "4",
+        "ephemeral-storage": "28Gi",
+        "memory": "8Gi",
+    }
     assert isinstance(keywords["pod_discovery_timeout_seconds"], ast.Name)
     assert (
         keywords["pod_discovery_timeout_seconds"].id == "DEFAULT_JOB_POD_DISCOVERY_TIMEOUT_SECONDS"

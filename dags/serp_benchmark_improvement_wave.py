@@ -167,7 +167,6 @@ D19_NATIVE_ADAPTER_RUNNER_RESOURCES = k8s.V1ResourceRequirements(
     requests={"cpu": "500m", "memory": "1Gi"},
     limits={"cpu": "1000m", "memory": "3Gi"},
 )
-D19_PACK_BUILDER_CPU_CORES = 4
 D19_PACK_BUILDER_SCRATCH_PATH = "/var/lib/adapstory/serp-pack"
 D19_PACK_BUILDER_SCRATCH_VOLUME = k8s.V1Volume(
     name="d19-pack-builder-scratch",
@@ -180,12 +179,12 @@ D19_PACK_BUILDER_SCRATCH_VOLUME_MOUNT = k8s.V1VolumeMount(
 )
 D19_PACK_BUILDER_RESOURCES = k8s.V1ResourceRequirements(
     requests={
-        "cpu": str(D19_PACK_BUILDER_CPU_CORES),
+        "cpu": "1000m",
         "ephemeral-storage": "8Gi",
-        "memory": "4Gi",
+        "memory": "2Gi",
     },
     limits={
-        "cpu": str(D19_PACK_BUILDER_CPU_CORES),
+        "cpu": "4",
         "ephemeral-storage": "28Gi",
         "memory": "8Gi",
     },
