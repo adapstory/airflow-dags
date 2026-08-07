@@ -8896,6 +8896,34 @@ def test_d19_serializes_runs_and_caps_expensive_parallelism() -> None:
 
     assert integer_keywords == {"max_active_runs": 1, "max_active_tasks": 2}
 
+    pool_assignment = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "D19_PACK_BUILDER_POOL"
+            for target in node.targets
+        )
+    )
+    assert ast.literal_eval(pool_assignment.value) == "serp_d19_pack_builders"
+
+    builder_job = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and _matches_call(node, "BoundedKubernetesJobOperator")
+        and any(
+            keyword.arg == "task_id"
+            and isinstance(keyword.value, ast.Name)
+            and keyword.value.id == "task_id"
+            for keyword in node.keywords
+        )
+    )
+    builder_keywords = {keyword.arg: keyword.value for keyword in builder_job.keywords}
+    assert isinstance(builder_keywords["pool"], ast.Name)
+    assert builder_keywords["pool"].id == "D19_PACK_BUILDER_POOL"
+    assert ast.literal_eval(builder_keywords["pool_slots"]) == 1
+
 
 def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_request(
     monkeypatch: pytest.MonkeyPatch,
@@ -9079,9 +9107,9 @@ def test_d19_pack_side_builders_are_controller_owned_remote_jobs() -> None:
     )
     resource_keywords = {keyword.arg: keyword.value for keyword in resource_call.keywords}
     assert ast.literal_eval(resource_keywords["requests"]) == {
-        "cpu": "1000m",
+        "cpu": "4",
         "ephemeral-storage": "8Gi",
-        "memory": "2Gi",
+        "memory": "4Gi",
     }
     assert ast.literal_eval(resource_keywords["limits"]) == {
         "cpu": "4",

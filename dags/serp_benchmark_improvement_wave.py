@@ -177,11 +177,12 @@ D19_PACK_BUILDER_SCRATCH_VOLUME_MOUNT = k8s.V1VolumeMount(
     mount_path=D19_PACK_BUILDER_SCRATCH_PATH,
     read_only=False,
 )
+D19_PACK_BUILDER_POOL = "serp_d19_pack_builders"
 D19_PACK_BUILDER_RESOURCES = k8s.V1ResourceRequirements(
     requests={
-        "cpu": "1000m",
+        "cpu": "4",
         "ephemeral-storage": "8Gi",
-        "memory": "2Gi",
+        "memory": "4Gi",
     },
     limits={
         "cpu": "4",
@@ -1283,6 +1284,8 @@ for suite_id, side in D19_PACK_SIDE_IDENTITIES:
         volume_mounts=D19_BUILDER_VOLUME_MOUNTS,
         labels=D19_BUILDER_WORKLOAD_LABELS,
         container_resources=D19_PACK_BUILDER_RESOURCES,
+        pool=D19_PACK_BUILDER_POOL,
+        pool_slots=1,
         node_selector=D19_REMOTE_COMPUTE_NODE_SELECTOR,
         tolerations=D19_REMOTE_COMPUTE_TOLERATIONS,
         security_context=hardened_runtime_pod_security_context(),
