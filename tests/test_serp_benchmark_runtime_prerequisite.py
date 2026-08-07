@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.unit
+
 
 def _verified_source_set() -> dict[str, object]:
     operation_id = "ci-benchmark-substrates-79"

@@ -18,6 +18,8 @@ from dags.serp_public_docs_context_benchmark_contracts import (
     submit_context_benchmark_bc21_runs,
 )
 
+pytestmark = pytest.mark.unit
+
 
 def _benchmark_root(tmp_path: Path) -> Path:
     benchmark_root = tmp_path / "context-benchmark"

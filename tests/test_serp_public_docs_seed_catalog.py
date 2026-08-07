@@ -2,12 +2,16 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
+import pytest
+
 from dags.serp_public_docs_seed_catalog import (
     GOVERNED_PUBLIC_DOCS_SOURCES,
     PUBLIC_DOCS_SOURCE_REGISTRY_VERSION,
     QUARANTINED_PUBLIC_DOCS_CANDIDATES,
     governed_public_docs_sources,
 )
+
+pytestmark = pytest.mark.unit
 
 
 def test_governed_registry_expands_sources_and_connector_coverage() -> None:

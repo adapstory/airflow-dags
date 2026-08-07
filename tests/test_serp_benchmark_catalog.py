@@ -32,6 +32,8 @@ from dags.serp_eval_contracts import (
     write_immutable_evidence_snapshot,
 )
 
+pytestmark = pytest.mark.unit
+
 
 def test_canonical_corpus_validation_is_line_bounded(tmp_path: Path) -> None:
     # Context: SWE exact-commit corpora exceed 3 GiB and a whole-payload decode was OOMKilled.

@@ -11,6 +11,8 @@ import pytest
 
 import dags.serp_public_docs_seed_refresh_remote_runner as remote_runner
 
+pytestmark = pytest.mark.unit
+
 
 def test_remote_runner_materializes_exact_refresh_plan_version_before_delegating(
     monkeypatch: pytest.MonkeyPatch,

@@ -15,6 +15,8 @@ import pytest
 
 from dags.serp_kubernetes_executor import task_secret_env_var
 
+pytestmark = pytest.mark.unit
+
 
 class _MissingObjectError(Exception):
     response: ClassVar[dict[str, dict[str, str]]] = {"Error": {"Code": "NoSuchKey"}}

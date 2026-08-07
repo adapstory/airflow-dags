@@ -3,7 +3,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+import pytest
+
 from dags.public_docs_crawler import CrawlResponse, crawl_public_docs
+
+pytestmark = pytest.mark.unit
 
 
 @dataclass

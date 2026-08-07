@@ -18,6 +18,8 @@ import pytest
 
 import dags.serp_qdrant_embedding_migration_remote_runner as remote_runner
 
+pytestmark = pytest.mark.unit
+
 
 def test_validate_qdrant_embedding_migration_conf_rejects_versioned_source_collection(
     monkeypatch: pytest.MonkeyPatch,

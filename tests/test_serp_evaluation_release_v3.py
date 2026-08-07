@@ -31,6 +31,8 @@ from dags.serp_eval_contracts import (
     write_paired_eval_request_artifact,
 )
 
+pytestmark = pytest.mark.unit
+
 TENANT_ID = "00000000-0000-4000-a000-000000000001"
 RESOURCE_ID = "018f5e13-2d73-7a77-a052-8d1bcbf96541"
 BINDING_ID = "018f5e13-2d73-7a77-a052-8d1bcbf96701"

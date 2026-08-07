@@ -30,6 +30,14 @@ build-backend = "hatchling.build"
 packages = ["dags"]
 
 [tool.pytest.ini_options]
+markers = [
+    "unit: isolated unit tests",
+    "contract: static or behavioral contract tests",
+    "integration: tests that cross process, database, or service boundaries",
+    "architecture: dependency and architecture rule tests",
+    "acceptance: product acceptance tests",
+    "e2e: end-to-end system tests",
+]
 testpaths = ["tests"]
 
 [tool.ruff]

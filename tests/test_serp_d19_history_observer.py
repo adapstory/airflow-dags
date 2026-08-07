@@ -20,6 +20,8 @@ from dags.serp_d19_history_observer import (
     seal_d19_history_observation_attestation,
 )
 
+pytestmark = pytest.mark.unit
+
 PARENT_LOGICAL_DATE = "2026-07-17T00:00:00Z"
 AIRFLOW_ORIGIN = "https://airflow-api-server.airflow.svc.cluster.local:8080"
 

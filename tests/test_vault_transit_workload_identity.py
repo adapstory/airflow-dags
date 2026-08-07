@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from dags.serp_evidence_workload_identity import (
     EVALUATION_ADMISSION_VERIFIER_SERVICE_ACCOUNT,
     EVALUATION_ADMISSION_VERIFIER_VAULT_AUTH_ROLE,
@@ -11,6 +13,8 @@ from dags.serp_evidence_workload_identity import (
     evaluation_admission_verifier_executor_config,
     vault_transit_minio_executor_config,
 )
+
+pytestmark = pytest.mark.unit
 
 
 def test_vault_executor_projects_exact_audience_and_separate_public_ca() -> None:

@@ -5,6 +5,8 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from dags.serp_scifact_benchmark_contracts import (
     SCIFACT_ARCHIVE_URL,
     activate_scifact_benchmark_pack,
@@ -14,6 +16,8 @@ from dags.serp_scifact_benchmark_contracts import (
     seal_scifact_activation_evidence,
     submit_scifact_pipeline_state,
 )
+
+pytestmark = pytest.mark.contract
 
 
 def test_scifact_plan_binds_a_dedicated_benchmark_pack_to_versioned_evidence() -> None:

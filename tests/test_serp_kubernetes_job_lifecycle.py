@@ -8,6 +8,8 @@ from types import ModuleType, SimpleNamespace
 import pytest
 from kubernetes.client.rest import ApiException
 
+pytestmark = pytest.mark.unit
+
 
 def _install_airflow_job_operator_stub(monkeypatch: pytest.MonkeyPatch) -> type[Exception]:
     class AirflowException(Exception):

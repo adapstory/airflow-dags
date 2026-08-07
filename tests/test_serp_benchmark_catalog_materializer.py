@@ -5,6 +5,10 @@ from collections.abc import Mapping
 from types import ModuleType
 from typing import Any
 
+import pytest
+
+pytestmark = pytest.mark.unit
+
 
 def _test_literal(value: str) -> str:
     return value

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import pytest
+
 from dags.serp_kubernetes_executor import task_secret_executor_config
+
+pytestmark = pytest.mark.unit
 
 
 def test_task_secret_executor_config_projects_only_the_requested_secret() -> None:

@@ -18,6 +18,8 @@ from dags.serp_eval_contracts import (
     write_public_docs_seed_refresh_plan_from_snapshot,
 )
 
+pytestmark = pytest.mark.unit
+
 
 class _VersionedComplianceS3:
     def __init__(self) -> None:

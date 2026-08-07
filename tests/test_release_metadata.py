@@ -4,6 +4,10 @@ import tomllib
 from importlib.metadata import version
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.unit
+
 _AIRFLOW_PACKAGE = "adapstory-airflow-dags"
 _PIPELINE_PACKAGE = "adapstory-serp-pipeline"
 _RELEASE_VERSION = "2026.07.5"

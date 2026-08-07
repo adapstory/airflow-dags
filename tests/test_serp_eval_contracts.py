@@ -87,6 +87,8 @@ from dags.serp_public_docs_seed_catalog import (
     governed_public_docs_sources,
 )
 
+pytestmark = pytest.mark.contract
+
 TENANT_ID = "00000000-0000-4000-a000-000000000001"
 PACK_ID = "00000000-0000-4000-a000-000000000201"
 PACK_VERSION_ID = "018f5e13-2d73-7a77-a052-8d1bcbf96541"
