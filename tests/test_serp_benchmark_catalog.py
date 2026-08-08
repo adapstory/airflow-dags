@@ -40,7 +40,7 @@ def test_canonical_corpus_validation_is_line_bounded(tmp_path: Path) -> None:
     # Decision: validation must consume canonical JSONL one binary line at a time.
     # Reason: WORM identity and canonical ordering do not require a second full payload copy.
     # Revisit: only if the corpus contract moves to a natively streaming object format.
-    payload = b'{"documentId":"doc-1","text":"alpha"}\n' b'{"documentId":"doc-2","text":"beta"}\n'
+    payload = b'{"documentId":"doc-1","text":"alpha"}\n{"documentId":"doc-2","text":"beta"}\n'
     path = tmp_path / "corpus.jsonl"
     path.write_bytes(payload)
     corpus_file = CanonicalCorpusFile(
@@ -425,6 +425,11 @@ def test_live_catalog_allows_rights_unverified_internal_runs(tmp_path: Path) -> 
     }
     assert all(
         snapshot["immutable_artifact"]["objectLockMode"] == "COMPLIANCE"
+        for item in suites
+        for snapshot in item["corpus_snapshots"].values()
+    )
+    assert all(
+        snapshot["document_count"] > 0 and snapshot["byte_length"] > 0
         for item in suites
         for snapshot in item["corpus_snapshots"].values()
     )
@@ -905,7 +910,7 @@ def _execution_substrate_materializer(
             {
                 "baseImage": {
                     "imageReference": (
-                        "harbor.adapstory.com/benchmark-sandboxes/" "ds1000-base@sha256:" + "2" * 64
+                        "harbor.adapstory.com/benchmark-sandboxes/ds1000-base@sha256:" + "2" * 64
                     ),
                     "platform": "linux/amd64",
                     "promotionReference": (
@@ -914,10 +919,10 @@ def _execution_substrate_materializer(
                     ),
                     "schema": "Ds1000BaseImageProvenance/v2",
                     "sourceImageReference": (
-                        "harbor.adapstory.com/dockerhub-cache/" "library/python@sha256:" + "2" * 64
+                        "harbor.adapstory.com/dockerhub-cache/library/python@sha256:" + "2" * 64
                     ),
                     "sourceReference": (
-                        "harbor.adapstory.com/dockerhub-cache/library/python:" "3.10-slim-bookworm"
+                        "harbor.adapstory.com/dockerhub-cache/library/python:3.10-slim-bookworm"
                     ),
                 },
                 "datasetProvenance": {

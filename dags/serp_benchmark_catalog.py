@@ -251,7 +251,7 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
         dataset_id="xlangai/DS-1000",
         dataset_revision=DS1000_REVISION,
         dataset_source_url=(
-            "https://raw.githubusercontent.com/xlang-ai/DS-1000/" f"{DS1000_REVISION}/README.md"
+            f"https://raw.githubusercontent.com/xlang-ai/DS-1000/{DS1000_REVISION}/README.md"
         ),
         dataset_artifact_source_id="dataset",
         dataset_artifact_url=(
@@ -266,16 +266,16 @@ MANDATORY_BENCHMARK_SUITE_CATALOG = (
             ),
         ),
         license_evidence_url=(
-            "https://raw.githubusercontent.com/xlang-ai/DS-1000/" f"{DS1000_REVISION}/LICENSE"
+            f"https://raw.githubusercontent.com/xlang-ai/DS-1000/{DS1000_REVISION}/LICENSE"
         ),
         harness_repository_url="https://github.com/xlang-ai/DS-1000",
         harness_revision=DS1000_REVISION,
         harness_entrypoint="test_ds1000.py",
         harness_source_archive_url=(
-            "https://api.github.com/repos/xlang-ai/DS-1000/tarball/" f"{DS1000_REVISION}"
+            f"https://api.github.com/repos/xlang-ai/DS-1000/tarball/{DS1000_REVISION}"
         ),
         harness_license_url=(
-            "https://raw.githubusercontent.com/xlang-ai/DS-1000/" f"{DS1000_REVISION}/LICENSE"
+            f"https://raw.githubusercontent.com/xlang-ai/DS-1000/{DS1000_REVISION}/LICENSE"
         ),
         harness_license_id="CC-BY-SA-4.0",
         harness_license_status=_HARNESS_LICENSE_ATTESTED,
@@ -1285,7 +1285,9 @@ def _corpus_snapshot(
         snapshot_file,
     )
     return {
+        "byte_length": corpus_file.byte_length,
         "corpus_role": corpus_role,
+        "document_count": corpus_file.document_count,
         "immutable_artifact": snapshot["immutable_artifact"],
         "sha256": snapshot["sha256"],
         "url": url,

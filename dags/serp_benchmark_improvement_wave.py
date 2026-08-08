@@ -6,10 +6,14 @@ import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 
 from airflow.configuration import conf
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
+from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.providers.standard.operators.python import BranchPythonOperator, PythonOperator
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sdk import DAG
 from airflow.task.trigger_rule import TriggerRule
 from kubernetes.client import models as k8s
@@ -28,6 +32,7 @@ from dags.serp_benchmark_catalog_workload import (
     benchmark_catalog_acquisition_web_identity_volumes,
 )
 from dags.serp_d19_history_observer import admit_d19_run
+from dags.serp_d19_release_handoff import build_terminal_outbox
 from dags.serp_ds1000_contract import DS1000_EXECUTOR_COMMAND
 from dags.serp_eval_contracts import (
     MANDATORY_SERP_BENCHMARK_SUITES,
@@ -76,6 +81,10 @@ from dags.serp_kubernetes_job_operator import (
 from dags.serp_web_seed_crawl_refresh import current_airflow_runtime_image
 
 D19_DAG_ID = "serp_benchmark_improvement_wave"
+D19_TERMINAL_OUTBOX_TASK_ID = "write_d19_release_terminal_outbox"
+D19_RELEASE_TRANSITION_TASK_ID = "choose_d19_release_transition"
+D19_TRIGGER_NEXT_RUN_TASK_ID = "trigger_next_d19_release_run"
+D19_RELEASE_COMPLETE_TASK_ID = "d19_release_terminal_complete"
 D19_OFFICIAL_HARNESS_WORK_ITEMS = tuple(
     (suite_id, side, repetition)
     for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
@@ -1006,6 +1015,162 @@ def _require_operation_evidence(
 ) -> None:
     if not evidence["artifactPath"].startswith(operation_root + "/"):
         raise ValueError(f"{field_name} must stay inside the D19 evidence operation")
+
+
+def _d19_canary_qualification(
+    catalog: Mapping[str, Any],
+    pack_lifecycle: Mapping[str, Any],
+    work_item_plan: Mapping[str, Any],
+) -> dict[str, int]:
+    suites = catalog.get("suiteSummary")
+    bindings = pack_lifecycle.get("packMaterialBindings")
+    if not isinstance(suites, list) or len(suites) != 9:
+        raise ValueError("D19 canary must qualify all nine suites")
+    if not isinstance(bindings, list) or len(bindings) != 9:
+        raise ValueError("D19 canary pack lifecycle must bind all nine suites")
+    pack_count = sum(
+        int(isinstance(binding, Mapping) and isinstance(binding.get("baseline"), Mapping))
+        + int(isinstance(binding, Mapping) and isinstance(binding.get("candidate"), Mapping))
+        for binding in bindings
+    )
+    if pack_count != 18 or work_item_plan.get("runCount") != 90:
+        raise ValueError("D19 canary qualification is incomplete")
+    return {"suiteCount": 9, "packCount": 18, "workItemCount": 90}
+
+
+def write_d19_release_terminal_outbox(
+    *,
+    dag_run_conf: Mapping[str, Any],
+    current_run_id: str,
+    verification_result: Mapping[str, Any],
+    catalog: Mapping[str, Any],
+    pack_lifecycle: Mapping[str, Any],
+    work_item_plan: Mapping[str, Any],
+) -> dict[str, Any]:
+    ownership = dag_run_conf.get("d19_release_ownership")
+    if ownership is None:
+        return {
+            "managed": False,
+            "terminal": True,
+            "nextRun": None,
+            "nextRunConf": None,
+        }
+    if not isinstance(ownership, Mapping):
+        raise ValueError("D19 release ownership must be an object")
+    runs = ownership.get("runs")
+    if not isinstance(runs, list):
+        raise ValueError("D19 release ownership runs are required")
+    current = next(
+        (run for run in runs if isinstance(run, Mapping) and run.get("runId") == current_run_id),
+        None,
+    )
+    if not isinstance(current, Mapping):
+        raise ValueError("current D19 run is outside release ownership")
+    qualification = (
+        _d19_canary_qualification(catalog, pack_lifecycle, work_item_plan)
+        if current.get("role") == "canary"
+        else None
+    )
+    artifact_root_path = dag_run_conf.get("artifact_root_path")
+    if not isinstance(artifact_root_path, str):
+        raise ValueError("D19 release artifact root is required")
+
+    def write_outbox(path: str, payload: dict[str, Any]) -> dict[str, str]:
+        written = write_immutable_evidence_snapshot(
+            path,
+            artifact_type="d19_terminal_outbox",
+            operation_id=f"d19-release-{ownership['correlationId']}",
+            payload=payload,
+        )
+        digest = written["artifactSha256"]
+        return {
+            "artifactPath": written["artifactPath"],
+            "artifactVersionId": written["artifactVersionId"],
+            "artifactSha256": digest if digest.startswith("sha256:") else "sha256:" + digest,
+            "objectLockMode": written["objectLockMode"],
+            "retainUntil": written["retainUntil"],
+        }
+
+    result = build_terminal_outbox(
+        ownership=ownership,
+        current_run_id=current_run_id,
+        verification_pointer=verification_result,
+        canary_qualification=qualification,
+        observed_at=datetime.now(UTC),
+        artifact_root_path=artifact_root_path,
+        writer=write_outbox,
+    )
+    result["managed"] = True
+    result["handoffUri"] = artifact_root_path.rstrip("/") + "/d19-release-handoff.json"
+    next_run = result["nextRun"]
+    result["nextRunConf"] = None
+    if isinstance(next_run, Mapping):
+        result["nextRunConf"] = {
+            **dict(dag_run_conf),
+            "generated_at": next_run["logicalDate"],
+        }
+    return result
+
+
+def choose_d19_release_transition(outbox: Mapping[str, Any]) -> str:
+    return (
+        D19_RELEASE_COMPLETE_TASK_ID
+        if outbox.get("terminal") is True
+        else D19_TRIGGER_NEXT_RUN_TASK_ID
+    )
+
+
+def wake_d19_terminal_finalizer(context: Mapping[str, Any]) -> None:
+    """Use the callback only as a wake-up signal after the WORM outbox exists."""
+
+    task_instance = context.get("task_instance")
+    if task_instance is None:
+        raise RuntimeError("D19 finalizer callback task instance is unavailable")
+    outbox = task_instance.xcom_pull(task_ids=D19_TERMINAL_OUTBOX_TASK_ID)
+    if (
+        not isinstance(outbox, Mapping)
+        or outbox.get("managed") is False
+        or outbox.get("terminal") is not True
+    ):
+        return
+    callback_url = os.environ.get("ADAPSTORY_SERP_D19_FINALIZER_CALLBACK_URL", "")
+    callback_token = os.environ.get("ADAPSTORY_SERP_D19_FINALIZER_CALLBACK_TOKEN", "")
+    parsed_callback_url = urlsplit(callback_url)
+    if (
+        parsed_callback_url.scheme != "https"
+        or not parsed_callback_url.netloc
+        or parsed_callback_url.fragment
+        or not callback_token
+    ):
+        raise RuntimeError("D19 finalizer callback authority is unavailable")
+    event = outbox.get("event")
+    if not isinstance(event, Mapping):
+        raise RuntimeError("D19 terminal callback event is unavailable")
+    body = json.dumps(
+        {
+            "correlationId": event["correlationId"],
+            "handoffUri": outbox["handoffUri"],
+            "outboxEvidenceJson": json.dumps(
+                outbox["outboxEvidence"], separators=(",", ":"), sort_keys=True
+            ),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    with urlopen(
+        Request(
+            callback_url,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {callback_token}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        ),
+        timeout=10,
+    ) as response:
+        if response.status not in {200, 201, 202}:
+            raise RuntimeError("D19 finalizer callback was not accepted")
 
 
 def write_paired_evaluation_assembly_plan(
@@ -2073,6 +2238,55 @@ publish_official_measurement = PythonOperator(
     dag=dag,
 )
 
+write_release_terminal_outbox = PythonOperator(
+    task_id=D19_TERMINAL_OUTBOX_TASK_ID,
+    python_callable=write_d19_release_terminal_outbox,
+    op_kwargs={
+        "dag_run_conf": "{{ dag_run.conf }}",
+        "current_run_id": "{{ run_id }}",
+        "verification_result": (
+            "{{ ti.xcom_pull(task_ids='persist_paired_evaluation_verification_evidence') }}"
+        ),
+        "catalog": "{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog') }}",
+        "pack_lifecycle": ("{{ ti.xcom_pull(task_ids='register_exact_nine_evaluation_binding') }}"),
+        "work_item_plan": ("{{ ti.xcom_pull(task_ids='write_paired_evaluation_assembly_plan') }}"),
+    },
+    on_success_callback=wake_d19_terminal_finalizer,
+    retries=2,
+    retry_delay=timedelta(seconds=30),
+    executor_config=D19_AGGREGATOR_EXECUTOR_CONFIG,
+    dag=dag,
+)
+
+choose_release_transition = BranchPythonOperator(
+    task_id=D19_RELEASE_TRANSITION_TASK_ID,
+    python_callable=choose_d19_release_transition,
+    op_args=["{{ ti.xcom_pull(task_ids='write_d19_release_terminal_outbox') }}"],
+    executor_config=D19_AGGREGATOR_EXECUTOR_CONFIG,
+    dag=dag,
+)
+
+trigger_next_release_run = TriggerDagRunOperator(
+    task_id=D19_TRIGGER_NEXT_RUN_TASK_ID,
+    trigger_dag_id=D19_DAG_ID,
+    trigger_run_id=(
+        "{{ ti.xcom_pull(task_ids='write_d19_release_terminal_outbox')['nextRun']['runId'] }}"
+    ),
+    logical_date=(
+        "{{ ti.xcom_pull(task_ids='write_d19_release_terminal_outbox')['nextRun']['logicalDate'] }}"
+    ),
+    conf="{{ ti.xcom_pull(task_ids='write_d19_release_terminal_outbox')['nextRunConf'] }}",
+    wait_for_completion=False,
+    reset_dag_run=False,
+    skip_when_already_exists=True,
+    dag=dag,
+)
+
+release_terminal_complete = EmptyOperator(
+    task_id=D19_RELEASE_COMPLETE_TASK_ID,
+    dag=dag,
+)
+
 (
     verify_terminal_activation
     >> validate_admission
@@ -2116,4 +2330,8 @@ write_assembly_plan >> assemble_paired_execution_manifest
     >> persist_paired_evaluation_verification
     >> write_official_measurement
     >> publish_official_measurement
+    >> write_release_terminal_outbox
+    >> choose_release_transition
 )
+choose_release_transition >> trigger_next_release_run
+choose_release_transition >> release_terminal_complete

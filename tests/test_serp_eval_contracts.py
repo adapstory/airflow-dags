@@ -7690,7 +7690,9 @@ def test_no_airflow_dag_keeps_the_retired_pending_governance_marker() -> None:
             assert marker not in source, dag_path.name
 
 
-def test_every_kubernetes_workload_operator_uses_the_dedicated_controller_executor_identity() -> None:
+def test_every_kubernetes_workload_operator_uses_the_dedicated_controller_executor_identity() -> (
+    None
+):
     for dag_file in (
         "serp_benchmark_improvement_wave.py",
         "serp_beir_scifact_live_benchmark.py",
@@ -7748,6 +7750,29 @@ def test_d19_history_observer_separates_airflow_api_trust_from_credentials() -> 
     assert "_HISTORY_CREDENTIALS_ROOT" in source
     assert 'secret_name="airflow-serp-d19-history-observer-api"' not in source
     assert "_HISTORY_SECRET_ROOT" not in source
+
+
+def test_d19_release_progression_is_airflow_owned_and_writes_terminal_outbox() -> None:
+    """The long release graph must not depend on one Jenkins executor lifetime.
+
+    Context: Jenkins orchestrator #55 exhausted its poll budget while the D19
+    canary continued making durable progress.
+    Decision: every run seals a WORM terminal outbox before Airflow idempotently
+    triggers the next immutable run; only the final outbox callback wakes Jenkins.
+    Reason: task completion state and dispatcher liveness are not measurement truth.
+    Revisit when: a dedicated durable workflow service supersedes this Airflow graph.
+    """
+
+    source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(encoding="utf-8")
+    assert "task_id=D19_TERMINAL_OUTBOX_TASK_ID" in source
+    assert "write_immutable_evidence_snapshot(" in source
+    assert 'artifact_type="d19_terminal_outbox"' in source
+    assert "on_success_callback=wake_d19_terminal_finalizer" in source
+    assert "trigger_dag_id=D19_DAG_ID" in source
+    assert "wait_for_completion=False" in source
+    assert "reset_dag_run=False" in source
+    assert "skip_when_already_exists=True" in source
+    assert "publish_official_measurement\n    >> write_release_terminal_outbox" in source
 
 
 def test_every_catalog_acquisition_dag_projects_only_a_short_lived_minio_identity() -> None:
@@ -8690,6 +8715,9 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         "airflow.providers.standard.operators": types.ModuleType(
             "airflow.providers.standard.operators"
         ),
+        "airflow.providers.standard.operators.empty": types.ModuleType(
+            "airflow.providers.standard.operators.empty"
+        ),
         "airflow.providers.standard.operators.python": types.ModuleType(
             "airflow.providers.standard.operators.python"
         ),
@@ -8714,6 +8742,9 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     cast(
         Any, modules["airflow.providers.standard.operators.python"]
     ).PythonOperator = FakePythonOperator
+    cast(
+        Any, modules["airflow.providers.standard.operators.empty"]
+    ).EmptyOperator = FakePythonOperator
     cast(
         Any, modules["airflow.providers.standard.operators.python"]
     ).BranchPythonOperator = FakeBranchPythonOperator
