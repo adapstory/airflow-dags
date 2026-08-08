@@ -1432,6 +1432,8 @@ for suite_id, side in D19_PACK_SIDE_IDENTITIES:
                 "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan')"
                 "['artifact_paths']['benchmark_pack_build_result'] }}.shared/" + artifact_slug
             ),
+            "--content-addressed-cache-prefix",
+            "s3://airflow-serp-evidence/serp-evals/benchmark-cas/v1",
             "--result-output",
             (
                 "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan')"
