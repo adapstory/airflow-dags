@@ -8954,6 +8954,9 @@ def test_d19_serializes_runs_and_caps_expensive_parallelism() -> None:
     assert isinstance(builder_keywords["pool"], ast.Name)
     assert builder_keywords["pool"].id == "D19_PACK_BUILDER_POOL"
     assert ast.literal_eval(builder_keywords["pool_slots"]) == 1
+    # Baseline and candidate have immutable route/model identities and distinct
+    # CAS namespaces; serializing them defeats the dedicated dual-GPU topology.
+    assert 'if side == "candidate":' not in source
 
 
 def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_request(
@@ -9004,6 +9007,14 @@ def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_reque
         assert arguments[arguments.index("--side") + 1] == side
         assert "--shared-output-prefix" in arguments
         assert builder_task.kwargs["retries"] == 2
+        expected_priority = (
+            1000
+            if (suite_id, side)
+            in {("SWE-bench Verified", "baseline"), ("CodeRAG-Bench", "candidate")}
+            else 1
+        )
+        assert builder_task.kwargs["priority_weight"] == expected_priority
+        assert builder_task.kwargs["weight_rule"] == "absolute"
     assert aggregator["arguments"][0] == "aggregate-exact-nine"
     assert "--side-result-uris-json" in aggregator["arguments"]
     assert aggregator["do_xcom_push"] is True

@@ -1380,6 +1380,9 @@ D19_PACK_SIDE_IDENTITIES = tuple(
     for side in ("baseline", "candidate")
 )
 D19_PACK_SIDE_BUILD_TASKS: dict[tuple[str, str], BoundedKubernetesJobOperator] = {}
+D19_DUAL_GPU_CRITICAL_PAIR = frozenset(
+    {("SWE-bench Verified", "baseline"), ("CodeRAG-Bench", "candidate")}
+)
 for suite_id, side in D19_PACK_SIDE_IDENTITIES:
     suite_slug = suite_id.casefold().replace(" ", "_").replace("-", "_")
     artifact_slug = suite_id.casefold().replace(" ", "-").replace("_", "-")
@@ -1433,7 +1436,7 @@ for suite_id, side in D19_PACK_SIDE_IDENTITIES:
                 "['artifact_paths']['benchmark_pack_build_result'] }}.shared/" + artifact_slug
             ),
             "--content-addressed-cache-prefix",
-            "s3://airflow-serp-evidence/serp-evals/benchmark-cas/v1",
+            "s3://airflow-serp-evidence/serp-evals/benchmark-cas/v2",
             "--result-output",
             (
                 "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan')"
@@ -1453,6 +1456,8 @@ for suite_id, side in D19_PACK_SIDE_IDENTITIES:
         container_resources=D19_PACK_BUILDER_RESOURCES,
         pool=D19_PACK_BUILDER_POOL,
         pool_slots=1,
+        priority_weight=(1000 if (suite_id, side) in D19_DUAL_GPU_CRITICAL_PAIR else 1),
+        weight_rule="absolute",
         node_selector=D19_REMOTE_COMPUTE_NODE_SELECTOR,
         tolerations=D19_REMOTE_COMPUTE_TOLERATIONS,
         security_context=hardened_runtime_pod_security_context(),
@@ -2302,8 +2307,12 @@ for suite_id, side in D19_PACK_SIDE_IDENTITIES:
     load_catalog >> side_task
     load_promotion >> side_task
     side_task >> aggregate_exact_nine_benchmark_packs
-    if side == "candidate":
-        D19_PACK_SIDE_BUILD_TASKS[(suite_id, "baseline")] >> side_task
+# Context: immutable baseline/candidate routes now terminate on different GPU
+# endpoints and write distinct semantic CAS identities.
+# Decision: let the two sides compete only for the two-slot governed pool.
+# Reason: an artificial per-suite edge kept one GPU idle and blocked the exact
+# SWE-baseline/CodeRAG-candidate parallel execution required by D19.
+# Revisit when: a future paired algorithm has a real data dependency between sides.
 aggregate_exact_nine_benchmark_packs >> register_exact_nine_evaluation_binding
 register_exact_nine_evaluation_binding >> load_exact_nine_evaluation_binding
 load_catalog >> write_request
