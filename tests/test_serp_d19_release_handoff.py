@@ -12,6 +12,8 @@ from dags.serp_d19_release_handoff import (
     validate_release_ownership,
 )
 
+pytestmark = pytest.mark.unit
+
 
 def _ownership() -> dict[str, Any]:
     return {
