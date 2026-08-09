@@ -449,7 +449,26 @@ D19_RUNTIME_ADMISSION_EXECUTOR_CONFIG = evaluation_admission_verifier_executor_c
 def d19_aggregator_env_vars() -> list[k8s.V1EnvVar]:
     """Return the minimal STS-only runtime contract for trusted aggregation."""
 
-    return minio_web_identity_env_vars(_D19_AGGREGATOR_ENV_NAMES)
+    return [
+        *minio_web_identity_env_vars(_D19_AGGREGATOR_ENV_NAMES),
+        *_pod_identity_env_vars(),
+    ]
+
+
+def _pod_identity_env_vars() -> list[k8s.V1EnvVar]:
+    return [
+        k8s.V1EnvVar(
+            name=name,
+            value_from=k8s.V1EnvVarSource(
+                field_ref=k8s.V1ObjectFieldSelector(field_path=field_path)
+            ),
+        )
+        for name, field_path in (
+            ("POD_NAME", "metadata.name"),
+            ("POD_NAMESPACE", "metadata.namespace"),
+            ("POD_UID", "metadata.uid"),
+        )
+    ]
 
 
 def d19_attestor_env_vars() -> list[k8s.V1EnvVar]:
@@ -467,6 +486,7 @@ def d19_model_runner_env_vars() -> list[k8s.V1EnvVar]:
     return [
         *minio_web_identity_env_vars(_D19_MODEL_RUNNER_ENV_NAMES),
         *bc10_workload_env_vars(),
+        *_pod_identity_env_vars(),
     ]
 
 
@@ -475,24 +495,7 @@ def d19_code_sandbox_publisher_env_vars() -> list[k8s.V1EnvVar]:
 
     return [
         *d19_aggregator_env_vars(),
-        k8s.V1EnvVar(
-            name="POD_NAME",
-            value_from=k8s.V1EnvVarSource(
-                field_ref=k8s.V1ObjectFieldSelector(field_path="metadata.name")
-            ),
-        ),
-        k8s.V1EnvVar(
-            name="POD_NAMESPACE",
-            value_from=k8s.V1EnvVarSource(
-                field_ref=k8s.V1ObjectFieldSelector(field_path="metadata.namespace")
-            ),
-        ),
-        k8s.V1EnvVar(
-            name="POD_UID",
-            value_from=k8s.V1EnvVarSource(
-                field_ref=k8s.V1ObjectFieldSelector(field_path="metadata.uid")
-            ),
-        ),
+        *_pod_identity_env_vars(),
     ]
 
 
