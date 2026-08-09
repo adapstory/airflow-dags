@@ -2486,6 +2486,30 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
     _reject_inline_d19_fields(payload)
     tenant_id = _required_uuid(payload, "tenant_id")
     generated_at = _required_datetime_string(payload, "generated_at")
+    execution_purpose = payload.get("execution_purpose", "measurement")
+    if execution_purpose not in {"measurement", "critical-path-preflight"}:
+        raise ValueError("benchmark improvement wave execution_purpose is unsupported")
+    preflight_bindings: dict[str, Any] = {}
+    preflight_fields = {
+        "adapter_parity_evidence",
+        "bc10_route_set_evidence",
+        "fault_injection_evidence",
+        "frozen_benchmark_release_evidence",
+        "source_sha",
+    }
+    if execution_purpose == "critical-path-preflight":
+        for field_name in sorted(preflight_fields - {"source_sha"}):
+            evidence = _worm_evidence_reference(payload, field_name)
+            _require_worm_evidence_within_artifact_root(
+                evidence, _required_artifact_root_path(payload), field_name
+            )
+            preflight_bindings[field_name] = evidence
+        source_sha = _required_str(payload, "source_sha")
+        if re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
+            raise ValueError("critical path preflight source_sha is invalid")
+        preflight_bindings["source_sha"] = source_sha
+    elif any(field_name in payload for field_name in preflight_fields):
+        raise ValueError("measurement execution cannot accept preflight evidence")
     registry_resource_type = _required_resource_type(payload, "registry_resource_type")
     registry_resource_id = _required_uuid(payload, "registry_resource_id")
     promotion_evidence = _worm_evidence_reference(payload, "evaluation_release_promotion_evidence")
@@ -2508,57 +2532,65 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
             artifact_root_path,
             "resume_manifest_evidence",
         )
+        if execution_purpose == "critical-path-preflight":
+            raise ValueError("critical path preflight cannot reuse measurement receipts")
     operation_id = _operation_id(
         "serp-airflow-benchmark-improvement-wave",
         tenant_id,
         promotion_evidence["sha256"],
         resume_manifest_evidence["sha256"] if resume_manifest_evidence else "no-resume",
+        execution_purpose,
+        *(
+            [
+                str(preflight_bindings[field_name]["sha256"])
+                for field_name in sorted(preflight_fields - {"source_sha"})
+            ]
+            + [str(preflight_bindings["source_sha"])]
+            if preflight_bindings
+            else []
+        ),
         generated_at,
     )
+    artifact_names: tuple[tuple[str, str], ...] = (
+        ("airflow_plan", "airflow-plan.json"),
+        ("benchmark_catalog", "benchmark-catalog.json"),
+        ("benchmark_catalog_receipt", "benchmark-catalog-materialization-receipt.json"),
+        ("benchmark_catalog_pack_activation", "benchmark-catalog-pack-activation.json"),
+        ("paired_eval_request", "paired-eval-request.json"),
+        ("paired_eval_receipt", "paired-eval-receipt.json"),
+        (
+            "paired_evaluation_score_cells",
+            "paired-evaluation-observed-normalized-score-cells.json",
+        ),
+        (
+            "paired_evaluation_verification_evidence",
+            "paired-evaluation-verification-evidence.json",
+        ),
+        ("official_serp_mcp_measurement", "official-serp-mcp-measurement.json"),
+        ("benchmark_pack_build_result", "benchmark-pack-build-result.json"),
+        ("benchmark_pack_lifecycle_result", "benchmark-pack-lifecycle-result.json"),
+        ("paired_evaluation_assembly_plan", "paired-evaluation-assembly-plan.json"),
+        ("paired_execution_manifest", "paired-execution-manifest.json"),
+    )
+    if execution_purpose == "critical-path-preflight":
+        artifact_names += (
+            ("critical_path_preflight_receipt", "critical-path-preflight-receipt.json"),
+            ("fault_injection_evidence", "fault-injection-evidence.json"),
+            (
+                "official_harness_parity_evidence",
+                "official-harness-parity-evidence.json",
+            ),
+            ("paired_evaluator_dry_run", "paired-evaluator-dry-run.json"),
+            ("preflight_assembly_plan", "preflight-assembly-plan.json"),
+            ("preflight_execution_manifest", "preflight-execution-manifest.json"),
+            ("preflight_progress_snapshot", "preflight-progress-snapshot.json"),
+        )
     plan_payload = {
         "actor_id": _required_str(payload, "actor_id"),
         "artifact_root_path": artifact_root_path,
-        "artifact_paths": _artifact_paths(
-            artifact_root_path,
-            operation_id,
-            (
-                ("airflow_plan", "airflow-plan.json"),
-                ("benchmark_catalog", "benchmark-catalog.json"),
-                (
-                    "benchmark_catalog_receipt",
-                    "benchmark-catalog-materialization-receipt.json",
-                ),
-                (
-                    "benchmark_catalog_pack_activation",
-                    "benchmark-catalog-pack-activation.json",
-                ),
-                ("paired_eval_request", "paired-eval-request.json"),
-                ("paired_eval_receipt", "paired-eval-receipt.json"),
-                (
-                    "paired_evaluation_score_cells",
-                    "paired-evaluation-observed-normalized-score-cells.json",
-                ),
-                (
-                    "paired_evaluation_verification_evidence",
-                    "paired-evaluation-verification-evidence.json",
-                ),
-                (
-                    "official_serp_mcp_measurement",
-                    "official-serp-mcp-measurement.json",
-                ),
-                ("benchmark_pack_build_result", "benchmark-pack-build-result.json"),
-                (
-                    "benchmark_pack_lifecycle_result",
-                    "benchmark-pack-lifecycle-result.json",
-                ),
-                (
-                    "paired_evaluation_assembly_plan",
-                    "paired-evaluation-assembly-plan.json",
-                ),
-                ("paired_execution_manifest", "paired-execution-manifest.json"),
-            ),
-        ),
+        "artifact_paths": _artifact_paths(artifact_root_path, operation_id, artifact_names),
         "dag_id": _D19_DAG_ID,
+        "execution_purpose": execution_purpose,
         "generated_at": generated_at,
         "evaluation_release_promotion_evidence": promotion_evidence,
         "normalized_gate_floor": SERP_NORMALIZED_GATE_FLOOR,
@@ -2582,13 +2614,21 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
                 *_d19_harness_task_ids(),
                 "write_paired_evaluation_assembly_plan",
                 "assemble_paired_execution_manifest",
-                "run_paired_benchmark_evaluation",
-                "persist_paired_evaluation_verification_evidence",
-                "write_official_serp_mcp_measurement",
-                "publish_official_serp_mcp_measurement",
+                "choose_post_assembly_path",
+                *(
+                    ("persist_critical_path_preflight_evidence",)
+                    if execution_purpose == "critical-path-preflight"
+                    else (
+                        "run_paired_benchmark_evaluation",
+                        "persist_paired_evaluation_verification_evidence",
+                        "write_official_serp_mcp_measurement",
+                        "publish_official_serp_mcp_measurement",
+                    )
+                ),
             )
         ),
         "tenant_id": str(tenant_id),
+        **preflight_bindings,
     }
     if resume_manifest_evidence is not None:
         plan_payload["resume_manifest_evidence"] = resume_manifest_evidence

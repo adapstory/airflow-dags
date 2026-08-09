@@ -314,7 +314,7 @@ D19_CODE_SANDBOX_VOLUMES = [
     D19_CODE_SANDBOX_WORKSPACE_VOLUME,
     D19_CODE_SANDBOX_POD_STATUS_TOKEN_VOLUME,
 ]
-D19_CODE_SANDBOX_PUBLISHER_VOLUME_MOUNTS = [
+D19_CODE_SANDBOX_ORCHESTRATOR_VOLUME_MOUNTS = [
     *minio_web_identity_volume_mounts(),
     k8s.V1VolumeMount(
         name="d19-code-sandbox-pod-status-token",
@@ -322,22 +322,14 @@ D19_CODE_SANDBOX_PUBLISHER_VOLUME_MOUNTS = [
         read_only=True,
     ),
     k8s.V1VolumeMount(
-        name="d19-code-sandbox-output",
-        mount_path="/sandbox/output",
-        read_only=True,
-    ),
-    k8s.V1VolumeMount(
-        name="d19-code-sandbox-tmp",
-        mount_path="/tmp",
-        read_only=False,
-    ),
-]
-D19_CODE_SANDBOX_STAGE_VOLUME_MOUNTS = [
-    *minio_web_identity_volume_mounts(),
-    k8s.V1VolumeMount(
         name="d19-code-sandbox-input",
         mount_path="/sandbox/input",
         read_only=False,
+    ),
+    k8s.V1VolumeMount(
+        name="d19-code-sandbox-output",
+        mount_path="/sandbox/output",
+        read_only=True,
     ),
     k8s.V1VolumeMount(
         name="d19-code-sandbox-tmp",
@@ -569,8 +561,8 @@ def build_code_sandbox_mapped_operator_kwargs(
 ) -> list[dict[str, Any]]:
     """Build one mapped pod per sealed sandbox work item.
 
-    Only the trusted init and publisher containers use the Airflow runtime.
-    The executor image is selected from the immutable work-item inventory and
+    The trusted base container stages, observes and publishes. The concurrent
+    executor image is selected from the immutable work-item inventory and
     receives no environment, projected token, Docker socket, or XCom mount.
     """
 
@@ -582,7 +574,6 @@ def build_code_sandbox_mapped_operator_kwargs(
         expected_side=expected_side,
         expected_repetition=expected_repetition,
     )
-    trusted_env = _serialized_d19_aggregator_env()
     mapped_kwargs: list[dict[str, Any]] = []
     for map_index, work_item in enumerate(work_items):
         evidence = work_item["sandboxWorkItemEvidence"]
@@ -594,23 +585,23 @@ def build_code_sandbox_mapped_operator_kwargs(
                     f"{expected_repetition}-{map_index + 1:04d}"
                 ),
                 "arguments": [
-                    "publish-code-sandbox-result",
+                    "orchestrate-code-sandbox",
                     "--sandbox-work-item",
-                    evidence["artifactPath"],
+                    evidence["s3Uri"],
                     "--sandbox-work-item-version-id",
-                    evidence["artifactVersionId"],
+                    evidence["versionId"],
                     "--sandbox-work-item-sha256",
-                    evidence["artifactSha256"],
+                    evidence["sha256"],
                     "--result",
                     "/sandbox/output/raw-result.json",
+                    "--input-dir",
+                    "/sandbox/input",
                     "--xcom-output",
                     "/airflow/xcom/return.json",
                 ],
                 "pod_template_dict": _sandbox_pod_template_dict(
                     work_item=work_item,
                     suite_id=expected_suite_id,
-                    trusted_runtime_image=trusted_runtime_image,
-                    trusted_env=trusted_env,
                 ),
             }
         )
@@ -741,10 +732,7 @@ def _sandbox_pod_template_dict(
     *,
     work_item: Mapping[str, Any],
     suite_id: str,
-    trusted_runtime_image: str,
-    trusted_env: list[dict[str, str]],
 ) -> dict[str, Any]:
-    evidence = work_item["sandboxWorkItemEvidence"]
     container_security_context = {
         "allowPrivilegeEscalation": False,
         "capabilities": {"drop": ["ALL"]},
@@ -759,15 +747,29 @@ def _sandbox_pod_template_dict(
         {"mountPath": "/tmp", "name": "d19-code-sandbox-tmp"},
         {"mountPath": "/workspace", "name": "d19-code-sandbox-workspace"},
     ]
-    stage_mounts = [
-        {
-            "mountPath": MINIO_WEB_IDENTITY_TOKEN_FILE.rsplit("/", 1)[0],
-            "name": "minio-web-identity-token",
-            "readOnly": True,
-        },
-        {"mountPath": "/sandbox/input", "name": "d19-code-sandbox-input"},
-        {"mountPath": "/tmp", "name": "d19-code-sandbox-tmp"},
-    ]
+    command = str(work_item["executorCommand"])
+    arguments = [str(value) for value in work_item["executorArgs"]]
+    if (command, arguments) == (
+        "/opt/ds1000-venv/bin/python",
+        ["/sandbox/input/ds1000_executor.py"],
+    ):
+        invocation = "/opt/ds1000-venv/bin/python /sandbox/input/ds1000_executor.py"
+    elif (command, arguments) == ("/bin/bash", ["/sandbox/input/swe_executor.sh"]):
+        invocation = "/bin/bash /sandbox/input/swe_executor.sh"
+    else:  # validated by the caller; keep this boundary independently fail-closed
+        raise ValueError("D19 sandbox executor wrapper command is unsupported")
+    executor_wrapper = f"""set -eu
+while test ! -f /sandbox/input/.ready; do
+  if test -f /sandbox/input/.abort; then exit 0; fi
+  sleep 1
+done
+set +e
+{invocation}
+status=$?
+set -e
+printf '%s\n' "$status" > /sandbox/output/executor-exit-code
+exit 0
+"""
     return {
         "apiVersion": "v1",
         "kind": "Pod",
@@ -779,47 +781,13 @@ def _sandbox_pod_template_dict(
         },
         "spec": {
             "automountServiceAccountToken": False,
-            "containers": [{"name": "base"}],
-            "initContainers": [
+            "containers": [
                 {
-                    "args": [
-                        "stage-code-sandbox",
-                        "--sandbox-work-item",
-                        evidence["artifactPath"],
-                        "--sandbox-work-item-version-id",
-                        evidence["artifactVersionId"],
-                        "--sandbox-work-item-sha256",
-                        evidence["artifactSha256"],
-                        "--input-dir",
-                        "/sandbox/input",
-                    ],
-                    "command": [
-                        "python",
-                        "-m",
-                        "adapstory_serp_pipeline.orchestration.official_harness_execution",
-                    ],
-                    "env": [dict(item) for item in trusted_env],
-                    "envFrom": [],
-                    "image": trusted_runtime_image,
-                    "name": "stage-code-sandbox",
-                    "resources": {
-                        "limits": {
-                            "cpu": "1000m",
-                            "ephemeral-storage": "6Gi",
-                            "memory": "3Gi",
-                        },
-                        "requests": {
-                            "cpu": "500m",
-                            "ephemeral-storage": "1Gi",
-                            "memory": "1Gi",
-                        },
-                    },
-                    "securityContext": dict(container_security_context),
-                    "volumeMounts": stage_mounts,
+                    "name": "base",
                 },
                 {
-                    "args": list(work_item["executorArgs"]),
-                    "command": [str(work_item["executorCommand"])],
+                    "args": [executor_wrapper],
+                    "command": ["/bin/sh", "-c"],
                     "env": [],
                     "envFrom": [],
                     "image": work_item["sandboxImageReference"],
@@ -990,7 +958,7 @@ def write_code_sandbox_result_set_assembly_plan(
         f"{operation_root}/code-sandbox/{_suite_slug(expected_suite_id)}/"
         f"{expected_side}/{expected_repetition:02d}/sandbox-result-set-assembly-plan.json"
     )
-    payload = {
+    payload: dict[str, Any] = {
         "repetition": expected_repetition,
         "results": normalized_results,
         "schema": SANDBOX_RESULT_SET_ASSEMBLY_PLAN_SCHEMA,
@@ -1016,7 +984,7 @@ def write_code_sandbox_result_set_assembly_plan(
 def _require_operation_evidence(
     evidence: Mapping[str, str], operation_root: str, field_name: str
 ) -> None:
-    if not evidence["artifactPath"].startswith(operation_root + "/"):
+    if not evidence["s3Uri"].startswith(operation_root + "/"):
         raise ValueError(f"{field_name} must stay inside the D19 evidence operation")
 
 
@@ -1197,6 +1165,9 @@ def write_paired_evaluation_assembly_plan(
         raise ValueError("D19 work-item plan must contain the exact canonical 90")
     if len(run_results) != len(D19_OFFICIAL_HARNESS_WORK_ITEMS):
         raise ValueError("D19 runner results must contain the exact canonical 90")
+    execution_purpose = plan.get("execution_purpose", "measurement")
+    if execution_purpose not in {"measurement", "critical-path-preflight"}:
+        raise ValueError("D19 assembly plan execution purpose is unsupported")
     runs: list[dict[str, dict[str, str]]] = []
     for expected, work_item, result in zip(
         D19_OFFICIAL_HARNESS_WORK_ITEMS, work_items, run_results, strict=True
@@ -1215,50 +1186,165 @@ def write_paired_evaluation_assembly_plan(
         )
         if observed_work_item != expected or observed_result != expected:
             raise ValueError("D19 work items and receipts must use canonical identity order")
-        runs.append(
-            {
-                "workItemEvidence": _assembly_artifact_evidence(
-                    work_item.get("workItemEvidence"), "workItemEvidence"
-                ),
-                "receiptEvidence": _assembly_artifact_evidence(
-                    result.get("receiptEvidence"), "receiptEvidence"
-                ),
-            }
-        )
+        normalized_run = {
+            "workItemEvidence": _assembly_artifact_evidence(
+                work_item.get("workItemEvidence"), "workItemEvidence"
+            )
+        }
+        if execution_purpose == "measurement":
+            normalized_run["receiptEvidence"] = _assembly_artifact_evidence(
+                result.get("receiptEvidence"), "receiptEvidence"
+            )
+        else:
+            normalized_run["preflightResultEvidence"] = _assembly_artifact_evidence(
+                result.get("preflightResultEvidence"), "preflightResultEvidence"
+            )
+            normalized_run["telemetryEvidence"] = _assembly_artifact_evidence(
+                result.get("telemetryEvidence"), "telemetryEvidence"
+            )
+        runs.append(normalized_run)
     artifact_paths = plan.get("artifact_paths")
     if not isinstance(artifact_paths, Mapping):
         raise ValueError("D19 plan artifact_paths is required")
-    assembly_path = artifact_paths.get("paired_evaluation_assembly_plan")
-    manifest_output = artifact_paths.get("paired_execution_manifest")
+    assembly_path_key = (
+        "paired_evaluation_assembly_plan"
+        if execution_purpose == "measurement"
+        else "preflight_assembly_plan"
+    )
+    assembly_path = artifact_paths.get(assembly_path_key)
+    manifest_output_key = (
+        "paired_execution_manifest"
+        if execution_purpose == "measurement"
+        else "preflight_execution_manifest"
+    )
+    manifest_output = artifact_paths.get(manifest_output_key)
     if not isinstance(assembly_path, str) or not assembly_path.startswith("s3://"):
         raise ValueError("D19 paired_evaluation_assembly_plan path must use s3://")
     if not isinstance(manifest_output, str) or not manifest_output.startswith("s3://"):
         raise ValueError("D19 paired_execution_manifest path must use s3://")
-    payload = {
-        "schema": "PairedEvaluationAssemblyPlan/v1",
+    payload: dict[str, Any] = {
+        "schema": (
+            "PairedEvaluationAssemblyPlan/v1"
+            if execution_purpose == "measurement"
+            else "SerpCriticalPathPreflightAssemblyPlan/v1"
+        ),
         "requestEvidence": request_evidence,
         "manifestOutput": manifest_output,
         "runs": runs,
     }
+    if execution_purpose == "critical-path-preflight":
+        dry_run_output = artifact_paths.get("paired_evaluator_dry_run")
+        progress_snapshot_output = artifact_paths.get("preflight_progress_snapshot")
+        preflight_receipt_output = artifact_paths.get("critical_path_preflight_receipt")
+        if not isinstance(dry_run_output, str) or not dry_run_output.startswith("s3://"):
+            raise ValueError("D19 paired_evaluator_dry_run path must use s3://")
+        if not isinstance(progress_snapshot_output, str) or not progress_snapshot_output.startswith(
+            "s3://"
+        ):
+            raise ValueError("D19 preflight_progress_snapshot path must use s3://")
+        if not isinstance(preflight_receipt_output, str) or not preflight_receipt_output.startswith(
+            "s3://"
+        ):
+            raise ValueError("D19 critical_path_preflight_receipt path must use s3://")
+        payload["pairedEvaluatorDryRunOutput"] = dry_run_output
+        payload["progressSnapshotOutput"] = progress_snapshot_output
+        payload["preflightReceiptOutput"] = preflight_receipt_output
+        payload["sourceSha"] = plan.get("source_sha")
+        for source_field, target_field in (
+            ("adapter_parity_evidence", "adapterParityEvidence"),
+            ("bc10_route_set_evidence", "bc10RouteSetEvidence"),
+            ("fault_injection_evidence", "faultInjectionEvidence"),
+            ("frozen_benchmark_release_evidence", "frozenBenchmarkReleaseEvidence"),
+        ):
+            payload[target_field] = _assembly_artifact_evidence(
+                plan.get(source_field), source_field
+            )
     written = write_immutable_evidence_snapshot(
         assembly_path,
-        artifact_type="paired_evaluation_assembly_plan",
+        artifact_type=(
+            "paired_evaluation_assembly_plan"
+            if execution_purpose == "measurement"
+            else "critical_path_preflight_assembly_plan"
+        ),
         operation_id=str(plan.get("operation_id", "")),
         payload=payload,
     )
+    pointer_key = (
+        "assemblyPlanEvidence"
+        if execution_purpose == "measurement"
+        else "preflightAssemblyPlanEvidence"
+    )
     return {
-        "assemblyPlanEvidence": _assembly_artifact_evidence(written, "assemblyPlanEvidence"),
+        pointer_key: _assembly_artifact_evidence(written, pointer_key),
+        "executionPurpose": execution_purpose,
         "manifestOutput": manifest_output,
         "runCount": len(runs),
+    }
+
+
+def choose_post_assembly_path(plan_json: Mapping[str, Any] | str) -> str:
+    plan = dict(plan_json) if isinstance(plan_json, Mapping) else json.loads(plan_json)
+    if not isinstance(plan, Mapping):
+        raise ValueError("D19 post-assembly plan must be an object")
+    purpose = plan.get("execution_purpose", "measurement")
+    if purpose == "measurement":
+        return "run_paired_benchmark_evaluation"
+    if purpose == "critical-path-preflight":
+        return "persist_critical_path_preflight_evidence"
+    raise ValueError("D19 post-assembly execution purpose is unsupported")
+
+
+def persist_critical_path_preflight_evidence(
+    assembly_result: Mapping[str, Any],
+) -> dict[str, Any]:
+    if assembly_result.get("status") != "ready" or assembly_result.get("runCount") != 90:
+        raise ValueError("critical path preflight assembly is incomplete")
+    evidence = _assembly_artifact_evidence(
+        assembly_result.get("criticalPathPreflightEvidence"),
+        "criticalPathPreflightEvidence",
+    )
+    return {
+        "criticalPathPreflightEvidence": evidence,
+        "measurementEligible": False,
+        "runCount": 90,
+        "schema": "SerpCriticalPathPreflightHandoff/v1",
+        "status": "ready",
     }
 
 
 def _assembly_artifact_evidence(value: object, field_name: str) -> dict[str, str]:
     if not isinstance(value, Mapping):
         raise ValueError(f"{field_name} must be an immutable artifact handle")
-    path = value.get("artifactPath")
-    version_id = value.get("artifactVersionId")
-    digest = value.get("artifactSha256")
+    canonical_shape = {"objectLockMode", "retainUntil", "s3Uri", "sha256", "versionId"}
+    writer_shape = {
+        "artifactETag",
+        "artifactPath",
+        "artifactSha256",
+        "artifactType",
+        "artifactVersionId",
+        "contractVersion",
+        "objectLockMode",
+        "operationId",
+        "retainUntil",
+        "retentionDays",
+        "status",
+    }
+    if set(value) == canonical_shape:
+        path = value.get("s3Uri")
+        version_id = value.get("versionId")
+        digest = value.get("sha256")
+        retain_until = value.get("retainUntil")
+        if not isinstance(retain_until, str) or not retain_until.endswith("Z"):
+            raise ValueError(f"{field_name} retainUntil must be RFC3339 UTC")
+    elif set(value) == writer_shape:
+        path = value.get("artifactPath")
+        version_id = value.get("artifactVersionId")
+        digest = value.get("artifactSha256")
+        retain_until = value.get("retainUntil")
+        if not isinstance(retain_until, str) or not retain_until.endswith("Z"):
+            raise ValueError(f"{field_name} retainUntil must be RFC3339 UTC")
+    else:
+        raise ValueError(f"{field_name} immutable artifact fields are unsupported")
     if not isinstance(path, str) or not path.startswith("s3://"):
         raise ValueError(f"{field_name} artifactPath must use s3://")
     if not isinstance(version_id, str) or not version_id.strip():
@@ -1273,10 +1359,11 @@ def _assembly_artifact_evidence(value: object, field_name: str) -> dict[str, str
     if value.get("objectLockMode") != "COMPLIANCE":
         raise ValueError(f"{field_name} must use COMPLIANCE object lock")
     return {
-        "artifactPath": path,
-        "artifactSha256": normalized_digest,
-        "artifactVersionId": version_id,
         "objectLockMode": "COMPLIANCE",
+        "retainUntil": retain_until,
+        "s3Uri": path,
+        "sha256": normalized_digest,
+        "versionId": version_id,
     }
 
 
@@ -1821,7 +1908,11 @@ for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARN
                 "adapstory_serp_pipeline.orchestration.official_harness_execution",
             ],
             arguments=[
-                "run-suite",
+                (
+                    "{{ 'run-preflight-suite' if "
+                    "ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan')"
+                    ".get('execution_purpose') == 'critical-path-preflight' else 'run-suite' }}"
+                ),
                 "--work-item",
                 work_item_root + "['artifactPath'] }}",
                 "--work-item-version-id",
@@ -1860,7 +1951,12 @@ for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARN
                 "adapstory_serp_pipeline.orchestration.official_harness_execution",
             ],
             arguments=[
-                "prepare-code-sandbox",
+                (
+                    "{{ 'prepare-preflight-code-sandbox' if "
+                    "ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan')"
+                    ".get('execution_purpose') == 'critical-path-preflight' "
+                    "else 'prepare-code-sandbox' }}"
+                ),
                 "--work-item",
                 work_item_root + "['artifactPath'] }}",
                 "--work-item-version-id",
@@ -1915,15 +2011,14 @@ for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARN
             service_account_name=D19_CODE_SANDBOX_WORKLOAD_SERVICE_ACCOUNT,
             automount_service_account_token=False,
             volumes=D19_CODE_SANDBOX_VOLUMES,
-            volume_mounts=D19_CODE_SANDBOX_PUBLISHER_VOLUME_MOUNTS,
+            volume_mounts=D19_CODE_SANDBOX_ORCHESTRATOR_VOLUME_MOUNTS,
             labels=D19_CODE_SANDBOX_WORKLOAD_LABELS,
             container_resources=D19_CODE_SANDBOX_PUBLISHER_RESOURCES,
             security_context=hardened_runtime_pod_security_context(),
             container_security_context=hardened_runtime_container_security_context(),
             do_xcom_push=True,
             get_logs=True,
-            container_logs=["base"],
-            init_container_logs=["stage-code-sandbox", "sandbox-executor"],
+            container_logs=["base", "sandbox-executor"],
             log_events_on_failure=True,
             random_name_suffix=True,
             reattach_on_restart=True,
@@ -1963,7 +2058,12 @@ for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARN
                 "adapstory_serp_pipeline.orchestration.official_harness_execution",
             ],
             arguments=[
-                "seal-code-receipt",
+                (
+                    "{{ 'seal-preflight-code-receipt' if "
+                    "ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan')"
+                    ".get('execution_purpose') == 'critical-path-preflight' "
+                    "else 'seal-code-receipt' }}"
+                ),
                 "--work-item",
                 work_item_root + "['artifactPath'] }}",
                 "--work-item-version-id",
@@ -2026,7 +2126,11 @@ for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARN
             "adapstory_serp_pipeline.orchestration.official_harness_execution",
         ],
         arguments=[
-            "run-suite",
+            (
+                "{{ 'run-preflight-suite' if "
+                "ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan')"
+                ".get('execution_purpose') == 'critical-path-preflight' else 'run-suite' }}"
+            ),
             "--work-item",
             work_item_root + "['artifactPath'] }}",
             "--work-item-version-id",
@@ -2086,21 +2190,31 @@ assemble_paired_execution_manifest = KubernetesPodOperator(
         "adapstory_serp_pipeline.orchestration.official_harness_execution",
     ],
     arguments=[
-        "assemble-manifest",
+        (
+            "{{ 'assemble-preflight' if "
+            "ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan')"
+            ".get('execution_purpose') == 'critical-path-preflight' else 'assemble-manifest' }}"
+        ),
         "--assembly-plan",
         (
-            "{{ ti.xcom_pull(task_ids='write_paired_evaluation_assembly_plan')"
-            "['assemblyPlanEvidence']['artifactPath'] }}"
+            "{{ (ti.xcom_pull(task_ids='write_paired_evaluation_assembly_plan')"
+            ".get('assemblyPlanEvidence') or "
+            "ti.xcom_pull(task_ids='write_paired_evaluation_assembly_plan')"
+            "['preflightAssemblyPlanEvidence'])['s3Uri'] }}"
         ),
         "--assembly-plan-version-id",
         (
-            "{{ ti.xcom_pull(task_ids='write_paired_evaluation_assembly_plan')"
-            "['assemblyPlanEvidence']['artifactVersionId'] }}"
+            "{{ (ti.xcom_pull(task_ids='write_paired_evaluation_assembly_plan')"
+            ".get('assemblyPlanEvidence') or "
+            "ti.xcom_pull(task_ids='write_paired_evaluation_assembly_plan')"
+            "['preflightAssemblyPlanEvidence'])['versionId'] }}"
         ),
         "--assembly-plan-sha256",
         (
-            "{{ ti.xcom_pull(task_ids='write_paired_evaluation_assembly_plan')"
-            "['assemblyPlanEvidence']['artifactSha256'] }}"
+            "{{ (ti.xcom_pull(task_ids='write_paired_evaluation_assembly_plan')"
+            ".get('assemblyPlanEvidence') or "
+            "ti.xcom_pull(task_ids='write_paired_evaluation_assembly_plan')"
+            "['preflightAssemblyPlanEvidence'])['sha256'] }}"
         ),
     ],
     env_vars=d19_attestor_env_vars(),
@@ -2146,32 +2260,32 @@ run_paired_evaluation = KubernetesPodOperator(
         "--execution-manifest",
         (
             "{{ ti.xcom_pull(task_ids='assemble_paired_execution_manifest')"
-            "['executionManifestEvidence']['artifactPath'] }}"
+            "['executionManifestEvidence']['s3Uri'] }}"
         ),
         "--execution-manifest-version-id",
         (
             "{{ ti.xcom_pull(task_ids='assemble_paired_execution_manifest')"
-            "['executionManifestEvidence']['artifactVersionId'] }}"
+            "['executionManifestEvidence']['versionId'] }}"
         ),
         "--execution-manifest-sha256",
         (
             "{{ ti.xcom_pull(task_ids='assemble_paired_execution_manifest')"
-            "['executionManifestEvidence']['artifactSha256'] }}"
+            "['executionManifestEvidence']['sha256'] }}"
         ),
         "--execution-manifest-attestation",
         (
             "{{ ti.xcom_pull(task_ids='assemble_paired_execution_manifest')"
-            "['executionManifestAttestationEvidence']['artifactPath'] }}"
+            "['executionManifestAttestationEvidence']['s3Uri'] }}"
         ),
         "--execution-manifest-attestation-version-id",
         (
             "{{ ti.xcom_pull(task_ids='assemble_paired_execution_manifest')"
-            "['executionManifestAttestationEvidence']['artifactVersionId'] }}"
+            "['executionManifestAttestationEvidence']['versionId'] }}"
         ),
         "--execution-manifest-attestation-sha256",
         (
             "{{ ti.xcom_pull(task_ids='assemble_paired_execution_manifest')"
-            "['executionManifestAttestationEvidence']['artifactSha256'] }}"
+            "['executionManifestAttestationEvidence']['sha256'] }}"
         ),
         "--evidence-output",
         "{{ ti.xcom_pull(task_ids='write_paired_eval_request')['evidenceOutputPath'] }}",
@@ -2195,6 +2309,22 @@ run_paired_evaluation = KubernetesPodOperator(
     retry_delay=timedelta(seconds=5),
     do_xcom_push=True,
     executor_config=kubernetes_pod_launcher_executor_config(),
+    dag=dag,
+)
+
+choose_post_assembly = BranchPythonOperator(
+    task_id="choose_post_assembly_path",
+    python_callable=choose_post_assembly_path,
+    op_args=["{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') }}"],
+    executor_config=D19_AGGREGATOR_EXECUTOR_CONFIG,
+    dag=dag,
+)
+
+persist_critical_path_preflight = PythonOperator(
+    task_id="persist_critical_path_preflight_evidence",
+    python_callable=persist_critical_path_preflight_evidence,
+    op_args=["{{ ti.xcom_pull(task_ids='assemble_paired_execution_manifest') }}"],
+    executor_config=D19_AGGREGATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
 
@@ -2337,9 +2467,9 @@ for identity, prepare_task in D19_CODE_SANDBOX_PREPARE_TASKS.items():
     branch_task >> prepare_task
     prepare_task >> fanout_task >> sandbox_task >> result_set_plan_task
     result_set_plan_task >> seal_task >> join_task >> write_assembly_plan
-write_assembly_plan >> assemble_paired_execution_manifest
+write_assembly_plan >> assemble_paired_execution_manifest >> choose_post_assembly
 (
-    assemble_paired_execution_manifest
+    choose_post_assembly
     >> run_paired_evaluation
     >> persist_paired_evaluation_verification
     >> write_official_measurement
@@ -2347,5 +2477,6 @@ write_assembly_plan >> assemble_paired_execution_manifest
     >> write_release_terminal_outbox
     >> choose_release_transition
 )
+choose_post_assembly >> persist_critical_path_preflight
 choose_release_transition >> trigger_next_release_run
 choose_release_transition >> release_terminal_complete

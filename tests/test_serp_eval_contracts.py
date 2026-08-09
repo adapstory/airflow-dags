@@ -3357,6 +3357,40 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
             f"{plan.payload['operation_id']}/paired-eval-request.json"
         ),
     }
+
+
+def test_benchmark_improvement_wave_plan_binds_nonmeasurement_preflight_purpose() -> None:
+    conf = _improvement_wave_conf()
+    conf["execution_purpose"] = "critical-path-preflight"
+    conf["adapter_parity_evidence"] = _d19_worm_evidence("preflight/parity", "1")
+    conf["bc10_route_set_evidence"] = _d19_worm_evidence("preflight/bc10-routes", "2")
+    conf["fault_injection_evidence"] = _d19_worm_evidence("preflight/faults", "3")
+    conf["frozen_benchmark_release_evidence"] = _d19_worm_evidence(
+        "preflight/frozen-release", "4"
+    )
+    conf["source_sha"] = "a" * 40
+
+    plan = build_benchmark_improvement_wave_plan(conf)
+    repeated = build_benchmark_improvement_wave_plan(json.loads(plan.to_canonical_json()))
+
+    assert plan.payload["execution_purpose"] == "critical-path-preflight"
+    assert repeated.to_canonical_json() == plan.to_canonical_json()
+    assert plan.payload["adapter_parity_evidence"] == conf["adapter_parity_evidence"]
+    assert plan.payload["bc10_route_set_evidence"] == conf["bc10_route_set_evidence"]
+    assert plan.payload["fault_injection_evidence"] == conf["fault_injection_evidence"]
+    assert plan.payload["frozen_benchmark_release_evidence"] == conf[
+        "frozen_benchmark_release_evidence"
+    ]
+    assert plan.payload["source_sha"] == "a" * 40
+    assert {
+        "critical_path_preflight_receipt",
+        "fault_injection_evidence",
+        "official_harness_parity_evidence",
+        "paired_evaluator_dry_run",
+        "preflight_assembly_plan",
+        "preflight_execution_manifest",
+        "preflight_progress_snapshot",
+    }.issubset(plan.payload["artifact_paths"])
     assert [task["task_id"] for task in plan.payload["tasks"]] == [
         "verify_runtime_terminal_activation_admission",
         "validate_d19_fence_admission",
@@ -3417,10 +3451,8 @@ def test_build_benchmark_improvement_wave_plan_preserves_ratchet_contract() -> N
         ],
         "write_paired_evaluation_assembly_plan",
         "assemble_paired_execution_manifest",
-        "run_paired_benchmark_evaluation",
-        "persist_paired_evaluation_verification_evidence",
-        "write_official_serp_mcp_measurement",
-        "publish_official_serp_mcp_measurement",
+        "choose_post_assembly_path",
+        "persist_critical_path_preflight_evidence",
     ]
 
 
@@ -7562,6 +7594,7 @@ def test_serp_dag_files_declare_expected_airflow_contracts(
             "load_exact_nine_evaluation_binding",
             "write_paired_eval_request",
             "write_paired_evaluation_assembly_plan",
+            "persist_critical_path_preflight_evidence",
             "persist_paired_evaluation_verification_evidence",
             "write_official_serp_mcp_measurement",
             "publish_official_serp_mcp_measurement",
@@ -9311,7 +9344,8 @@ def test_d19_runs_exact_ninety_server_owned_official_harness_work_items(
             "-m",
             "adapstory_serp_pipeline.orchestration.official_harness_execution",
         ]
-        assert task.kwargs["arguments"][0] == "run-suite"
+        assert "run-preflight-suite" in task.kwargs["arguments"][0]
+        assert "run-suite" in task.kwargs["arguments"][0]
         assert task.kwargs["security_context"].kwargs["run_as_non_root"] is True
         assert task.kwargs["container_security_context"].kwargs["read_only_root_filesystem"] is True
         assert task.kwargs["container_resources"].kwargs["limits"] == expected_limits[suite_id]
@@ -9456,7 +9490,8 @@ def test_d19_routes_code_suites_through_credential_isolated_sandbox_chains(
         branch = module.D19_CODE_SANDBOX_BRANCH_TASKS[identity]
         assert branch.kwargs["python_callable"] is module.select_code_sandbox_execution_path
         reuse = module.D19_CODE_SANDBOX_REUSE_TASKS[identity].kwargs
-        assert reuse["arguments"][0] == "run-suite"
+        assert "run-preflight-suite" in reuse["arguments"][0]
+        assert "run-suite" in reuse["arguments"][0]
         assert reuse["service_account_name"] == "airflow-serp-benchmark-aggregator"
         join = module.D19_CODE_SANDBOX_JOIN_TASKS[identity]
         assert join.kwargs["python_callable"] is module.select_code_sandbox_result
@@ -9484,10 +9519,11 @@ def test_d19_maps_ds1000_from_one_sealed_suite_specific_sandbox_work_item(
     module = importlib.import_module("dags.serp_benchmark_improvement_wave")
     module = importlib.reload(module)
     evidence = {
-        "artifactPath": "s3://airflow-serp-evidence/serp-evals/op/sandbox-work-item.json",
-        "artifactSha256": "sha256:" + "a" * 64,
-        "artifactVersionId": "sandbox-work-item-version",
         "objectLockMode": "COMPLIANCE",
+        "retainUntil": "2027-08-09T10:00:00Z",
+        "s3Uri": "s3://airflow-serp-evidence/serp-evals/op/sandbox-work-item.json",
+        "sha256": "sha256:" + "a" * 64,
+        "versionId": "sandbox-work-item-version",
     }
     image_digest = "sha256:" + "b" * 64
     prepared = {
@@ -9497,7 +9533,7 @@ def test_d19_maps_ds1000_from_one_sealed_suite_specific_sandbox_work_item(
         "repetition": 1,
         "workItemSetEvidence": {
             **evidence,
-            "artifactPath": "s3://airflow-serp-evidence/serp-evals/op/sandbox-work-items.json",
+            "s3Uri": "s3://airflow-serp-evidence/serp-evals/op/sandbox-work-items.json",
         },
         "workItems": [
             {
@@ -9520,34 +9556,36 @@ def test_d19_maps_ds1000_from_one_sealed_suite_specific_sandbox_work_item(
     )
 
     assert len(mapped) == 1
-    assert mapped[0]["arguments"][0] == "publish-code-sandbox-result"
+    assert mapped[0]["arguments"][0] == "orchestrate-code-sandbox"
     assert "/sandbox/output/raw-result.json" in mapped[0]["arguments"]
     pod = mapped[0]["pod_template_dict"]
-    assert pod["spec"]["initContainers"][0]["image"].endswith("@sha256:" + "d" * 64)
-    assert [container["name"] for container in pod["spec"]["containers"]] == ["base"]
-    assert [container["name"] for container in pod["spec"]["initContainers"]] == [
-        "stage-code-sandbox",
+    assert [container["name"] for container in pod["spec"]["containers"]] == [
+        "base",
         "sandbox-executor",
     ]
-    executor = pod["spec"]["initContainers"][1]
-    stage = pod["spec"]["initContainers"][0]
+    assert "initContainers" not in pod["spec"]
+    base_mounts = {
+        mount.kwargs["mount_path"]: mount.kwargs
+        for mount in module.D19_CODE_SANDBOX_ORCHESTRATOR_VOLUME_MOUNTS
+    }
+    assert base_mounts["/sandbox/input"]["read_only"] is False
+    assert base_mounts["/sandbox/output"]["read_only"] is True
+    assert base_mounts["/var/run/secrets/kubernetes.io/serviceaccount"]["read_only"] is True
+    executor = pod["spec"]["containers"][1]
     assert executor["image"] == "harbor.adapstory.com/serp/ds1000@" + image_digest
     assert executor["env"] == []
     assert executor["envFrom"] == []
-    assert executor["command"] == ["/opt/ds1000-venv/bin/python"]
-    assert executor["args"] == ["/sandbox/input/ds1000_executor.py"]
+    assert executor["command"] == ["/bin/sh", "-c"]
+    assert "/opt/ds1000-venv/bin/python /sandbox/input/ds1000_executor.py" in executor[
+        "args"
+    ][0]
     assert executor["resources"]["requests"]["ephemeral-storage"] == "8Gi"
     assert executor["resources"]["limits"]["ephemeral-storage"] == "36Gi"
-    assert stage["resources"]["requests"]["ephemeral-storage"] == "1Gi"
-    assert stage["resources"]["limits"]["ephemeral-storage"] == "6Gi"
     assert "adapstory_serp_pipeline" not in json.dumps(executor, sort_keys=True)
     assert "/airflow/xcom" not in {mount["mountPath"] for mount in executor["volumeMounts"]}
     assert "/var/run/docker.sock" not in {mount["mountPath"] for mount in executor["volumeMounts"]}
     assert "/var/run/secrets/kubernetes.io/serviceaccount" not in {
         mount["mountPath"] for mount in executor["volumeMounts"]
-    }
-    assert "/var/run/secrets/kubernetes.io/serviceaccount" not in {
-        mount["mountPath"] for mount in stage["volumeMounts"]
     }
 
 
@@ -9567,10 +9605,11 @@ def test_d19_maps_swe_bench_by_exact_instance_image_repo_and_revision(
 
     def evidence(name: str, digest: str) -> dict[str, str]:
         return {
-            "artifactPath": f"s3://airflow-serp-evidence/serp-evals/op/{name}.json",
-            "artifactSha256": "sha256:" + digest * 64,
-            "artifactVersionId": f"{name}-version",
             "objectLockMode": "COMPLIANCE",
+            "retainUntil": "2027-08-09T10:00:00Z",
+            "s3Uri": f"s3://airflow-serp-evidence/serp-evals/op/{name}.json",
+            "sha256": "sha256:" + digest * 64,
+            "versionId": f"{name}-version",
         }
 
     first_digest = "sha256:" + "1" * 64
@@ -9613,13 +9652,16 @@ def test_d19_maps_swe_bench_by_exact_instance_image_repo_and_revision(
         trusted_runtime_image="harbor.adapstory.com/adapstory/airflow@sha256:" + "d" * 64,
     )
 
-    executors = [item["pod_template_dict"]["spec"]["initContainers"][1] for item in mapped]
+    executors = [item["pod_template_dict"]["spec"]["containers"][1] for item in mapped]
     assert [executor["image"] for executor in executors] == [
         "harbor.adapstory.com/serp/swe-django@" + first_digest,
         "harbor.adapstory.com/serp/swe-pytest@" + second_digest,
     ]
-    assert all(executor["command"] == ["/bin/bash"] for executor in executors)
-    assert all(executor["args"] == ["/sandbox/input/swe_executor.sh"] for executor in executors)
+    assert all(executor["command"] == ["/bin/sh", "-c"] for executor in executors)
+    assert all(
+        "/bin/bash /sandbox/input/swe_executor.sh" in executor["args"][0]
+        for executor in executors
+    )
     assert all("adapstory_serp_pipeline" not in json.dumps(executor) for executor in executors)
     assert all(
         executor["securityContext"]["readOnlyRootFilesystem"] is True for executor in executors
@@ -9674,10 +9716,11 @@ def test_d19_sandbox_fanout_fails_closed_without_exact_inventory(
         "side": "candidate",
         "repetition": 1,
         "workItemSetEvidence": {
-            "artifactPath": "s3://airflow-serp-evidence/serp-evals/op/set.json",
-            "artifactSha256": "sha256:" + "a" * 64,
-            "artifactVersionId": "set-version",
             "objectLockMode": "COMPLIANCE",
+            "retainUntil": "2027-08-09T10:00:00Z",
+            "s3Uri": "s3://airflow-serp-evidence/serp-evals/op/set.json",
+            "sha256": "sha256:" + "a" * 64,
+            "versionId": "set-version",
         },
         "workItems": [
             {
@@ -9687,10 +9730,11 @@ def test_d19_sandbox_fanout_fails_closed_without_exact_inventory(
                 "sandboxImageDigest": image_digest,
                 "sandboxImageReference": "harbor.adapstory.com/serp/ds1000@" + image_digest,
                 "sandboxWorkItemEvidence": {
-                    "artifactPath": "s3://airflow-serp-evidence/serp-evals/op/item.json",
-                    "artifactSha256": "sha256:" + "d" * 64,
-                    "artifactVersionId": "item-version",
                     "objectLockMode": "COMPLIANCE",
+                    "retainUntil": "2027-08-09T10:00:00Z",
+                    "s3Uri": "s3://airflow-serp-evidence/serp-evals/op/item.json",
+                    "sha256": "sha256:" + "d" * 64,
+                    "versionId": "item-version",
                 },
             }
         ],
@@ -9723,10 +9767,11 @@ def test_d19_aggregates_every_mapped_swe_result_into_one_worm_seal_plan(
 
     def evidence(name: str, digest: str) -> dict[str, str]:
         return {
-            "artifactPath": f"s3://airflow-serp-evidence/serp-evals/op/{name}.json",
-            "artifactSha256": "sha256:" + digest * 64,
-            "artifactVersionId": f"{name}-version",
             "objectLockMode": "COMPLIANCE",
+            "retainUntil": "2027-08-09T10:00:00Z",
+            "s3Uri": f"s3://airflow-serp-evidence/serp-evals/op/{name}.json",
+            "sha256": "sha256:" + digest * 64,
+            "versionId": f"{name}-version",
         }
 
     prepared = {
@@ -9781,15 +9826,28 @@ def test_d19_aggregates_every_mapped_swe_result_into_one_worm_seal_plan(
         operation_id: str,
         payload: Mapping[str, Any],
     ) -> dict[str, str]:
-        captured.append(
-            {
+            captured.append(
+                {
                 "artifactPath": artifact_path,
                 "artifactType": artifact_type,
                 "operationId": operation_id,
                 "payload": dict(payload),
             }
-        )
-        return evidence("result-set-plan", "f")
+            )
+            canonical = evidence("result-set-plan", "f")
+            return {
+                "artifactETag": "etag",
+                "artifactPath": canonical["s3Uri"],
+                "artifactSha256": canonical["sha256"],
+                "artifactType": artifact_type,
+                "artifactVersionId": canonical["versionId"],
+                "contractVersion": "AirflowImmutableEvidence/v1",
+                "objectLockMode": canonical["objectLockMode"],
+                "operationId": operation_id,
+                "retainUntil": canonical["retainUntil"],
+                "retentionDays": 365,
+                "status": "sealed",
+            }
 
     monkeypatch.setattr(module, "write_immutable_evidence_snapshot", snapshot_writer)
     plan = {
@@ -9898,10 +9956,11 @@ def test_d19_assembly_plan_seals_exact_canonical_ninety_without_scores(
 
     def evidence(path: str, digest_character: str) -> dict[str, str]:
         return {
-            "artifactPath": f"s3://airflow-serp-evidence/{path}.json",
-            "artifactSha256": "sha256:" + digest_character * 64,
-            "artifactVersionId": f"{path}-version",
             "objectLockMode": "COMPLIANCE",
+            "retainUntil": "2027-08-09T10:00:00Z",
+            "s3Uri": f"s3://airflow-serp-evidence/{path}.json",
+            "sha256": "sha256:" + digest_character * 64,
+            "versionId": f"{path}-version",
         }
 
     captured: list[dict[str, Any]] = []
@@ -9922,8 +9981,17 @@ def test_d19_assembly_plan_seals_exact_canonical_ninety_without_scores(
             }
         )
         return {
-            **evidence("operation/paired-evaluation-assembly-plan", "d"),
+            "artifactETag": "etag",
             "artifactPath": artifact_path,
+            "artifactSha256": "d" * 64,
+            "artifactType": artifact_type,
+            "artifactVersionId": "assembly-version",
+            "contractVersion": "serp-airflow-artifact/v2",
+            "objectLockMode": "COMPLIANCE",
+            "operationId": operation_id,
+            "retainUntil": "2027-08-09T10:00:00Z",
+            "retentionDays": 365,
+            "status": "written",
         }
 
     monkeypatch.setattr(module, "write_immutable_evidence_snapshot", snapshot_writer)
@@ -9937,12 +10005,8 @@ def test_d19_assembly_plan_seals_exact_canonical_ninety_without_scores(
                 "workItemEvidence": evidence(f"operation/work-items/{index}", "a"),
             }
         )
-        run_results.append(
-            {
-                **identity,
-                "receiptEvidence": evidence(f"operation/receipts/{index}", "b"),
-            }
-        )
+        receipt_evidence: dict[str, str] = evidence(f"operation/receipts/{index}", "b")
+        run_results.append({**identity, "receiptEvidence": receipt_evidence})
     plan: dict[str, Any] = {
         "dag_id": "serp_benchmark_improvement_wave",
         "operation_id": "operation",
@@ -9970,7 +10034,83 @@ def test_d19_assembly_plan_seals_exact_canonical_ninety_without_scores(
     assert payload["schema"] == "PairedEvaluationAssemblyPlan/v1"
     assert len(payload["runs"]) == 90
     assert list(payload["runs"][0]) == ["workItemEvidence", "receiptEvidence"]
+    assert payload["runs"][0]["receiptEvidence"]["s3Uri"].endswith(
+        "/operation/receipts/0.json"
+    )
     assert "score" not in json.dumps(payload).casefold()
+
+    preflight_plan = {
+        **plan,
+        "execution_purpose": "critical-path-preflight",
+        "adapter_parity_evidence": _d19_worm_evidence("preflight/parity", "1"),
+        "bc10_route_set_evidence": _d19_worm_evidence("preflight/routes", "2"),
+        "fault_injection_evidence": _d19_worm_evidence("preflight/faults", "3"),
+        "frozen_benchmark_release_evidence": _d19_worm_evidence(
+            "preflight/release", "4"
+        ),
+        "source_sha": "a" * 40,
+        "artifact_paths": {
+            "critical_path_preflight_receipt": (
+                "s3://airflow-serp-evidence/operation/critical-path-preflight-receipt.json"
+            ),
+            "paired_evaluator_dry_run": (
+                "s3://airflow-serp-evidence/operation/paired-evaluator-dry-run.json"
+            ),
+            "preflight_assembly_plan": (
+                "s3://airflow-serp-evidence/operation/preflight-assembly-plan.json"
+            ),
+            "preflight_execution_manifest": (
+                "s3://airflow-serp-evidence/operation/preflight-execution-manifest.json"
+            ),
+            "preflight_progress_snapshot": (
+                "s3://airflow-serp-evidence/operation/preflight-progress-snapshot.json"
+            ),
+        },
+    }
+    preflight_results = [
+        {
+            "suiteId": suite_id,
+            "side": side,
+            "repetition": repetition,
+            "preflightResultEvidence": evidence(f"operation/preflight/{index}", "e"),
+            "telemetryEvidence": evidence(f"operation/telemetry/{index}", "f"),
+        }
+        for index, (suite_id, side, repetition) in enumerate(
+            module.D19_OFFICIAL_HARNESS_WORK_ITEMS
+        )
+    ]
+    preflight_result = module.write_paired_evaluation_assembly_plan(
+        preflight_plan,
+        {"requestEvidence": evidence("operation/paired-eval-request", "c")},
+        {"workItems": work_items},
+        preflight_results,
+    )
+
+    assert preflight_result["executionPurpose"] == "critical-path-preflight"
+    preflight_payload = captured[1]["payload"]
+    assert preflight_payload["schema"] == "SerpCriticalPathPreflightAssemblyPlan/v1"
+    assert preflight_payload["preflightReceiptOutput"].endswith(
+        "/critical-path-preflight-receipt.json"
+    )
+    assert preflight_payload["sourceSha"] == "a" * 40
+    assert preflight_payload["adapterParityEvidence"]["sha256"] == "sha256:" + "1" * 64
+    assert list(preflight_payload["runs"][0]) == [
+        "workItemEvidence",
+        "preflightResultEvidence",
+        "telemetryEvidence",
+    ]
+    assert module.choose_post_assembly_path(preflight_plan) == (
+        "persist_critical_path_preflight_evidence"
+    )
+    handoff = module.persist_critical_path_preflight_evidence(
+        {
+            "criticalPathPreflightEvidence": evidence("operation/preflight-receipt", "9"),
+            "runCount": 90,
+            "status": "ready",
+        }
+    )
+    assert handoff["schema"] == "SerpCriticalPathPreflightHandoff/v1"
+    assert handoff["measurementEligible"] is False
 
 
 def test_d19_assembly_manifest_is_server_owned_and_feeds_only_the_v2_aggregator() -> None:
@@ -9979,7 +10119,8 @@ def test_d19_assembly_manifest_is_server_owned_and_feeds_only_the_v2_aggregator(
     assert "materialize_official_harness_work_items = KubernetesPodOperator(" in source
     assert "assemble_paired_execution_manifest = KubernetesPodOperator(" in source
     assert '"materialize-work-items"' in source
-    assert '"assemble-manifest"' in source
+    assert "'assemble-manifest'" in source
+    assert "'assemble-preflight'" in source
     assert '"--execution-manifest"' in source
     assert '"--execution-manifest-version-id"' in source
     assert '"--execution-manifest-sha256"' in source
