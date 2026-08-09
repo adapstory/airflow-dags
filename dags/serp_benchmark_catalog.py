@@ -533,6 +533,7 @@ def build_live_benchmark_catalog_evidence(
     ]
     | None = None,
     execution_substrate_role_payloads: Mapping[str, Mapping[str, bytes]] | None = None,
+    progress_heartbeat: Callable[..., None] | None = None,
 ) -> dict[str, object]:
     """Fetch and content-address dataset bytes plus legal evidence for every suite.
 
@@ -555,7 +556,8 @@ def build_live_benchmark_catalog_evidence(
         raise ValueError("execution substrate materializer is required")
     authoritative_roles = _validated_external_role_payloads(execution_substrate_role_payloads or {})
     suites: list[dict[str, object]] = []
-    for entry in MANDATORY_BENCHMARK_SUITE_CATALOG:
+    byte_cursor = 0
+    for pass_number, entry in enumerate(MANDATORY_BENCHMARK_SUITE_CATALOG, start=1):
         source_payload = _fetch(entry.dataset_source_url, fetch_bytes)
         license_payload = _fetch(entry.license_evidence_url, fetch_bytes)
         harness_source_archive_payload = _fetch(entry.harness_source_archive_url, fetch_bytes)
@@ -570,6 +572,20 @@ def build_live_benchmark_catalog_evidence(
         ):
             raise ValueError(f"benchmark catalog has invalid dataset source ids: {entry.suite_id}")
         dataset_payloads = {source_id: _fetch(url, fetch_bytes) for source_id, url in source_urls}
+        byte_cursor += sum(
+            len(payload)
+            for payload in (
+                source_payload,
+                license_payload,
+                harness_source_archive_payload,
+                harness_license_payload,
+                *dataset_payloads.values(),
+            )
+        )
+        if progress_heartbeat is not None:
+            progress_heartbeat(
+                phase="source-fetch", pass_number=pass_number, byte_cursor=byte_cursor
+            )
         dataset_snapshots = {
             source_id: _snapshot(
                 entry.suite_id,
@@ -615,6 +631,10 @@ def build_live_benchmark_catalog_evidence(
                 immutable_dataset_snapshots,
             )
         )
+        if progress_heartbeat is not None:
+            progress_heartbeat(
+                phase="native-adapter", pass_number=pass_number, byte_cursor=byte_cursor
+            )
         corpus_blocking_reason: str | None = None
         try:
             corpus_materialization = native_corpus_materializer(
@@ -628,6 +648,7 @@ def build_live_benchmark_catalog_evidence(
                 entry.suite_id,
                 dataset_payloads,
             )
+            byte_cursor += sum(corpus_file.byte_length for corpus_file in corpus_files.values())
         except ValueError as exc:
             corpus_manifest = None
             corpus_files = {}
@@ -642,6 +663,10 @@ def build_live_benchmark_catalog_evidence(
             )
             for source_id, corpus_file in corpus_files.items()
         }
+        if progress_heartbeat is not None:
+            progress_heartbeat(
+                phase="native-corpus", pass_number=pass_number, byte_cursor=byte_cursor
+            )
         execution_substrate_blocking_reason: str | None = None
         execution_substrate_artifacts: dict[str, dict[str, str]] = {}
         if corpus_blocking_reason is None:
@@ -696,6 +721,12 @@ def build_live_benchmark_catalog_evidence(
                 }
             except ValueError as exc:
                 execution_substrate_blocking_reason = f"execution-substrate-unavailable: {exc}"
+        if progress_heartbeat is not None:
+            progress_heartbeat(
+                phase="execution-substrate",
+                pass_number=pass_number,
+                byte_cursor=byte_cursor,
+            )
         if corpus_manifest is not None:
             native_manifest["corpusManifest"] = corpus_manifest
             native_manifest["corpusEvidence"] = [

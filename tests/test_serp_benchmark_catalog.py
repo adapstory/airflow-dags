@@ -342,6 +342,7 @@ def test_catalog_pins_each_upstream_dataset_to_an_immutable_revision() -> None:
 
 
 def test_live_catalog_allows_rights_unverified_internal_runs(tmp_path: Path) -> None:
+    progress: list[dict[str, object]] = []
     payload_by_url = {
         entry.dataset_source_url: f"dataset-source:{entry.suite_id}".encode()
         for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
@@ -372,11 +373,26 @@ def test_live_catalog_allows_rights_unverified_internal_runs(tmp_path: Path) -> 
         native_adapter_materializer=_native_adapter_materializer,
         native_corpus_materializer=_native_corpus_materializer,
         execution_substrate_materializer=_execution_substrate_materializer,
+        progress_heartbeat=lambda **heartbeat: progress.append(heartbeat),
     )
     suites = cast(list[dict[str, Any]], evidence["suites"])
 
     assert evidence["contract_version"] == BENCHMARK_CATALOG_CONTRACT_VERSION
     assert evidence["catalog_status"] == "ready"
+    assert [item["pass_number"] for item in progress] == [
+        pass_number
+        for pass_number in range(1, len(MANDATORY_BENCHMARK_SUITE_CATALOG) + 1)
+        for _ in range(4)
+    ]
+    assert [item["phase"] for item in progress[:4]] == [
+        "source-fetch",
+        "native-adapter",
+        "native-corpus",
+        "execution-substrate",
+    ]
+    assert [int(item["byte_cursor"]) for item in progress] == sorted(
+        int(item["byte_cursor"]) for item in progress
+    )
     assert [item["suite_id"] for item in suites] == list(MANDATORY_SERP_BENCHMARK_SUITES)
     assert all(item["source_snapshot"]["sha256"].startswith("sha256:") for item in suites)
     assert all(item["license_snapshot"]["sha256"].startswith("sha256:") for item in suites)

@@ -6336,6 +6336,7 @@ def materialize_live_benchmark_catalog_artifact(
     | None = None,
     execution_substrate_role_payload_loader: Callable[[], Mapping[str, Mapping[str, bytes]]]
     | None = None,
+    progress_heartbeat: Callable[..., None] | None = None,
 ) -> dict[str, Any]:
     """Capture all upstream benchmark licensing evidence in immutable storage.
 
@@ -6367,6 +6368,19 @@ def materialize_live_benchmark_catalog_artifact(
         if snapshot_file_writer is None
         else snapshot_file_writer
     )
+    progress_cursor = 0
+
+    def emit_catalog_progress(*, phase: str, pass_number: int, byte_cursor: int) -> None:
+        nonlocal progress_cursor
+        if byte_cursor < progress_cursor:
+            raise ValueError("catalog materialization byte cursor regressed")
+        progress_cursor = byte_cursor
+        if progress_heartbeat is not None:
+            progress_heartbeat(
+                phase=phase,
+                pass_number=pass_number,
+                byte_cursor=progress_cursor,
+            )
 
     def snapshot_bytes(
         suite_id: str,
@@ -6409,12 +6423,19 @@ def materialize_live_benchmark_catalog_artifact(
         dataset_snapshots: Mapping[str, Mapping[str, object]],
         output_directory: Path,
     ) -> Mapping[str, object]:
+        corpus_base_cursor = progress_cursor
+        suite_pass = MANDATORY_SERP_BENCHMARK_SUITES.index(suite_id) + 1
         return _native_corpus_materializer(
             suite_id,
             dataset_payloads,
             dataset_snapshots,
             fetch_bytes=resolved_fetch_bytes,
             output_directory=output_directory,
+            progress_callback=lambda relative_cursor: emit_catalog_progress(
+                phase="native-corpus",
+                pass_number=suite_pass,
+                byte_cursor=corpus_base_cursor + relative_cursor,
+            ),
         )
 
     with TemporaryDirectory(prefix="serp-catalog-corpus-") as corpus_directory:
@@ -6444,6 +6465,7 @@ def materialize_live_benchmark_catalog_artifact(
                 if execution_substrate_role_payload_loader is None
                 else execution_substrate_role_payload_loader()
             ),
+            progress_heartbeat=emit_catalog_progress,
         )
     writer = write_immutable_evidence_snapshot if snapshot_writer is None else snapshot_writer
     snapshot = writer(
@@ -6495,6 +6517,7 @@ def _native_corpus_materializer(
     *,
     fetch_bytes: Callable[[str], bytes] | None = None,
     output_directory: Path,
+    progress_callback: Callable[[int], None] | None = None,
 ) -> Mapping[str, object]:
     """Derive a file-backed query-independent corpus inside the isolated workload."""
 
@@ -6516,6 +6539,7 @@ def _native_corpus_materializer(
             plan,
             _bounded_swe_archive_stream(sources, fetch_bytes, max_workers=8),
             output_directory=output_directory,
+            progress_callback=progress_callback,
         )
     else:
         materialization = derive_native_benchmark_corpus(
@@ -6523,6 +6547,7 @@ def _native_corpus_materializer(
             dataset_payloads=dataset_payloads,
             dataset_snapshots=dataset_snapshots,
             output_directory=output_directory,
+            progress_callback=progress_callback,
         )
     return {
         "manifest": dict(materialization.manifest),

@@ -23,6 +23,7 @@ if "airflow.sdk" not in sys.modules:
 
 from dags.serp_benchmark_catalog_materializer import (  # noqa: E402
     materialize_benchmark_catalog_receipt,
+    parse_catalog_materialization_heartbeat,
 )
 from dags.serp_benchmark_catalog_workload import (  # noqa: E402
     BENCHMARK_CATALOG_ACQUISITION_RESOURCES,
@@ -58,8 +59,14 @@ def test_catalog_materializer_seals_catalog_snapshot_in_immutable_receipt() -> N
     }
     captured: dict[str, Any] = {}
 
-    def materializer(observed_plan: Mapping[str, Any] | str) -> dict[str, Any]:
+    def materializer(
+        observed_plan: Mapping[str, Any] | str,
+        *,
+        progress_heartbeat: Any,
+    ) -> dict[str, Any]:
         assert observed_plan == plan
+        progress_heartbeat(phase="source-fetch", pass_number=1, byte_cursor=128)
+        progress_heartbeat(phase="native-corpus", pass_number=1, byte_cursor=128)
         return {
             "artifactPath": plan["artifact_paths"]["benchmark_catalog"],
             "artifactSha256": "a" * 64,
@@ -98,10 +105,29 @@ def test_catalog_materializer_seals_catalog_snapshot_in_immutable_receipt() -> N
             "objectLockMode": "COMPLIANCE",
         }
 
+    # Context: the isolated acquisition job is the only observable pre-pack runtime.
+    # Decision: emit a strict operation-bound phase/pass/byte heartbeat around its work.
+    # Reason: the watchdog must not classify active catalog work as unobservable.
+    # Revisit when: Airflow carries the same contract over a durable event API.
+    emitted: list[dict[str, Any]] = []
     receipt = materialize_benchmark_catalog_receipt(
         plan,
         catalog_materializer=materializer,
         receipt_writer=receipt_writer,
+        heartbeat_writer=lambda heartbeat: emitted.append(dict(heartbeat)),
+    )
+
+    assert [heartbeat["phase"] for heartbeat in emitted] == [
+        "catalog-start",
+        "source-fetch",
+        "native-corpus",
+        "catalog-snapshot",
+        "receipt-snapshot",
+        "complete",
+    ]
+    assert [heartbeat["byteCursor"] for heartbeat in emitted] == [0, 128, 128, 128, 128, 128]
+    assert all(
+        parse_catalog_materialization_heartbeat(heartbeat) == heartbeat for heartbeat in emitted
     )
 
     assert captured == {
