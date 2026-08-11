@@ -13,6 +13,7 @@ from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from email.message import Message
 from hashlib import sha256
+from http.client import IncompleteRead
 from pathlib import Path
 from threading import Barrier
 from typing import Any, ClassVar, cast
@@ -1292,7 +1293,7 @@ def test_catalog_materializer_accepts_dedicated_dataset_evidence_plan() -> None:
     )
 
 
-def test_catalog_materializer_retries_pinned_swe_archive_without_digest_drift(
+def test_catalog_materializer_retries_incomplete_pinned_swe_archive_without_digest_drift(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Context: a transient codeload failure blocked the global all-nine catalog
@@ -1367,6 +1368,8 @@ def test_catalog_materializer_retries_pinned_swe_archive_without_digest_drift(
 
     def materialize_with_archive_fetch(
         archive_fetch: Callable[[str], bytes],
+        *,
+        archive_cache: dict[str, bytes] | None = None,
     ) -> dict[str, object]:
         def corpus_materializer(
             suite_id: str,
@@ -1386,6 +1389,12 @@ def test_catalog_materializer_retries_pinned_swe_archive_without_digest_drift(
                 payloads,
                 snapshots,
                 fetch_bytes=archive_fetch,
+                archive_cache_reader=(
+                    None if archive_cache is None else archive_cache.get
+                ),
+                archive_cache_writer=(
+                    None if archive_cache is None else archive_cache.__setitem__
+                ),
                 output_directory=output_directory,
             )
 
@@ -1406,14 +1415,24 @@ def test_catalog_materializer_retries_pinned_swe_archive_without_digest_drift(
     def transient_archive_fetch(url: str) -> bytes:
         attempts.append(url)
         if len(attempts) == 1:
-            raise ValueError(f"benchmark upstream evidence fetch failed: {url}") from URLError(
-                "temporary codeload failure"
-            )
+            raise IncompleteRead(b"partial pinned archive", len(archive_bytes))
         return archive_bytes
 
     delays: list[float] = []
+    archive_cache: dict[str, bytes] = {}
     monkeypatch.setattr(serp_eval_contracts_module, "sleep", delays.append)
-    recovered = materialize_with_archive_fetch(transient_archive_fetch)
+    recovered = materialize_with_archive_fetch(
+        transient_archive_fetch,
+        archive_cache=archive_cache,
+    )
+
+    def unexpected_upstream_fetch(url: str) -> bytes:
+        raise AssertionError(f"verified pinned archive was not reused: {url}")
+
+    replayed = materialize_with_archive_fetch(
+        unexpected_upstream_fetch,
+        archive_cache=archive_cache,
+    )
 
     assert recovered["catalogStatus"] == "ready"
     assert recovered["blockingSuiteIds"] == []
@@ -1422,7 +1441,9 @@ def test_catalog_materializer_retries_pinned_swe_archive_without_digest_drift(
         "https://codeload.github.com/swe-bench/django__django/tar.gz/" + "a" * 40,
     ]
     assert delays == [0.5]
+    assert list(archive_cache.values()) == [archive_bytes]
     assert recovered["artifactSha256"] == clean["artifactSha256"]
+    assert replayed["artifactSha256"] == clean["artifactSha256"]
 
 
 def test_swe_native_corpus_materializer_fetches_exact_base_commit_without_task_leakage(
@@ -1555,6 +1576,92 @@ def test_swe_archive_fetch_stream_reuses_one_pinned_archive_address() -> None:
         ("source-b", b"same-pinned-archive"),
     ]
     assert sha256(fetched[0][1]).hexdigest() == sha256(fetched[1][1]).hexdigest()
+
+
+def test_swe_archive_worm_cas_reuses_verified_bytes_across_materializer_processes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MissingObject(Exception):
+        response: ClassVar[dict[str, dict[str, str]]] = {
+            "Error": {"Code": "NoSuchKey"}
+        }
+
+    class FakeS3Client:
+        def __init__(self) -> None:
+            self.latest: dict[str, str] = {}
+            self.objects: dict[tuple[str, str], bytes] = {}
+
+        def put_object(
+            self,
+            *,
+            Bucket: str,
+            Key: str,
+            Body: bytes,
+            ContentType: str,
+        ) -> dict[str, str]:
+            assert Bucket == "airflow-serp-evidence"
+            assert ContentType in {"application/gzip", "application/json"}
+            version_id = f"version-{len(self.objects) + 1}"
+            self.latest[Key] = version_id
+            self.objects[(Key, version_id)] = bytes(Body)
+            return {"ETag": f'"etag-{version_id}"', "VersionId": version_id}
+
+        def head_object(
+            self,
+            *,
+            Bucket: str,
+            Key: str,
+            VersionId: str | None = None,
+        ) -> dict[str, object]:
+            assert Bucket == "airflow-serp-evidence"
+            observed_version = VersionId or self.latest.get(Key)
+            if observed_version is None or (Key, observed_version) not in self.objects:
+                raise MissingObject(Key)
+            return {
+                "ContentLength": len(self.objects[(Key, observed_version)]),
+                "ObjectLockMode": "COMPLIANCE",
+                "ObjectLockRetainUntilDate": datetime.now(UTC) + timedelta(days=366),
+                "VersionId": observed_version,
+            }
+
+        def get_object(
+            self,
+            *,
+            Bucket: str,
+            Key: str,
+            VersionId: str,
+        ) -> dict[str, object]:
+            assert Bucket == "airflow-serp-evidence"
+            return {"Body": io.BytesIO(self.objects[(Key, VersionId)])}
+
+    monkeypatch.setenv("ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS", "365")
+    client = FakeS3Client()
+    archive_url = (
+        "https://codeload.github.com/swe-bench/django__django/tar.gz/" + "a" * 40
+    )
+    archive_bytes = b"exact pinned archive bytes"
+    first_reader, first_writer = serp_eval_contracts_module._worm_swe_archive_cache(
+        "s3://airflow-serp-evidence/serp-evals/operation-1",
+        operation_id="operation-1",
+        s3_client=client,
+    )
+
+    assert first_reader(archive_url) is None
+    first_writer(archive_url, archive_bytes)
+
+    retry_reader, _ = serp_eval_contracts_module._worm_swe_archive_cache(
+        "s3://airflow-serp-evidence/serp-evals/operation-1",
+        operation_id="operation-1",
+        s3_client=client,
+    )
+    assert retry_reader(archive_url) == archive_bytes
+    assert len(client.objects) == 2
+
+    blob_key = next(key for key in client.latest if "/blobs/sha256:" in key)
+    blob_version = client.latest[blob_key]
+    client.objects[(blob_key, blob_version)] = b"corrupt bytes"
+    with pytest.raises(ValueError, match="SHA-256 does not match"):
+        retry_reader(archive_url)
 
 
 def test_swe_archive_fetch_stream_exhausts_bounded_transport_retries(

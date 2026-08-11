@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from hashlib import sha256
+from http.client import IncompleteRead
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from time import perf_counter, sleep
@@ -82,6 +83,8 @@ MANDATORY_SERP_BENCHMARK_SUITES = (
 _D19_CODE_SANDBOX_SUITES = frozenset({"CodeRAG-Bench", "SWE-bench Verified"})
 _SWE_ARCHIVE_FETCH_BACKOFF_SECONDS = (0.5, 1.0)
 _SWE_ARCHIVE_RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
+_SWE_ARCHIVE_CACHE_ENTRY_SCHEMA = "SWEArchiveCacheEntry/v1"
+_SWE_ARCHIVE_CACHE_ENTRY_MAX_BYTES = 16 * 1024
 SERP_NORMALIZED_GATE_FLOOR = 0.90
 GATEWAY_CLI_MODULE = "adapstory_serp_mcp_gateway.airflow_eval_cli"
 GATEWAY_CLI_PYTHON = "python"
@@ -6411,6 +6414,9 @@ def materialize_live_benchmark_catalog_artifact(
         else snapshot_file_writer
     )
     progress_cursor = 0
+    swe_archive_cache: tuple[
+        Callable[[str], bytes | None], Callable[[str, bytes], None]
+    ] | None = None
 
     def emit_catalog_progress(*, phase: str, pass_number: int, byte_cursor: int) -> None:
         nonlocal progress_cursor
@@ -6465,13 +6471,25 @@ def materialize_live_benchmark_catalog_artifact(
         dataset_snapshots: Mapping[str, Mapping[str, object]],
         output_directory: Path,
     ) -> Mapping[str, object]:
+        nonlocal swe_archive_cache
         corpus_base_cursor = progress_cursor
         suite_pass = MANDATORY_SERP_BENCHMARK_SUITES.index(suite_id) + 1
+        if suite_id == "SWE-bench Verified" and swe_archive_cache is None:
+            swe_archive_cache = _worm_swe_archive_cache(
+                artifact_root_path,
+                operation_id=_required_str(plan, "operation_id"),
+            )
         return _native_corpus_materializer(
             suite_id,
             dataset_payloads,
             dataset_snapshots,
             fetch_bytes=resolved_fetch_bytes,
+            archive_cache_reader=(
+                None if swe_archive_cache is None else swe_archive_cache[0]
+            ),
+            archive_cache_writer=(
+                None if swe_archive_cache is None else swe_archive_cache[1]
+            ),
             output_directory=output_directory,
             progress_callback=lambda relative_cursor: emit_catalog_progress(
                 phase="native-corpus",
@@ -6558,6 +6576,8 @@ def _native_corpus_materializer(
     dataset_snapshots: Mapping[str, Mapping[str, object]],
     *,
     fetch_bytes: Callable[[str], bytes] | None = None,
+    archive_cache_reader: Callable[[str], bytes | None] | None = None,
+    archive_cache_writer: Callable[[str, bytes], None] | None = None,
     output_directory: Path,
     progress_callback: Callable[[int], None] | None = None,
 ) -> Mapping[str, object]:
@@ -6579,7 +6599,13 @@ def _native_corpus_materializer(
 
         materialization = derive_swe_corpus_from_archive_stream(
             plan,
-            _bounded_swe_archive_stream(sources, fetch_bytes, max_workers=8),
+            _bounded_swe_archive_stream(
+                sources,
+                fetch_bytes,
+                max_workers=8,
+                archive_cache_reader=archive_cache_reader,
+                archive_cache_writer=archive_cache_writer,
+            ),
             output_directory=output_directory,
             progress_callback=progress_callback,
         )
@@ -6602,6 +6628,8 @@ def _bounded_swe_archive_stream(
     fetch_bytes: Callable[[str], bytes],
     *,
     max_workers: int,
+    archive_cache_reader: Callable[[str], bytes | None] | None = None,
+    archive_cache_writer: Callable[[str, bytes], None] | None = None,
 ) -> Iterable[tuple[str, bytes]]:
     """Fetch exact SWE archives with retry and a consumer-owned sliding window."""
 
@@ -6627,6 +6655,12 @@ def _bounded_swe_archive_stream(
         source_ids_by_archive_url.setdefault(archive_url, []).append(source_id)
 
     def fetch_archive(archive_url: str) -> tuple[str, bytes]:
+        if archive_cache_reader is not None:
+            cached_archive = archive_cache_reader(archive_url)
+            if cached_archive is not None:
+                if not isinstance(cached_archive, bytes) or not cached_archive:
+                    raise ValueError("SWE corpus cached commit archive is invalid")
+                return archive_url, cached_archive
         archive: bytes | None = None
         for attempt in range(len(_SWE_ARCHIVE_FETCH_BACKOFF_SECONDS) + 1):
             try:
@@ -6641,6 +6675,8 @@ def _bounded_swe_archive_stream(
                 sleep(_SWE_ARCHIVE_FETCH_BACKOFF_SECONDS[attempt])
         if not isinstance(archive, bytes) or not archive:
             raise ValueError("SWE corpus commit archive fetch returned no bytes")
+        if archive_cache_writer is not None:
+            archive_cache_writer(archive_url, archive)
         return archive_url, archive
 
     archive_urls = tuple(source_ids_by_archive_url)
@@ -6671,10 +6707,106 @@ def _is_retryable_swe_archive_fetch_error(error: Exception) -> bool:
         visited.add(id(current))
         if isinstance(current, HTTPError):
             return current.code in _SWE_ARCHIVE_RETRYABLE_HTTP_STATUS_CODES
-        if isinstance(current, URLError | OSError):
+        if isinstance(current, IncompleteRead | URLError | OSError):
             return True
         current = current.__cause__ or current.__context__
     return False
+
+
+def _worm_swe_archive_cache(
+    artifact_root_path: str,
+    *,
+    operation_id: str,
+    s3_client: Any | None = None,
+) -> tuple[Callable[[str], bytes | None], Callable[[str, bytes], None]]:
+    """Return a WORM CAS shared by every retry of one catalog operation."""
+
+    cache_root = f"{artifact_root_path}/benchmark-catalog-inputs/swe-archive-cas/v1"
+    client = s3_client or _s3_client(cache_root)
+
+    def cache_entry_path(archive_url: str) -> str:
+        coordinate_digest = sha256(archive_url.encode("utf-8")).hexdigest()
+        return f"{cache_root}/coordinates/{coordinate_digest}.json"
+
+    def read(archive_url: str) -> bytes | None:
+        entry_path = cache_entry_path(archive_url)
+        try:
+            entry_bytes, _, _ = _read_compliance_locked_s3_bytes(
+                client,
+                entry_path,
+                field_name="SWE archive cache entry",
+                max_bytes=_SWE_ARCHIVE_CACHE_ENTRY_MAX_BYTES,
+            )
+        except Exception as exc:
+            if _is_s3_missing_object(exc):
+                return None
+            raise ValueError("SWE archive cache entry is not readable") from exc
+        entry = _canonical_json_object_bytes(entry_bytes, "SWE archive cache entry")
+        expected_fields = {"archiveSha256", "archiveSnapshot", "archiveUrl", "schema"}
+        if set(entry) != expected_fields or entry.get("schema") != _SWE_ARCHIVE_CACHE_ENTRY_SCHEMA:
+            raise ValueError("SWE archive cache entry has an invalid shape/schema")
+        if _required_str(entry, "archiveUrl") != archive_url:
+            raise ValueError("SWE archive cache entry coordinate does not match request")
+        archive_sha256 = _required_str(entry, "archiveSha256")
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", archive_sha256) is None:
+            raise ValueError("SWE archive cache entry SHA-256 is invalid")
+        archive_snapshot = _required_mapping(entry, "archiveSnapshot")
+        expected_blob_path = f"{cache_root}/blobs/{archive_sha256}.tar.gz"
+        if _required_str(archive_snapshot, "artifactPath") != expected_blob_path:
+            raise ValueError("SWE archive cache blob path is not content-addressed")
+        if _required_str(archive_snapshot, "objectLockMode") != "COMPLIANCE":
+            raise ValueError("SWE archive cache blob must use COMPLIANCE retention")
+        archive, observed_version_id, _ = _read_compliance_locked_s3_bytes(
+            client,
+            expected_blob_path,
+            field_name="SWE archive cache blob",
+            version_id=_required_str(archive_snapshot, "artifactVersionId"),
+        )
+        if observed_version_id != _required_str(archive_snapshot, "artifactVersionId"):
+            raise ValueError("SWE archive cache blob version does not match entry")
+        if "sha256:" + sha256(archive).hexdigest() != archive_sha256:
+            raise ValueError("SWE archive cache blob SHA-256 does not match entry")
+        return archive
+
+    def write(archive_url: str, archive: bytes) -> None:
+        if not isinstance(archive, bytes) or not archive:
+            raise ValueError("SWE archive cache refuses empty bytes")
+        archive_sha256 = "sha256:" + sha256(archive).hexdigest()
+        blob_path = f"{cache_root}/blobs/{archive_sha256}.tar.gz"
+        blob_snapshot = write_immutable_evidence_bytes_snapshot(
+            blob_path,
+            artifact_type="swe_commit_archive_cache_blob",
+            operation_id=operation_id,
+            payload=archive,
+            content_type="application/gzip",
+            s3_client=client,
+        )
+        if (
+            _required_str(blob_snapshot, "artifactPath") != blob_path
+            or "sha256:" + _required_str(blob_snapshot, "artifactSha256") != archive_sha256
+            or _required_str(blob_snapshot, "objectLockMode") != "COMPLIANCE"
+        ):
+            raise ValueError("SWE archive cache blob snapshot is invalid")
+        write_immutable_evidence_snapshot(
+            cache_entry_path(archive_url),
+            artifact_type="swe_commit_archive_cache_entry",
+            operation_id=operation_id,
+            payload={
+                "archiveSha256": archive_sha256,
+                "archiveSnapshot": {
+                    "artifactPath": blob_path,
+                    "artifactVersionId": _required_str(
+                        blob_snapshot, "artifactVersionId"
+                    ),
+                    "objectLockMode": "COMPLIANCE",
+                },
+                "archiveUrl": archive_url,
+                "schema": _SWE_ARCHIVE_CACHE_ENTRY_SCHEMA,
+            },
+            s3_client=client,
+        )
+
+    return read, write
 
 
 def _swe_commit_archive_url(source: Mapping[str, Any]) -> str:
