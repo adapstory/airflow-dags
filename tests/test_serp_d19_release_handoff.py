@@ -63,6 +63,16 @@ def _pointer(status: str = "accepted") -> dict[str, Any]:
 def test_canary_outbox_advances_the_next_run_only_after_exact_qualification() -> None:
     writes: list[tuple[str, dict[str, Any]]] = []
 
+    def writer(path: str, payload: dict[str, Any]) -> dict[str, str]:
+        writes.append((path, payload))
+        return {
+            "artifactPath": path,
+            "artifactVersionId": "outbox-version",
+            "artifactSha256": "sha256:" + "3" * 64,
+            "objectLockMode": "COMPLIANCE",
+            "retainUntil": "2027-08-08T12:00:00Z",
+        }
+
     result = build_terminal_outbox(
         ownership=_ownership(),
         current_run_id="run-0",
@@ -70,14 +80,7 @@ def test_canary_outbox_advances_the_next_run_only_after_exact_qualification() ->
         canary_qualification={"suiteCount": 9, "packCount": 18, "workItemCount": 90},
         observed_at=datetime(2026, 8, 8, 8, 0, tzinfo=UTC),
         artifact_root_path="s3://airflow-serp-evidence/serp-evals/op",
-        writer=lambda path, payload: writes.append((path, payload))
-        or {
-            "artifactPath": path,
-            "artifactVersionId": "outbox-version",
-            "artifactSha256": "sha256:" + "3" * 64,
-            "objectLockMode": "COMPLIANCE",
-            "retainUntil": "2027-08-08T12:00:00Z",
-        },
+        writer=writer,
     )
 
     assert writes[0][1]["schema"] == D19_TERMINAL_OUTBOX_SCHEMA

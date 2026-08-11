@@ -9,7 +9,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 import pytest
 
@@ -110,7 +110,7 @@ def _isolated_airflow_logging_module() -> Iterator[tuple[ModuleType, ModuleType]
     airflow = ModuleType("airflow")
     config_templates = ModuleType("airflow.config_templates")
     local_settings = ModuleType("airflow.config_templates.airflow_local_settings")
-    local_settings.DEFAULT_LOGGING_CONFIG = {
+    cast(Any, local_settings).DEFAULT_LOGGING_CONFIG = {
         "handlers": {
             "task": {
                 "class": "airflow.utils.log.file_task_handler.FileTaskHandler",
@@ -121,7 +121,7 @@ def _isolated_airflow_logging_module() -> Iterator[tuple[ModuleType, ModuleType]
     airflow_utils = ModuleType("airflow.utils")
     airflow_log = ModuleType("airflow.utils.log")
     file_task_handler = ModuleType("airflow.utils.log.file_task_handler")
-    file_task_handler.FileTaskHandler = FakeFileTaskHandler
+    cast(Any, file_task_handler).FileTaskHandler = FakeFileTaskHandler
     sys.modules.update(
         {
             "airflow": airflow,

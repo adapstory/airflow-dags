@@ -23,7 +23,10 @@ def main() -> int:
     if encoded_spec is None or not encoded_spec.strip():
         raise ValueError(f"{PIPELINE_CLI_SPEC_ENV} is required")
     spec = _json_object(unquote(encoded_spec), PIPELINE_CLI_SPEC_ENV)
-    if _required_token(spec.get("contract_version"), "contract_version") != PIPELINE_CLI_CONTRACT_VERSION:
+    if (
+        _required_token(spec.get("contract_version"), "contract_version")
+        != PIPELINE_CLI_CONTRACT_VERSION
+    ):
         raise ValueError("qdrant embedding remote runner cli spec contract version is unsupported")
     if _required_token(spec.get("dag_id"), "dag_id") != _DAG_ID:
         raise ValueError("qdrant embedding remote runner dag_id is unsupported")
@@ -37,30 +40,51 @@ def main() -> int:
     receipt_path = _required_s3_uri(spec.get("receipt_uri"), "receipt_uri")
     supplied_receipt_path = _required_cli_option_value(argv, "--receipt-uri")
     if supplied_receipt_path != receipt_path:
-        raise ValueError("qdrant embedding remote runner must pass the canonical receipt URI to CLI")
+        raise ValueError(
+            "qdrant embedding remote runner must pass the canonical receipt URI to CLI"
+        )
     plan_evidence = _validated_evidence_handle(spec.get("plan_evidence"), "plan_evidence")
     input_paths = _required_str_list(spec.get("input_paths"), "input_paths")
     if input_paths != [plan_evidence["s3Uri"]]:
-        raise ValueError("qdrant embedding remote runner input_paths must reference exact plan evidence")
+        raise ValueError(
+            "qdrant embedding remote runner input_paths must reference exact plan evidence"
+        )
     s3_client = _operation_prefix_read_s3_client(
         artifact_uris=(plan_evidence["s3Uri"], receipt_path)
     )
     plan_payload = _read_json_artifact(plan_evidence["s3Uri"], s3_client=s3_client)
-    if "sha256:" + sha256(_canonical_json(plan_payload).encode("utf-8")).hexdigest() != plan_evidence["sha256"]:
+    if (
+        "sha256:" + sha256(_canonical_json(plan_payload).encode("utf-8")).hexdigest()
+        != plan_evidence["sha256"]
+    ):
         raise ValueError("qdrant embedding remote runner plan evidence digest does not match")
-    if _required_token(plan_payload.get("operation_id"), "operation_id") != _required_token(spec.get("operation_id"), "operation_id"):
-        raise ValueError("qdrant embedding remote runner operation_id does not match the immutable plan")
-    if _required_token(plan_payload.get("source_collection"), "source_collection") != _required_cli_option_value(argv, "--source-collection"):
-        raise ValueError("qdrant embedding remote runner source_collection does not match the immutable plan")
-    if _required_token(plan_payload.get("target_collection"), "target_collection") != _required_cli_option_value(argv, "--target-collection"):
-        raise ValueError("qdrant embedding remote runner target_collection does not match the immutable plan")
+    if _required_token(plan_payload.get("operation_id"), "operation_id") != _required_token(
+        spec.get("operation_id"), "operation_id"
+    ):
+        raise ValueError(
+            "qdrant embedding remote runner operation_id does not match the immutable plan"
+        )
+    if _required_token(
+        plan_payload.get("source_collection"), "source_collection"
+    ) != _required_cli_option_value(argv, "--source-collection"):
+        raise ValueError(
+            "qdrant embedding remote runner source_collection does not match the immutable plan"
+        )
+    if _required_token(
+        plan_payload.get("target_collection"), "target_collection"
+    ) != _required_cli_option_value(argv, "--target-collection"):
+        raise ValueError(
+            "qdrant embedding remote runner target_collection does not match the immutable plan"
+        )
     plan_receipt_path = plan_payload.get("receipt_uri")
     if plan_receipt_path is None:
         artifact_paths = plan_payload.get("artifact_paths")
         if isinstance(artifact_paths, Mapping):
             plan_receipt_path = artifact_paths.get("backfill_receipt")
     if _required_s3_uri(plan_receipt_path, "receipt_uri") != receipt_path:
-        raise ValueError("qdrant embedding remote runner receipt_uri does not match the immutable plan")
+        raise ValueError(
+            "qdrant embedding remote runner receipt_uri does not match the immutable plan"
+        )
 
     completed = subprocess.run(argv, capture_output=True, check=False, text=True)
     if completed.returncode != 0:
@@ -73,7 +97,9 @@ def main() -> int:
     stdout_payload = _json_object(completed.stdout, "pipeline_cli_stdout")
     receipt_payload = _read_json_artifact(receipt_path, s3_client=s3_client)
     if stdout_payload != receipt_payload:
-        raise ValueError("qdrant embedding remote runner stdout does not match the canonical receipt")
+        raise ValueError(
+            "qdrant embedding remote runner stdout does not match the canonical receipt"
+        )
     return 0
 
 

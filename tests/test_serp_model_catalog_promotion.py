@@ -6,7 +6,6 @@ from test_serp_evaluation_release_v3 import (  # noqa: F401
     test_d17_rejects_ci_v5_bundle_without_compatibility_fallback,
     test_d17_rejects_component_evidence_tampering,
     test_d17_rejects_noncanonical_release_bytes_even_when_digest_matches,
-    test_d17_uses_a_read_only_session_for_the_exact_ci_release_operation,
     test_d19_builds_scoreless_reference_only_paired_request_v5,
     test_d19_rejects_duplicate_promotion_member_even_when_digest_matches,
     test_d19_rejects_inline_selection_or_scoring_fields,

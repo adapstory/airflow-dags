@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import importlib
 import json
 import os
@@ -147,8 +146,8 @@ def test_snapshot_final_receipt_writes_immutable_evidence_from_canonical_receipt
         "completed": True,
     }
     receipt_bytes = _canonical_json(receipt_payload).encode("utf-8")
-    receipt_bucket, receipt_key = plan["artifact_paths"]["backfill_receipt"].removeprefix("s3://").split(
-        "/", 1
+    receipt_bucket, receipt_key = (
+        plan["artifact_paths"]["backfill_receipt"].removeprefix("s3://").split("/", 1)
     )
     storage = {(receipt_bucket, receipt_key): receipt_bytes}
     monkeypatch.setattr(
@@ -163,7 +162,9 @@ def test_snapshot_final_receipt_writes_immutable_evidence_from_canonical_receipt
     )
 
     assert receipt_handle["artifactType"] == "qdrant_embedding_backfill_receipt"
-    assert receipt_handle["evidence"]["s3Uri"] == plan["artifact_paths"]["backfill_receipt_evidence"]
+    assert (
+        receipt_handle["evidence"]["s3Uri"] == plan["artifact_paths"]["backfill_receipt_evidence"]
+    )
     assert receipt_handle["summary"] == {
         "completed": True,
         "processedPointCount": 482910,
@@ -174,7 +175,7 @@ def test_snapshot_final_receipt_writes_immutable_evidence_from_canonical_receipt
 def test_remote_runner_passes_canonical_s3_receipt_uri_to_cli(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    plan_payload = {
+    plan_payload: dict[str, Any] = {
         "artifact_paths": {
             "backfill_plan": "s3://airflow-serp-evidence/serp-evals/qdrant-embedding-backfill-001/qdrant-embedding-backfill-plan.json",
             "backfill_receipt": "s3://airflow-serp-evidence/serp-evals/qdrant-embedding-backfill-001/qdrant-embedding-backfill-receipt.json",
@@ -205,8 +206,14 @@ def test_remote_runner_passes_canonical_s3_receipt_uri_to_cli(
     receipt_bytes = _canonical_json(receipt_payload).encode("utf-8")
     receipt_path = plan_payload["artifact_paths"]["backfill_receipt"]
     storage = {
-        ("airflow-serp-evidence", "serp-evals/qdrant-embedding-backfill-001/qdrant-embedding-backfill-plan.json"): plan_bytes,
-        ("airflow-serp-evidence", "serp-evals/qdrant-embedding-backfill-001/qdrant-embedding-backfill-receipt.json"): receipt_bytes,
+        (
+            "airflow-serp-evidence",
+            "serp-evals/qdrant-embedding-backfill-001/qdrant-embedding-backfill-plan.json",
+        ): plan_bytes,
+        (
+            "airflow-serp-evidence",
+            "serp-evals/qdrant-embedding-backfill-001/qdrant-embedding-backfill-receipt.json",
+        ): receipt_bytes,
     }
     spec = {
         "argv": [
@@ -259,7 +266,7 @@ def test_remote_runner_passes_canonical_s3_receipt_uri_to_cli(
 def test_remote_runner_rejects_noncanonical_receipt_uri(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    plan_payload = {
+    plan_payload: dict[str, Any] = {
         "artifact_paths": {
             "backfill_plan": "s3://airflow-serp-evidence/serp-evals/qdrant-embedding-backfill-001/qdrant-embedding-backfill-plan.json",
             "backfill_receipt": "s3://airflow-serp-evidence/serp-evals/qdrant-embedding-backfill-001/qdrant-embedding-backfill-receipt.json",
@@ -278,7 +285,10 @@ def test_remote_runner_rejects_noncanonical_receipt_uri(
         "versionId": "plan-version-7",
     }
     storage = {
-        ("airflow-serp-evidence", "serp-evals/qdrant-embedding-backfill-001/qdrant-embedding-backfill-plan.json"): plan_bytes,
+        (
+            "airflow-serp-evidence",
+            "serp-evals/qdrant-embedding-backfill-001/qdrant-embedding-backfill-plan.json",
+        ): plan_bytes,
     }
     monkeypatch.setenv(
         remote_runner.PIPELINE_CLI_SPEC_ENV,
@@ -326,7 +336,7 @@ def test_dag_source_uses_single_runner_with_kubernetes_reliability_contracts() -
     assert "max_active_runs=1" in source
     assert "reattach_on_restart=True" in source
     assert 'on_kill_action="keep_pod"' in source
-    assert 'schedule=None' in source
+    assert "schedule=None" in source
     assert "TriggerDagRunOperator" not in source
 
 
@@ -349,8 +359,7 @@ def test_evidence_tasks_use_dedicated_minio_identity_while_kpo_keeps_launcher_au
     run_config = module.run_qdrant_embedding_backfill.kwargs["executor_config"]
     assert run_config == {"pod_launcher": True}
     child_env_names = {
-        item.kwargs["name"]
-        for item in module.run_qdrant_embedding_backfill.kwargs["env_vars"]
+        item.kwargs["name"] for item in module.run_qdrant_embedding_backfill.kwargs["env_vars"]
     }
     assert {
         "ADAPSTORY_SERP_EMBEDDING_BATCH_SIZE",
@@ -437,9 +446,9 @@ def _load_migration_module(monkeypatch: pytest.MonkeyPatch) -> Any:
     }
     cast(Any, modules["airflow.configuration"]).conf = FakeConf()
     cast(Any, modules["airflow.providers.standard.operators.python"]).PythonOperator = FakeOperator
-    cast(Any, modules["airflow.providers.cncf.kubernetes.operators.pod"]).KubernetesPodOperator = (
-        FakeOperator
-    )
+    cast(
+        Any, modules["airflow.providers.cncf.kubernetes.operators.pod"]
+    ).KubernetesPodOperator = FakeOperator
     cast(Any, modules["airflow.sdk"]).DAG = FakeDAG
     for attr in (
         "V1Capabilities",
@@ -470,22 +479,25 @@ def _load_migration_module(monkeypatch: pytest.MonkeyPatch) -> Any:
 
 def _fake_workload_identity_module() -> types.ModuleType:
     module = types.ModuleType("dags.serp_evidence_workload_identity")
-    module.bc10_workload_env_vars = lambda: [SimpleNamespace(kwargs={"name": "ADAPSTORY_BC10_TOKEN_PATH", "value": "/token"})]
-    module.bc10_workload_volume_mounts = lambda: [SimpleNamespace(kwargs={"name": "bc10"})]
-    module.bc10_workload_volumes = lambda: [SimpleNamespace(kwargs={"name": "bc10"})]
-    module.kubernetes_pod_launcher_executor_config = lambda: {"pod_launcher": True}
-    module.minio_web_identity_executor_config = (
-        lambda *, service_account_name, labels: {
-            "minio_identity": service_account_name,
-            "labels": labels,
-        }
-    )
-    module.minio_web_identity_env_vars = lambda names: [
+    dynamic_module = cast(Any, module)
+    dynamic_module.bc10_workload_env_vars = lambda: [
+        SimpleNamespace(kwargs={"name": "ADAPSTORY_BC10_TOKEN_PATH", "value": "/token"})
+    ]
+    dynamic_module.bc10_workload_volume_mounts = lambda: [SimpleNamespace(kwargs={"name": "bc10"})]
+    dynamic_module.bc10_workload_volumes = lambda: [SimpleNamespace(kwargs={"name": "bc10"})]
+    dynamic_module.kubernetes_pod_launcher_executor_config = lambda: {"pod_launcher": True}
+    dynamic_module.minio_web_identity_executor_config = lambda *, service_account_name, labels: {
+        "minio_identity": service_account_name,
+        "labels": labels,
+    }
+    dynamic_module.minio_web_identity_env_vars = lambda names: [
         SimpleNamespace(kwargs={"name": name, "value": "value"}) for name in names
     ]
-    module.minio_web_identity_volume_mounts = lambda: [SimpleNamespace(kwargs={"name": "minio"})]
-    module.minio_web_identity_volumes = lambda: [SimpleNamespace(kwargs={"name": "minio"})]
-    module.operation_prefix_read_s3_client = lambda *, artifact_uris: _FakeS3Client({})
+    dynamic_module.minio_web_identity_volume_mounts = lambda: [
+        SimpleNamespace(kwargs={"name": "minio"})
+    ]
+    dynamic_module.minio_web_identity_volumes = lambda: [SimpleNamespace(kwargs={"name": "minio"})]
+    dynamic_module.operation_prefix_read_s3_client = lambda *, artifact_uris: _FakeS3Client({})
     return module
 
 

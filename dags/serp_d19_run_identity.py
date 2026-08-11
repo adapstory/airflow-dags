@@ -26,9 +26,9 @@ def normalize_d19_run_type(*, run_id: str, run_type: str) -> str:
     # deterministic run-id family and an explicit migration of all producers.
     if run_id.startswith(_OPERATOR_TRIGGERED_RUN_ID_PREFIXES):
         expected_run_type = "operator_triggered"
-    elif run_id.startswith(
-        _MANUAL_RUN_ID_PREFIX
-    ) or _AUTHENTICATED_BOOTSTRAP_RUN_ID.fullmatch(run_id):
+    elif run_id.startswith(_MANUAL_RUN_ID_PREFIX) or _AUTHENTICATED_BOOTSTRAP_RUN_ID.fullmatch(
+        run_id
+    ):
         expected_run_type = "manual"
     else:
         raise ValueError("D19 airflowRun runId and runType provenance is unsupported")

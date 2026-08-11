@@ -4,6 +4,7 @@ import importlib
 import sys
 from datetime import UTC, datetime, timedelta
 from types import ModuleType, SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from kubernetes.client.rest import ApiException
@@ -49,10 +50,10 @@ def _install_airflow_job_operator_stub(monkeypatch: pytest.MonkeyPatch) -> type[
         "airflow.providers.common.compat": ModuleType("airflow.providers.common.compat"),
         "airflow.providers.common.compat.sdk": ModuleType("airflow.providers.common.compat.sdk"),
     }
-    modules[
-        "airflow.providers.cncf.kubernetes.operators.job"
-    ].KubernetesJobOperator = KubernetesJobOperator
-    modules["airflow.providers.common.compat.sdk"].AirflowException = AirflowException
+    cast(
+        Any, modules["airflow.providers.cncf.kubernetes.operators.job"]
+    ).KubernetesJobOperator = KubernetesJobOperator
+    cast(Any, modules["airflow.providers.common.compat.sdk"]).AirflowException = AirflowException
     for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)
     return AirflowException

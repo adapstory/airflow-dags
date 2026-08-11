@@ -6,7 +6,7 @@ import re
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
-from typing import Any, cast
+from typing import Any
 
 from airflow.configuration import conf
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
@@ -24,6 +24,8 @@ from dags.serp_evidence_workload_identity import (
     minio_web_identity_executor_config,
     minio_web_identity_volume_mounts,
     minio_web_identity_volumes,
+)
+from dags.serp_evidence_workload_identity import (
     operation_prefix_read_s3_client as _operation_prefix_read_s3_client,
 )
 
@@ -136,7 +138,7 @@ def validate_qdrant_embedding_migration_plan(**context: Any) -> dict[str, Any]:
     logical_date = getattr(dag_run, "logical_date", None)
     if not isinstance(logical_date, datetime):
         raise ValueError("Airflow dag_run.logical_date is required")
-    run_identity = sha256(f"{DAG_ID}\0{run_id}".encode("utf-8")).hexdigest()
+    run_identity = sha256(f"{DAG_ID}\0{run_id}".encode()).hexdigest()
     conf_value = dict(raw_conf)
     conf_value.setdefault(
         "generated_at",
@@ -165,25 +167,32 @@ def validate_qdrant_embedding_migration_conf(conf_value: Mapping[str, Any]) -> d
     if unknown:
         raise ValueError(f"unsupported qdrant embedding migration config fields: {sorted(unknown)}")
     shortcut_fields = [
-        field_name for field_name in _THRESHOLD_SHORTCUT_FIELDS if conf_value.get(field_name) is not None
+        field_name
+        for field_name in _THRESHOLD_SHORTCUT_FIELDS
+        if conf_value.get(field_name) is not None
     ]
     if shortcut_fields:
         raise ValueError(
             "threshold shortcut fields are forbidden; use exact parity receipt gating instead"
         )
     generated_at = _required_datetime_string(
-        conf_value.get("generated_at")
-        or datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        conf_value.get("generated_at") or datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "generated_at",
     )
     artifact_root_path = _required_s3_uri(
-        str(conf_value.get("artifact_root_path") or os.environ.get("ADAPSTORY_AIRFLOW_ARTIFACT_ROOT") or ""),
+        str(
+            conf_value.get("artifact_root_path")
+            or os.environ.get("ADAPSTORY_AIRFLOW_ARTIFACT_ROOT")
+            or ""
+        ),
         "artifact_root_path",
     ).rstrip("/")
     source_collection = _required_token(conf_value.get("source_collection"), "source_collection")
     target_collection = _required_token(conf_value.get("target_collection"), "target_collection")
     if _VERSIONED_COLLECTION_RE.fullmatch(source_collection):
-        raise ValueError("source_collection must stay a physical source collection, not a versioned target")
+        raise ValueError(
+            "source_collection must stay a physical source collection, not a versioned target"
+        )
     if source_collection == target_collection:
         raise ValueError("source_collection and target_collection must differ")
     if not _VERSIONED_COLLECTION_RE.fullmatch(target_collection):
@@ -308,15 +317,26 @@ def snapshot_qdrant_embedding_backfill_receipt_from_snapshot(
         artifact_uris=(plan["artifact_paths"]["backfill_plan"], receipt_path)
     )
     receipt_payload = _read_json_artifact(receipt_path, s3_client=s3_client)
-    if _required_token(receipt_payload.get("source_collection"), "source_collection") != plan["source_collection"]:
+    if (
+        _required_token(receipt_payload.get("source_collection"), "source_collection")
+        != plan["source_collection"]
+    ):
         raise ValueError("backfill receipt source_collection does not match the immutable plan")
-    if _required_token(receipt_payload.get("target_collection"), "target_collection") != plan["target_collection"]:
+    if (
+        _required_token(receipt_payload.get("target_collection"), "target_collection")
+        != plan["target_collection"]
+    ):
         raise ValueError("backfill receipt target_collection does not match the immutable plan")
-    if _required_embedding_profile_version(
-        receipt_payload.get("embedding_profile_version"),
-        "embedding_profile_version",
-    ) != plan["embedding_profile_version"]:
-        raise ValueError("backfill receipt embedding_profile_version does not match the immutable plan")
+    if (
+        _required_embedding_profile_version(
+            receipt_payload.get("embedding_profile_version"),
+            "embedding_profile_version",
+        )
+        != plan["embedding_profile_version"]
+    ):
+        raise ValueError(
+            "backfill receipt embedding_profile_version does not match the immutable plan"
+        )
     written = snapshot_writer(
         plan["artifact_paths"]["backfill_receipt_evidence"],
         artifact_type=RECEIPT_ARTIFACT_TYPE,
@@ -345,7 +365,9 @@ def _artifact_paths(artifact_root_path: str, operation_id: str) -> dict[str, str
     return {
         "backfill_plan": f"{operation_root}/qdrant-embedding-backfill-plan.json",
         "backfill_receipt": f"{operation_root}/qdrant-embedding-backfill-receipt.json",
-        "backfill_receipt_evidence": f"{operation_root}/qdrant-embedding-backfill-receipt-evidence.json",
+        "backfill_receipt_evidence": (
+            f"{operation_root}/qdrant-embedding-backfill-receipt-evidence.json"
+        ),
     }
 
 
@@ -359,7 +381,8 @@ def _task_artifact_handle(
         "artifactType": _required_token(written.get("artifactType"), "artifactType"),
         "evidence": {
             "s3Uri": _required_s3_uri(written.get("artifactPath"), "artifactPath"),
-            "sha256": "sha256:" + _required_sha256_hex(written.get("artifactSha256"), "artifactSha256"),
+            "sha256": "sha256:"
+            + _required_sha256_hex(written.get("artifactSha256"), "artifactSha256"),
             "versionId": _required_token(written.get("artifactVersionId"), "artifactVersionId"),
         },
         "payload": dict(payload),
@@ -368,7 +391,9 @@ def _task_artifact_handle(
     }
 
 
-def _task_artifact_payload(raw_handle: Mapping[str, Any] | str, expected_type: str) -> dict[str, Any]:
+def _task_artifact_payload(
+    raw_handle: Mapping[str, Any] | str, expected_type: str
+) -> dict[str, Any]:
     handle = _json_object(raw_handle, "task_artifact_handle")
     if _required_token(handle.get("schema"), "schema") != TASK_ARTIFACT_HANDLE_SCHEMA:
         raise ValueError("qdrant embedding migration task artifact schema is unsupported")
@@ -387,7 +412,8 @@ def _task_artifact_evidence(raw_handle: Mapping[str, Any] | str) -> dict[str, st
         raise ValueError("qdrant embedding migration evidence is required")
     return {
         "s3Uri": _required_s3_uri(evidence.get("s3Uri"), "plan_evidence.s3Uri"),
-        "sha256": "sha256:" + _required_sha256_hex(
+        "sha256": "sha256:"
+        + _required_sha256_hex(
             str(evidence.get("sha256", "")).removeprefix("sha256:"),
             "plan_evidence.sha256",
         ),
@@ -458,10 +484,7 @@ def _required_token(value: object, field_name: str) -> str:
 
 
 def _required_embedding_profile_version(value: object, field_name: str) -> str:
-    if (
-        not isinstance(value, str)
-        or not _EMBEDDING_PROFILE_VERSION_RE.fullmatch(value)
-    ):
+    if not isinstance(value, str) or not _EMBEDDING_PROFILE_VERSION_RE.fullmatch(value):
         raise ValueError(f"{field_name} must use canonical profile@version syntax")
     return value
 
@@ -495,7 +518,11 @@ def _required_datetime_string(value: object, field_name: str) -> str:
 
 
 def _required_sha256_hex(value: object, field_name: str) -> str:
-    if not isinstance(value, str) or len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
         raise ValueError(f"{field_name} must be a 64-character lowercase sha256 hex digest")
     return value
 

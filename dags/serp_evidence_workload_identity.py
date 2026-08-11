@@ -629,9 +629,7 @@ def evidence_graph_read_s3_client() -> Any:
                         "s3:GetObjectVersion",
                     ],
                     "Effect": "Allow",
-                    "Resource": [
-                        f"arn:aws:s3:::{EVIDENCE_BUCKET}/{EVIDENCE_PREFIX}*"
-                    ],
+                    "Resource": [f"arn:aws:s3:::{EVIDENCE_BUCKET}/{EVIDENCE_PREFIX}*"],
                 }
             ],
         },

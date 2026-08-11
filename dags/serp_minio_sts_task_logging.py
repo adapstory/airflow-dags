@@ -10,7 +10,7 @@ from airflow.utils.log.file_task_handler import FileTaskHandler
 from dags.serp_minio_sts_task_log_io import MinioStsTaskLogIO
 
 
-class MinioStsTaskHandler(FileTaskHandler):
+class MinioStsTaskHandler(FileTaskHandler):  # type: ignore[misc]
     """Persist a task's complete local log through projected MinIO STS on close."""
 
     def __init__(
@@ -39,9 +39,9 @@ class MinioStsTaskHandler(FileTaskHandler):
         if self.handler is None:
             raise RuntimeError("task log handler did not create its local file")
         self.ti = ti
-        self.log_relative_path = Path(self.handler.baseFilename).relative_to(
-            self.local_base
-        ).as_posix()
+        self.log_relative_path = (
+            Path(self.handler.baseFilename).relative_to(self.local_base).as_posix()
+        )
         self.upload_on_close = not bool(getattr(ti, "raw", False))
         if self.upload_on_close:
             Path(self.handler.baseFilename).write_text("", encoding="utf-8")
@@ -53,6 +53,7 @@ class MinioStsTaskHandler(FileTaskHandler):
         if self.upload_on_close and hasattr(self, "ti"):
             self.io.upload(self.log_relative_path, self.ti)
         self.closed = True
+
 
 LOGGING_CONFIG = deepcopy(DEFAULT_LOGGING_CONFIG)
 REMOTE_TASK_LOG = MinioStsTaskLogIO()

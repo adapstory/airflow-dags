@@ -88,9 +88,7 @@ validate_plan = PythonOperator(
 trigger_d19 = TriggerDagRunOperator(
     task_id="trigger_benchmark_improvement_wave",
     trigger_dag_id="serp_benchmark_improvement_wave",
-    trigger_run_id=(
-        "{{ ti.xcom_pull(task_ids='validate_d17_event_d6_plan')['d19TriggerRunId'] }}"
-    ),
+    trigger_run_id=("{{ ti.xcom_pull(task_ids='validate_d17_event_d6_plan')['d19TriggerRunId'] }}"),
     logical_date=(
         "{{ ti.xcom_pull(task_ids='validate_d17_event_d6_plan')"
         "['d19TriggerConf']['generated_at'] }}"

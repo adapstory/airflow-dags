@@ -390,9 +390,10 @@ def test_live_catalog_allows_rights_unverified_internal_runs(tmp_path: Path) -> 
         "native-corpus",
         "execution-substrate",
     ]
-    assert [int(item["byte_cursor"]) for item in progress] == sorted(
-        int(item["byte_cursor"]) for item in progress
-    )
+    byte_cursors = [item["byte_cursor"] for item in progress]
+    assert all(isinstance(cursor, int | str) for cursor in byte_cursors)
+    normalized_cursors = [int(cursor) for cursor in byte_cursors if isinstance(cursor, int | str)]
+    assert normalized_cursors == sorted(normalized_cursors)
     assert [item["suite_id"] for item in suites] == list(MANDATORY_SERP_BENCHMARK_SUITES)
     assert all(item["source_snapshot"]["sha256"].startswith("sha256:") for item in suites)
     assert all(item["license_snapshot"]["sha256"].startswith("sha256:") for item in suites)

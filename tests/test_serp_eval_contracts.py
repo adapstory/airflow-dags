@@ -1315,7 +1315,7 @@ def test_swe_native_corpus_materializer_fetches_exact_base_commit_without_task_l
         ]
     )
     dataset_stream = io.BytesIO()
-    pq.write_table(table, dataset_stream)
+    pq.write_table(table, dataset_stream)  # type: ignore[no-untyped-call]
     dataset = dataset_stream.getvalue()
     archive_stream = io.BytesIO()
     with tarfile.open(fileobj=archive_stream, mode="w:gz") as archive:
@@ -1348,7 +1348,8 @@ def test_swe_native_corpus_materializer_fetches_exact_base_commit_without_task_l
     assert requested_urls == [
         "https://codeload.github.com/swe-bench/django__django/tar.gz/" + "a" * 40
     ]
-    assert result["manifest"]["status"] == "materialized"
+    manifest = cast(Mapping[str, object], result["manifest"])
+    assert manifest["status"] == "materialized"
     corpus_file = next(iter(cast(Mapping[str, CanonicalCorpusFile], result["files"]).values()))
     corpus = corpus_file.path.read_bytes()
     assert b"production_code" in corpus
@@ -1381,7 +1382,7 @@ def test_swe_archive_fetch_stream_submits_only_one_bounded_window() -> None:
         fetch_bytes,
         max_workers=4,
     )
-    first = next(stream)
+    first = next(iter(stream))
 
     assert first[0].startswith("source-")
     assert len(started) <= 4
@@ -3365,9 +3366,7 @@ def test_benchmark_improvement_wave_plan_binds_nonmeasurement_preflight_purpose(
     conf["adapter_parity_evidence"] = _d19_worm_evidence("preflight/parity", "1")
     conf["bc10_route_set_evidence"] = _d19_worm_evidence("preflight/bc10-routes", "2")
     conf["fault_injection_evidence"] = _d19_worm_evidence("preflight/faults", "3")
-    conf["frozen_benchmark_release_evidence"] = _d19_worm_evidence(
-        "preflight/frozen-release", "4"
-    )
+    conf["frozen_benchmark_release_evidence"] = _d19_worm_evidence("preflight/frozen-release", "4")
     conf["source_sha"] = "a" * 40
 
     plan = build_benchmark_improvement_wave_plan(conf)
@@ -3378,9 +3377,10 @@ def test_benchmark_improvement_wave_plan_binds_nonmeasurement_preflight_purpose(
     assert plan.payload["adapter_parity_evidence"] == conf["adapter_parity_evidence"]
     assert plan.payload["bc10_route_set_evidence"] == conf["bc10_route_set_evidence"]
     assert plan.payload["fault_injection_evidence"] == conf["fault_injection_evidence"]
-    assert plan.payload["frozen_benchmark_release_evidence"] == conf[
-        "frozen_benchmark_release_evidence"
-    ]
+    assert (
+        plan.payload["frozen_benchmark_release_evidence"]
+        == conf["frozen_benchmark_release_evidence"]
+    )
     assert plan.payload["source_sha"] == "a" * 40
     assert {
         "critical_path_preflight_receipt",
@@ -6586,7 +6586,7 @@ def test_public_docs_retrieval_golden_accepts_ranked_multi_source_results_from_a
         "query": "Apache Airflow official documentation overview",
         "seed_id": "apache-airflow-docs",
     }
-    response = {
+    response: dict[str, Any] = {
         "citations": [
             {
                 "chunk_id": "chunk-expected",
@@ -8367,7 +8367,7 @@ def test_public_docs_activation_uses_exact_measured_worm_digest(
     conf = _public_docs_seed_refresh_conf()
     conf["bc21_base_url"] = "http://serp-context-platform.env-prod.svc.cluster.local"
     plan = build_public_docs_seed_refresh_plan(conf)
-    response = {
+    response: dict[str, Any] = {
         "status": "measured",
         "threshold": 0.9,
         **_official_measurement_projection_fields(status="measured"),
@@ -9198,6 +9198,7 @@ def test_d19_pack_side_builders_are_controller_owned_remote_jobs() -> None:
     assert (
         keywords["pod_discovery_timeout_seconds"].id == "DEFAULT_JOB_POD_DISCOVERY_TIMEOUT_SECONDS"
     )
+    assert isinstance(keywords["pod_discovery_poll_interval_seconds"], ast.Constant)
     assert keywords["pod_discovery_poll_interval_seconds"].value == 1
     assert '"ephemeral-storage": "8Gi"' in source
     assert '"ephemeral-storage": "28Gi"' in source
@@ -9245,14 +9246,19 @@ def test_benchmark_catalog_acquisition_is_a_bounded_remote_job(dag_file: str) ->
     assert keywords["node_selector"].id == "BENCHMARK_CATALOG_ACQUISITION_NODE_SELECTOR"
     assert isinstance(keywords["tolerations"], ast.Name)
     assert keywords["tolerations"].id == "BENCHMARK_CATALOG_ACQUISITION_TOLERATIONS"
+    assert isinstance(keywords["wait_until_job_complete"], ast.Constant)
     assert keywords["wait_until_job_complete"].value is True
+    assert isinstance(keywords["backoff_limit"], ast.Constant)
     assert keywords["backoff_limit"].value == 0
+    assert isinstance(keywords["ttl_seconds_after_finished"], ast.Constant)
     assert keywords["ttl_seconds_after_finished"].value == 300
+    assert isinstance(keywords["on_finish_action"], ast.Constant)
     assert keywords["on_finish_action"].value == "keep_pod"
     assert isinstance(keywords["pod_discovery_timeout_seconds"], ast.Name)
     assert (
         keywords["pod_discovery_timeout_seconds"].id == "DEFAULT_JOB_POD_DISCOVERY_TIMEOUT_SECONDS"
     )
+    assert isinstance(keywords["pod_discovery_poll_interval_seconds"], ast.Constant)
     assert keywords["pod_discovery_poll_interval_seconds"].value == 1
 
     workload_source = (REPO_ROOT / "dags" / "serp_benchmark_catalog_workload.py").read_text(
@@ -9576,9 +9582,7 @@ def test_d19_maps_ds1000_from_one_sealed_suite_specific_sandbox_work_item(
     assert executor["env"] == []
     assert executor["envFrom"] == []
     assert executor["command"] == ["/bin/sh", "-c"]
-    assert "/opt/ds1000-venv/bin/python /sandbox/input/ds1000_executor.py" in executor[
-        "args"
-    ][0]
+    assert "/opt/ds1000-venv/bin/python /sandbox/input/ds1000_executor.py" in executor["args"][0]
     assert executor["resources"]["requests"]["ephemeral-storage"] == "8Gi"
     assert executor["resources"]["limits"]["ephemeral-storage"] == "36Gi"
     assert "adapstory_serp_pipeline" not in json.dumps(executor, sort_keys=True)
@@ -9659,8 +9663,7 @@ def test_d19_maps_swe_bench_by_exact_instance_image_repo_and_revision(
     ]
     assert all(executor["command"] == ["/bin/sh", "-c"] for executor in executors)
     assert all(
-        "/bin/bash /sandbox/input/swe_executor.sh" in executor["args"][0]
-        for executor in executors
+        "/bin/bash /sandbox/input/swe_executor.sh" in executor["args"][0] for executor in executors
     )
     assert all("adapstory_serp_pipeline" not in json.dumps(executor) for executor in executors)
     assert all(
@@ -9825,29 +9828,29 @@ def test_d19_aggregates_every_mapped_swe_result_into_one_worm_seal_plan(
         artifact_type: str,
         operation_id: str,
         payload: Mapping[str, Any],
-    ) -> dict[str, str]:
-            captured.append(
-                {
+    ) -> dict[str, Any]:
+        captured.append(
+            {
                 "artifactPath": artifact_path,
                 "artifactType": artifact_type,
                 "operationId": operation_id,
                 "payload": dict(payload),
             }
-            )
-            canonical = evidence("result-set-plan", "f")
-            return {
-                "artifactETag": "etag",
-                "artifactPath": canonical["s3Uri"],
-                "artifactSha256": canonical["sha256"],
-                "artifactType": artifact_type,
-                "artifactVersionId": canonical["versionId"],
-                "contractVersion": "AirflowImmutableEvidence/v1",
-                "objectLockMode": canonical["objectLockMode"],
-                "operationId": operation_id,
-                "retainUntil": canonical["retainUntil"],
-                "retentionDays": 365,
-                "status": "sealed",
-            }
+        )
+        canonical = evidence("result-set-plan", "f")
+        return {
+            "artifactETag": "etag",
+            "artifactPath": canonical["s3Uri"],
+            "artifactSha256": canonical["sha256"],
+            "artifactType": artifact_type,
+            "artifactVersionId": canonical["versionId"],
+            "contractVersion": "AirflowImmutableEvidence/v1",
+            "objectLockMode": canonical["objectLockMode"],
+            "operationId": operation_id,
+            "retainUntil": canonical["retainUntil"],
+            "retentionDays": 365,
+            "status": "sealed",
+        }
 
     monkeypatch.setattr(module, "write_immutable_evidence_snapshot", snapshot_writer)
     plan = {
@@ -9971,7 +9974,7 @@ def test_d19_assembly_plan_seals_exact_canonical_ninety_without_scores(
         artifact_type: str,
         operation_id: str,
         payload: Mapping[str, Any],
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         captured.append(
             {
                 "artifactPath": artifact_path,
@@ -10034,9 +10037,7 @@ def test_d19_assembly_plan_seals_exact_canonical_ninety_without_scores(
     assert payload["schema"] == "PairedEvaluationAssemblyPlan/v1"
     assert len(payload["runs"]) == 90
     assert list(payload["runs"][0]) == ["workItemEvidence", "receiptEvidence"]
-    assert payload["runs"][0]["receiptEvidence"]["s3Uri"].endswith(
-        "/operation/receipts/0.json"
-    )
+    assert payload["runs"][0]["receiptEvidence"]["s3Uri"].endswith("/operation/receipts/0.json")
     assert "score" not in json.dumps(payload).casefold()
 
     preflight_plan = {
@@ -10045,9 +10046,7 @@ def test_d19_assembly_plan_seals_exact_canonical_ninety_without_scores(
         "adapter_parity_evidence": _d19_worm_evidence("preflight/parity", "1"),
         "bc10_route_set_evidence": _d19_worm_evidence("preflight/routes", "2"),
         "fault_injection_evidence": _d19_worm_evidence("preflight/faults", "3"),
-        "frozen_benchmark_release_evidence": _d19_worm_evidence(
-            "preflight/release", "4"
-        ),
+        "frozen_benchmark_release_evidence": _d19_worm_evidence("preflight/release", "4"),
         "source_sha": "a" * 40,
         "artifact_paths": {
             "critical_path_preflight_receipt": (
@@ -10075,9 +10074,7 @@ def test_d19_assembly_plan_seals_exact_canonical_ninety_without_scores(
             "preflightResultEvidence": evidence(f"operation/preflight/{index}", "e"),
             "telemetryEvidence": evidence(f"operation/telemetry/{index}", "f"),
         }
-        for index, (suite_id, side, repetition) in enumerate(
-            module.D19_OFFICIAL_HARNESS_WORK_ITEMS
-        )
+        for index, (suite_id, side, repetition) in enumerate(module.D19_OFFICIAL_HARNESS_WORK_ITEMS)
     ]
     preflight_result = module.write_paired_evaluation_assembly_plan(
         preflight_plan,

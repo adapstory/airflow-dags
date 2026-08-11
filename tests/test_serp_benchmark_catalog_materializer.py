@@ -294,12 +294,13 @@ def test_catalog_acquisition_workload_has_minimal_proxy_and_evidence_contract(
     }
     assert BENCHMARK_CATALOG_ACQUISITION_RESOURCES.to_dict() == {
         "claims": None,
-        # Context: the multi-gigabyte SWE corpus is now file-backed through WORM upload.
-        # Decision: restore the acquisition class to its pre-bytes-payload 1/3 GiB envelope.
-        # Reason: retained memory is bounded by the archive window and one JSONL line.
-        # Revisit: if live peak RSS evidence exceeds 80% of the 3 GiB limit.
-        "limits": {"cpu": "1000m", "memory": "3Gi"},
-        "requests": {"cpu": "500m", "memory": "1Gi"},
+        # Context: the multi-gigabyte SWE corpus is file-backed, but archive extraction and
+        # canonical JSONL materialization still need an explicitly bounded scratch volume.
+        # Decision: retain the 1/3 GiB memory envelope and require a 2/8 GiB ephemeral-disk
+        # envelope. Reason: unbounded node-local storage can evict control-plane workloads.
+        # Revisit: when the acquisition workload streams directly to immutable storage.
+        "limits": {"cpu": "1000m", "ephemeral-storage": "8Gi", "memory": "3Gi"},
+        "requests": {"cpu": "500m", "ephemeral-storage": "2Gi", "memory": "1Gi"},
     }
     assert BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS == 90
 
