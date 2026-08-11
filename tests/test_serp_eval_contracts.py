@@ -8843,6 +8843,9 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakePythonOperator:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             self.kwargs = _kwargs
+            self.task_id = cast(str, _kwargs.get("task_id", ""))
+            self.downstream_task_ids: set[str] = set()
+            self.upstream_task_ids: set[str] = set()
 
         @classmethod
         def partial(cls, **kwargs: object) -> FakePartialOperator:
@@ -8853,9 +8856,19 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
             return FakeXComArg(self)
 
         def __rshift__(self, other: object) -> object:
+            downstream = other if isinstance(other, list | tuple) else (other,)
+            for task in downstream:
+                if isinstance(task, FakePythonOperator):
+                    self.downstream_task_ids.add(task.task_id)
+                    task.upstream_task_ids.add(self.task_id)
             return other
 
-        def __rrshift__(self, _other: object) -> FakePythonOperator:
+        def __rrshift__(self, other: object) -> FakePythonOperator:
+            upstream = other if isinstance(other, list | tuple) else (other,)
+            for task in upstream:
+                if isinstance(task, FakePythonOperator):
+                    task.downstream_task_ids.add(self.task_id)
+                    self.upstream_task_ids.add(task.task_id)
             return self
 
     class FakeTriggerDagRunOperator(FakePythonOperator):
@@ -9189,6 +9202,52 @@ def test_d19_serializes_runs_and_caps_expensive_parallelism() -> None:
     # Baseline and candidate have immutable route/model identities and distinct
     # CAS namespaces; serializing them defeats the dedicated dual-GPU topology.
     assert 'if side == "candidate":' not in source
+
+
+def test_d19_blocked_catalog_terminates_before_pack_fanout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    for name, value in {
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT": "http://minio:9000",
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION": "us-east-1",
+        "ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST": "sha256:" + "d" * 64,
+        "ADAPSTORY_SERP_BC21_BASE_URL": "http://context-platform:8080/api/bc-21/serp/v1",
+        "ADAPSTORY_SERP_MCP_GATEWAY_BASE_URL": (
+            "http://prod-serp-mcp-gateway-svc.env-prod.svc.cluster.local:8000"
+        ),
+    }.items():
+        monkeypatch.setenv(name, value)
+    module = importlib.import_module("dags.serp_benchmark_improvement_wave")
+    module = importlib.reload(module)
+
+    blocked = {
+        "catalogStatus": "blocked",
+        "blockingSuiteIds": ["SWE-bench Verified"],
+    }
+    ready = {"catalogStatus": "ready", "blockingSuiteIds": []}
+    builder_task_ids = {
+        task.task_id for task in module.D19_PACK_SIDE_BUILD_TASKS.values()
+    }
+
+    assert module.choose_d19_catalog_readiness_transition(blocked) == (
+        module.D19_CATALOG_BLOCKER_TASK_ID
+    )
+    with pytest.raises(
+        RuntimeError,
+        match="benchmark catalog blocked preflight: SWE-bench Verified",
+    ):
+        module.fail_d19_blocked_catalog(blocked)
+    assert set(module.choose_d19_catalog_readiness_transition(ready)) == builder_task_ids
+    assert len(builder_task_ids) == 18
+    assert module.load_catalog.downstream_task_ids == {
+        module.catalog_readiness_gate.task_id,
+    }
+    assert builder_task_ids.isdisjoint(module.load_catalog.downstream_task_ids)
+    assert module.catalog_readiness_gate.downstream_task_ids == {
+        module.D19_CATALOG_BLOCKER_TASK_ID,
+        *builder_task_ids,
+    }
 
 
 def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_request(

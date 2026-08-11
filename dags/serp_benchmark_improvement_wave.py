@@ -85,6 +85,8 @@ D19_TERMINAL_OUTBOX_TASK_ID = "write_d19_release_terminal_outbox"
 D19_RELEASE_TRANSITION_TASK_ID = "choose_d19_release_transition"
 D19_TRIGGER_NEXT_RUN_TASK_ID = "trigger_next_d19_release_run"
 D19_RELEASE_COMPLETE_TASK_ID = "d19_release_terminal_complete"
+D19_CATALOG_READINESS_GATE_TASK_ID = "choose_d19_catalog_readiness_transition"
+D19_CATALOG_BLOCKER_TASK_ID = "fail_d19_blocked_catalog"
 D19_OFFICIAL_HARNESS_WORK_ITEMS = tuple(
     (suite_id, side, repetition)
     for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
@@ -866,6 +868,39 @@ def load_materialized_benchmark_catalog(plan_json: str) -> dict[str, Any]:
     return load_materialized_benchmark_catalog_snapshot(plan_json)
 
 
+def choose_d19_catalog_readiness_transition(
+    catalog_snapshot: Mapping[str, Any],
+) -> str | list[str]:
+    status = catalog_snapshot.get("catalogStatus")
+    raw_blocking_suite_ids = catalog_snapshot.get("blockingSuiteIds")
+    if not isinstance(raw_blocking_suite_ids, list) or any(
+        not isinstance(suite_id, str) or not suite_id.strip()
+        for suite_id in raw_blocking_suite_ids
+    ):
+        raise ValueError("D19 benchmark catalog blockingSuiteIds are invalid")
+    blocking_suite_ids = list(dict.fromkeys(raw_blocking_suite_ids))
+    if status == "blocked":
+        if not blocking_suite_ids:
+            raise ValueError("D19 blocked benchmark catalog has no blocking suites")
+        return D19_CATALOG_BLOCKER_TASK_ID
+    if status == "ready":
+        if blocking_suite_ids:
+            raise ValueError("D19 ready benchmark catalog contains blocking suites")
+        return [task.task_id for task in D19_PACK_SIDE_BUILD_TASKS.values()]
+    raise ValueError("D19 benchmark catalog status is unsupported")
+
+
+def fail_d19_blocked_catalog(catalog_snapshot: Mapping[str, Any]) -> None:
+    transition = choose_d19_catalog_readiness_transition(catalog_snapshot)
+    if transition != D19_CATALOG_BLOCKER_TASK_ID:
+        raise ValueError("D19 catalog blocker requires a blocked benchmark catalog")
+    blocking_suite_ids = catalog_snapshot["blockingSuiteIds"]
+    raise RuntimeError(
+        "D19 benchmark catalog blocked preflight: "
+        + ", ".join(str(suite_id) for suite_id in blocking_suite_ids)
+    )
+
+
 def load_model_catalog_promotion(plan_json: str) -> dict[str, Any]:
     return load_model_catalog_promotion_snapshot(plan_json)
 
@@ -1452,6 +1487,23 @@ load_catalog = PythonOperator(
     task_id="load_materialized_benchmark_catalog",
     python_callable=load_materialized_benchmark_catalog,
     op_args=["{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan') }}"],
+    executor_config=D19_AGGREGATOR_EXECUTOR_CONFIG,
+    dag=dag,
+)
+
+catalog_readiness_gate = BranchPythonOperator(
+    task_id=D19_CATALOG_READINESS_GATE_TASK_ID,
+    python_callable=choose_d19_catalog_readiness_transition,
+    op_args=["{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog') }}"],
+    executor_config=D19_AGGREGATOR_EXECUTOR_CONFIG,
+    dag=dag,
+)
+
+catalog_blocker = PythonOperator(
+    task_id=D19_CATALOG_BLOCKER_TASK_ID,
+    python_callable=fail_d19_blocked_catalog,
+    op_args=["{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog') }}"],
+    retries=0,
     executor_config=D19_AGGREGATOR_EXECUTOR_CONFIG,
     dag=dag,
 )
@@ -2433,11 +2485,18 @@ release_terminal_complete = EmptyOperator(
     >> validate_plan
     >> materialize_catalog
     >> load_catalog
+    >> catalog_readiness_gate
 )
 validate_plan >> load_promotion
+# Context: a blocked catalog previously expanded one acquisition failure into
+# 18 pack-side failures. Decision: branch before the expensive fan-out and fail
+# through one explicit catalog blocker. Reason: pack jobs cannot repair missing
+# catalog evidence and must not obscure the root cause. Revisit when: pack-side
+# execution can make catalog evidence ready without violating immutability.
+catalog_readiness_gate >> catalog_blocker
 for suite_id, side in D19_PACK_SIDE_IDENTITIES:
     side_task = D19_PACK_SIDE_BUILD_TASKS[(suite_id, side)]
-    load_catalog >> side_task
+    catalog_readiness_gate >> side_task
     load_promotion >> side_task
     side_task >> aggregate_exact_nine_benchmark_packs
 # Context: immutable baseline/candidate routes now terminate on different GPU
@@ -2448,7 +2507,6 @@ for suite_id, side in D19_PACK_SIDE_IDENTITIES:
 # Revisit when: a future paired algorithm has a real data dependency between sides.
 aggregate_exact_nine_benchmark_packs >> register_exact_nine_evaluation_binding
 register_exact_nine_evaluation_binding >> load_exact_nine_evaluation_binding
-load_catalog >> write_request
 load_promotion >> write_request
 load_exact_nine_evaluation_binding >> write_request
 write_request >> materialize_official_harness_work_items
