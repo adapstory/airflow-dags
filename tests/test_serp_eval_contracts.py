@@ -1354,9 +1354,9 @@ def test_catalog_materializer_retries_incomplete_pinned_swe_archive_without_dige
         }
 
     def snapshot_writer(**kwargs: object) -> dict[str, object]:
-        payload = serp_eval_contracts_module._canonical_json(kwargs["payload"]).encode(
-            "utf-8"
-        )
+        payload = serp_eval_contracts_module._canonical_json(
+            cast(Mapping[str, Any], kwargs["payload"])
+        ).encode("utf-8")
         return snapshot_result(kwargs, sha256(payload).hexdigest())
 
     def snapshot_bytes_writer(**kwargs: object) -> dict[str, object]:
@@ -1389,12 +1389,8 @@ def test_catalog_materializer_retries_incomplete_pinned_swe_archive_without_dige
                 payloads,
                 snapshots,
                 fetch_bytes=archive_fetch,
-                archive_cache_reader=(
-                    None if archive_cache is None else archive_cache.get
-                ),
-                archive_cache_writer=(
-                    None if archive_cache is None else archive_cache.__setitem__
-                ),
+                archive_cache_reader=(None if archive_cache is None else archive_cache.get),
+                archive_cache_writer=(None if archive_cache is None else archive_cache.__setitem__),
                 output_directory=output_directory,
             )
 
@@ -1567,9 +1563,7 @@ def test_swe_archive_fetch_stream_reuses_one_pinned_archive_address() -> None:
         )
     )
 
-    expected_url = (
-        "https://codeload.github.com/swe-bench/django__django/tar.gz/" + "a" * 40
-    )
+    expected_url = "https://codeload.github.com/swe-bench/django__django/tar.gz/" + "a" * 40
     assert requested_urls == [expected_url]
     assert fetched == [
         ("source-a", b"same-pinned-archive"),
@@ -1582,9 +1576,7 @@ def test_swe_archive_worm_cas_reuses_verified_bytes_across_materializer_processe
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class MissingObject(Exception):
-        response: ClassVar[dict[str, dict[str, str]]] = {
-            "Error": {"Code": "NoSuchKey"}
-        }
+        response: ClassVar[dict[str, dict[str, str]]] = {"Error": {"Code": "NoSuchKey"}}
 
     class FakeS3Client:
         def __init__(self) -> None:
@@ -1636,9 +1628,7 @@ def test_swe_archive_worm_cas_reuses_verified_bytes_across_materializer_processe
 
     monkeypatch.setenv("ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS", "365")
     client = FakeS3Client()
-    archive_url = (
-        "https://codeload.github.com/swe-bench/django__django/tar.gz/" + "a" * 40
-    )
+    archive_url = "https://codeload.github.com/swe-bench/django__django/tar.gz/" + "a" * 40
     archive_bytes = b"exact pinned archive bytes"
     first_reader, first_writer = serp_eval_contracts_module._worm_swe_archive_cache(
         "s3://airflow-serp-evidence/serp-evals/operation-1",
@@ -1662,6 +1652,103 @@ def test_swe_archive_worm_cas_reuses_verified_bytes_across_materializer_processe
     client.objects[(blob_key, blob_version)] = b"corrupt bytes"
     with pytest.raises(ValueError, match="SHA-256 does not match"):
         retry_reader(archive_url)
+
+
+def test_swe_archive_worm_cas_renews_expiring_sts_client_within_one_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MissingObject(Exception):
+        response: ClassVar[dict[str, dict[str, str]]] = {"Error": {"Code": "NoSuchKey"}}
+
+    class SharedBackend:
+        def __init__(self) -> None:
+            self.latest: dict[str, str] = {}
+            self.objects: dict[tuple[str, str], bytes] = {}
+
+    class FakeS3Client:
+        def __init__(self, backend: SharedBackend, *, expires_at: float) -> None:
+            self.backend = backend
+            self.expires_at = expires_at
+
+        def assert_valid(self) -> None:
+            if clock[0] >= self.expires_at:
+                raise RuntimeError("InvalidAccessKeyId")
+
+        def put_object(
+            self,
+            *,
+            Bucket: str,
+            Key: str,
+            Body: bytes,
+            ContentType: str,
+        ) -> dict[str, str]:
+            self.assert_valid()
+            assert Bucket == "airflow-serp-evidence"
+            assert ContentType in {"application/gzip", "application/json"}
+            version_id = f"version-{len(self.backend.objects) + 1}"
+            self.backend.latest[Key] = version_id
+            self.backend.objects[(Key, version_id)] = bytes(Body)
+            return {"ETag": f'"etag-{version_id}"', "VersionId": version_id}
+
+        def head_object(
+            self,
+            *,
+            Bucket: str,
+            Key: str,
+            VersionId: str | None = None,
+        ) -> dict[str, object]:
+            self.assert_valid()
+            assert Bucket == "airflow-serp-evidence"
+            observed_version = VersionId or self.backend.latest.get(Key)
+            if observed_version is None or (Key, observed_version) not in self.backend.objects:
+                raise MissingObject(Key)
+            return {
+                "ContentLength": len(self.backend.objects[(Key, observed_version)]),
+                "ObjectLockMode": "COMPLIANCE",
+                "ObjectLockRetainUntilDate": datetime.now(UTC) + timedelta(days=366),
+                "VersionId": observed_version,
+            }
+
+        def get_object(
+            self,
+            *,
+            Bucket: str,
+            Key: str,
+            VersionId: str,
+        ) -> dict[str, object]:
+            self.assert_valid()
+            assert Bucket == "airflow-serp-evidence"
+            return {"Body": io.BytesIO(self.backend.objects[(Key, VersionId)])}
+
+    monkeypatch.setenv("ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS", "365")
+    monkeypatch.setenv("ADAPSTORY_AIRFLOW_ARTIFACT_S3_STS_DURATION_SECONDS", "10")
+    clock = [0.0]
+    backend = SharedBackend()
+    clients: list[FakeS3Client] = []
+
+    def client_factory(_: str) -> FakeS3Client:
+        client = FakeS3Client(backend, expires_at=clock[0] + 10.0)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(serp_eval_contracts_module, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr(serp_eval_contracts_module, "_s3_client", client_factory)
+    archive_url = "https://codeload.github.com/swe-bench/django__django/tar.gz/" + "b" * 40
+    archive_bytes = b"exact renewable-client pinned archive bytes"
+    reader, writer = serp_eval_contracts_module._worm_swe_archive_cache(
+        "s3://airflow-serp-evidence/serp-evals/operation-renewable-client",
+        operation_id="operation-renewable-client",
+    )
+
+    assert reader(archive_url) is None
+    clock[0] = 10.1
+    writer(archive_url, archive_bytes)
+
+    assert reader(archive_url) == archive_bytes
+    assert len(clients) == 2
+    assert len(backend.objects) == 2
+    archive_sha256 = "sha256:" + sha256(archive_bytes).hexdigest()
+    assert any(f"/blobs/{archive_sha256}.tar.gz" in key for key in backend.latest)
 
 
 def test_swe_archive_fetch_stream_exhausts_bounded_transport_retries(
@@ -9333,9 +9420,7 @@ def test_d19_blocked_catalog_terminates_before_pack_fanout(
         "blockingSuiteIds": ["SWE-bench Verified"],
     }
     ready = {"catalogStatus": "ready", "blockingSuiteIds": []}
-    builder_task_ids = {
-        task.task_id for task in module.D19_PACK_SIDE_BUILD_TASKS.values()
-    }
+    builder_task_ids = {task.task_id for task in module.D19_PACK_SIDE_BUILD_TASKS.values()}
 
     assert module.choose_d19_catalog_readiness_transition(blocked) == (
         module.D19_CATALOG_BLOCKER_TASK_ID

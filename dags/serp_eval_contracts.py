@@ -17,6 +17,7 @@ from hashlib import sha256
 from http.client import IncompleteRead
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
+from threading import Lock
 from time import perf_counter, sleep
 from typing import Any, NoReturn, cast
 from urllib.error import HTTPError, URLError
@@ -85,6 +86,7 @@ _SWE_ARCHIVE_FETCH_BACKOFF_SECONDS = (0.5, 1.0)
 _SWE_ARCHIVE_RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
 _SWE_ARCHIVE_CACHE_ENTRY_SCHEMA = "SWEArchiveCacheEntry/v1"
 _SWE_ARCHIVE_CACHE_ENTRY_MAX_BYTES = 16 * 1024
+_AIRFLOW_ARTIFACT_S3_STS_DURATION_SECONDS_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_S3_STS_DURATION_SECONDS"
 SERP_NORMALIZED_GATE_FLOOR = 0.90
 GATEWAY_CLI_MODULE = "adapstory_serp_mcp_gateway.airflow_eval_cli"
 GATEWAY_CLI_PYTHON = "python"
@@ -6414,9 +6416,9 @@ def materialize_live_benchmark_catalog_artifact(
         else snapshot_file_writer
     )
     progress_cursor = 0
-    swe_archive_cache: tuple[
-        Callable[[str], bytes | None], Callable[[str, bytes], None]
-    ] | None = None
+    swe_archive_cache: tuple[Callable[[str], bytes | None], Callable[[str, bytes], None]] | None = (
+        None
+    )
 
     def emit_catalog_progress(*, phase: str, pass_number: int, byte_cursor: int) -> None:
         nonlocal progress_cursor
@@ -6484,12 +6486,8 @@ def materialize_live_benchmark_catalog_artifact(
             dataset_payloads,
             dataset_snapshots,
             fetch_bytes=resolved_fetch_bytes,
-            archive_cache_reader=(
-                None if swe_archive_cache is None else swe_archive_cache[0]
-            ),
-            archive_cache_writer=(
-                None if swe_archive_cache is None else swe_archive_cache[1]
-            ),
+            archive_cache_reader=(None if swe_archive_cache is None else swe_archive_cache[0]),
+            archive_cache_writer=(None if swe_archive_cache is None else swe_archive_cache[1]),
             output_directory=output_directory,
             progress_callback=lambda relative_cursor: emit_catalog_progress(
                 phase="native-corpus",
@@ -6667,10 +6665,9 @@ def _bounded_swe_archive_stream(
                 archive = fetch_bytes(archive_url)
                 break
             except Exception as exc:
-                if (
-                    attempt >= len(_SWE_ARCHIVE_FETCH_BACKOFF_SECONDS)
-                    or not _is_retryable_swe_archive_fetch_error(exc)
-                ):
+                if attempt >= len(
+                    _SWE_ARCHIVE_FETCH_BACKOFF_SECONDS
+                ) or not _is_retryable_swe_archive_fetch_error(exc):
                     raise
                 sleep(_SWE_ARCHIVE_FETCH_BACKOFF_SECONDS[attempt])
         if not isinstance(archive, bytes) or not archive:
@@ -6713,6 +6710,41 @@ def _is_retryable_swe_archive_fetch_error(error: Exception) -> bool:
     return False
 
 
+def _swe_archive_cache_client_provider(
+    cache_root: str, injected_client: Any | None
+) -> Callable[[], Any]:
+    if injected_client is not None:
+        return lambda: injected_client
+
+    sts_duration_seconds = _required_positive_int_env(_AIRFLOW_ARTIFACT_S3_STS_DURATION_SECONDS_ENV)
+    safety_margin_seconds = min(60.0, max(1.0, sts_duration_seconds / 10.0))
+    refresh_after_seconds = max(0.0, sts_duration_seconds - safety_margin_seconds)
+    refresh_lock = Lock()
+    client: Any | None = None
+    created_at = 0.0
+
+    # Context: one SWE catalog CAS batch can outlive its 900-second STS lease.
+    # Decision: lazily reuse one client until a monotonic proactive refresh threshold,
+    # then replace it under a double-checked lock.
+    # Reason: every S3 compound operation receives valid credentials without blind
+    # auth retries or weakening WORM version, retention, and digest verification.
+    # Revisit when: the workload identity client provides renewable credentials itself.
+    def current_client() -> Any:
+        nonlocal client, created_at
+        now = perf_counter()
+        if client is not None and now - created_at < refresh_after_seconds:
+            return client
+        with refresh_lock:
+            now = perf_counter()
+            if client is not None and now - created_at < refresh_after_seconds:
+                return client
+            client = _s3_client(cache_root)
+            created_at = now
+            return client
+
+    return current_client
+
+
 def _worm_swe_archive_cache(
     artifact_root_path: str,
     *,
@@ -6722,7 +6754,7 @@ def _worm_swe_archive_cache(
     """Return a WORM CAS shared by every retry of one catalog operation."""
 
     cache_root = f"{artifact_root_path}/benchmark-catalog-inputs/swe-archive-cas/v1"
-    client = s3_client or _s3_client(cache_root)
+    current_client = _swe_archive_cache_client_provider(cache_root, s3_client)
 
     def cache_entry_path(archive_url: str) -> str:
         coordinate_digest = sha256(archive_url.encode("utf-8")).hexdigest()
@@ -6732,7 +6764,7 @@ def _worm_swe_archive_cache(
         entry_path = cache_entry_path(archive_url)
         try:
             entry_bytes, _, _ = _read_compliance_locked_s3_bytes(
-                client,
+                current_client(),
                 entry_path,
                 field_name="SWE archive cache entry",
                 max_bytes=_SWE_ARCHIVE_CACHE_ENTRY_MAX_BYTES,
@@ -6757,7 +6789,7 @@ def _worm_swe_archive_cache(
         if _required_str(archive_snapshot, "objectLockMode") != "COMPLIANCE":
             raise ValueError("SWE archive cache blob must use COMPLIANCE retention")
         archive, observed_version_id, _ = _read_compliance_locked_s3_bytes(
-            client,
+            current_client(),
             expected_blob_path,
             field_name="SWE archive cache blob",
             version_id=_required_str(archive_snapshot, "artifactVersionId"),
@@ -6773,13 +6805,14 @@ def _worm_swe_archive_cache(
             raise ValueError("SWE archive cache refuses empty bytes")
         archive_sha256 = "sha256:" + sha256(archive).hexdigest()
         blob_path = f"{cache_root}/blobs/{archive_sha256}.tar.gz"
+        blob_client = current_client()
         blob_snapshot = write_immutable_evidence_bytes_snapshot(
             blob_path,
             artifact_type="swe_commit_archive_cache_blob",
             operation_id=operation_id,
             payload=archive,
             content_type="application/gzip",
-            s3_client=client,
+            s3_client=blob_client,
         )
         if (
             _required_str(blob_snapshot, "artifactPath") != blob_path
@@ -6795,15 +6828,13 @@ def _worm_swe_archive_cache(
                 "archiveSha256": archive_sha256,
                 "archiveSnapshot": {
                     "artifactPath": blob_path,
-                    "artifactVersionId": _required_str(
-                        blob_snapshot, "artifactVersionId"
-                    ),
+                    "artifactVersionId": _required_str(blob_snapshot, "artifactVersionId"),
                     "objectLockMode": "COMPLIANCE",
                 },
                 "archiveUrl": archive_url,
                 "schema": _SWE_ARCHIVE_CACHE_ENTRY_SCHEMA,
             },
-            s3_client=client,
+            s3_client=current_client(),
         )
 
     return read, write
