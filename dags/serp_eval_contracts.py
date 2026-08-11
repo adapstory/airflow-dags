@@ -80,6 +80,8 @@ MANDATORY_SERP_BENCHMARK_SUITES = (
     "rusBEIR",
 )
 _D19_CODE_SANDBOX_SUITES = frozenset({"CodeRAG-Bench", "SWE-bench Verified"})
+_SWE_ARCHIVE_FETCH_BACKOFF_SECONDS = (0.5, 1.0)
+_SWE_ARCHIVE_RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
 SERP_NORMALIZED_GATE_FLOOR = 0.90
 GATEWAY_CLI_MODULE = "adapstory_serp_mcp_gateway.airflow_eval_cli"
 GATEWAY_CLI_PYTHON = "python"
@@ -6601,34 +6603,78 @@ def _bounded_swe_archive_stream(
     *,
     max_workers: int,
 ) -> Iterable[tuple[str, bytes]]:
-    """Fetch exact SWE archives with a sliding window owned by the consumer."""
+    """Fetch exact SWE archives with retry and a consumer-owned sliding window."""
 
     if not sources:
         raise ValueError("SWE corpus source plan contains no sources")
     if max_workers <= 0:
         raise ValueError("SWE corpus archive worker count must be positive")
 
-    def fetch_source(source: Mapping[str, Any]) -> tuple[str, bytes]:
+    # Context: one transient codeload error previously discarded an otherwise
+    # complete immutable SWE acquisition wave. Decision: coalesce equal pinned
+    # archive addresses and retry only retryable transport failures with a fixed
+    # attempt ceiling. Reason: successful archive bytes stay reusable while a
+    # failing coordinate recovers, without retrying mutable or permanent errors.
+    # Revisit when: sealed sandbox supply owns these content-addressed archives.
+    source_ids_by_archive_url: dict[str, list[str]] = {}
+    seen_source_ids: set[str] = set()
+    for source in sources:
         source_id = _required_str(source, "sourceId")
-        archive = fetch_bytes(_swe_commit_archive_url(source))
+        if source_id in seen_source_ids:
+            raise ValueError("SWE corpus source plan contains duplicate sourceId")
+        seen_source_ids.add(source_id)
+        archive_url = _swe_commit_archive_url(source)
+        source_ids_by_archive_url.setdefault(archive_url, []).append(source_id)
+
+    def fetch_archive(archive_url: str) -> tuple[str, bytes]:
+        archive: bytes | None = None
+        for attempt in range(len(_SWE_ARCHIVE_FETCH_BACKOFF_SECONDS) + 1):
+            try:
+                archive = fetch_bytes(archive_url)
+                break
+            except Exception as exc:
+                if (
+                    attempt >= len(_SWE_ARCHIVE_FETCH_BACKOFF_SECONDS)
+                    or not _is_retryable_swe_archive_fetch_error(exc)
+                ):
+                    raise
+                sleep(_SWE_ARCHIVE_FETCH_BACKOFF_SECONDS[attempt])
         if not isinstance(archive, bytes) or not archive:
             raise ValueError("SWE corpus commit archive fetch returned no bytes")
-        return source_id, archive
+        return archive_url, archive
 
-    source_iterator = iter(sources)
-    with ThreadPoolExecutor(max_workers=min(max_workers, len(sources))) as executor:
+    archive_urls = tuple(source_ids_by_archive_url)
+    archive_url_iterator = iter(archive_urls)
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(archive_urls))) as executor:
         pending: set[Future[tuple[str, bytes]]] = set()
-        for _ in range(min(max_workers, len(sources))):
-            pending.add(executor.submit(fetch_source, next(source_iterator)))
+        for _ in range(min(max_workers, len(archive_urls))):
+            pending.add(executor.submit(fetch_archive, next(archive_url_iterator)))
         while pending:
             completed, pending = wait(pending, return_when="FIRST_COMPLETED")
             for future in completed:
-                yield future.result()
+                archive_url, archive = future.result()
+                for source_id in source_ids_by_archive_url[archive_url]:
+                    yield source_id, archive
                 try:
-                    source = next(source_iterator)
+                    next_archive_url = next(archive_url_iterator)
                 except StopIteration:
                     continue
-                pending.add(executor.submit(fetch_source, source))
+                pending.add(executor.submit(fetch_archive, next_archive_url))
+
+
+def _is_retryable_swe_archive_fetch_error(error: Exception) -> bool:
+    """Recognize retryable transport causes without retrying permanent evidence errors."""
+
+    current: BaseException | None = error
+    visited: set[int] = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        if isinstance(current, HTTPError):
+            return current.code in _SWE_ARCHIVE_RETRYABLE_HTTP_STATUS_CODES
+        if isinstance(current, URLError | OSError):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _swe_commit_archive_url(source: Mapping[str, Any]) -> str:

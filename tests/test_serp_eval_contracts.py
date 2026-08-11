@@ -8,7 +8,7 @@ import math
 import sys
 import tarfile
 import types
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from email.message import Message
@@ -16,7 +16,7 @@ from hashlib import sha256
 from pathlib import Path
 from threading import Barrier
 from typing import Any, ClassVar, cast
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request
 from uuid import UUID
@@ -1292,6 +1292,139 @@ def test_catalog_materializer_accepts_dedicated_dataset_evidence_plan() -> None:
     )
 
 
+def test_catalog_materializer_retries_pinned_swe_archive_without_digest_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Context: a transient codeload failure blocked the global all-nine catalog
+    # even though the exact immutable SWE archive was available on the next request.
+    # Decision: retry only the pinned archive acquisition seam and reuse the
+    # successful bytes without changing the catalog evidence contract.
+    # Reason: transport recovery must not alter the measured dataset identity.
+    # Revisit when: sandbox supply publishes sealed SWE corpus handles directly.
+    plan = build_mandatory_benchmark_dataset_evidence_plan(
+        {
+            "artifact_root_path": "s3://airflow-serp-artifacts/serp-evals",
+            "generated_at": "2026-07-13T19:30:00Z",
+        }
+    )
+    swe_entry = next(
+        entry
+        for entry in MANDATORY_BENCHMARK_SUITE_CATALOG
+        if entry.suite_id == "SWE-bench Verified"
+    )
+    table = pa.Table.from_pylist(
+        [
+            {
+                "instance_id": "django__django-1",
+                "repo": "django/django",
+                "base_commit": "a" * 40,
+                "problem_statement": "SECRET task query",
+                "patch": "SECRET solution patch",
+                "test_patch": "SECRET tests",
+            }
+        ]
+    )
+    dataset_stream = io.BytesIO()
+    pq.write_table(table, dataset_stream)  # type: ignore[no-untyped-call]
+    dataset = dataset_stream.getvalue()
+    archive_stream = io.BytesIO()
+    with tarfile.open(fileobj=archive_stream, mode="w:gz") as archive:
+        payload = b"def production_code():\n    return 1\n"
+        info = tarfile.TarInfo("django-root/django/core.py")
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+    archive_bytes = archive_stream.getvalue()
+
+    def fetch_dataset_evidence(url: str) -> bytes:
+        if url == swe_entry.dataset_artifact_url:
+            return dataset
+        return url.encode("utf-8")
+
+    def snapshot_result(kwargs: Mapping[str, object], digest: str) -> dict[str, object]:
+        return {
+            "artifactPath": kwargs["artifact_path"],
+            "artifactSha256": digest,
+            "artifactType": kwargs["artifact_type"],
+            "artifactVersionId": "version-20260713",
+            "objectLockMode": "COMPLIANCE",
+            "operationId": kwargs["operation_id"],
+            "retainUntil": "2027-07-13T19:30:00Z",
+            "status": "written",
+        }
+
+    def snapshot_writer(**kwargs: object) -> dict[str, object]:
+        payload = serp_eval_contracts_module._canonical_json(kwargs["payload"]).encode(
+            "utf-8"
+        )
+        return snapshot_result(kwargs, sha256(payload).hexdigest())
+
+    def snapshot_bytes_writer(**kwargs: object) -> dict[str, object]:
+        return snapshot_result(kwargs, sha256(cast(bytes, kwargs["payload"])).hexdigest())
+
+    def snapshot_file_writer(**kwargs: object) -> dict[str, object]:
+        digest = cast(str, kwargs["payload_sha256"]).removeprefix("sha256:")
+        return snapshot_result(kwargs, digest)
+
+    def materialize_with_archive_fetch(
+        archive_fetch: Callable[[str], bytes],
+    ) -> dict[str, object]:
+        def corpus_materializer(
+            suite_id: str,
+            payloads: Mapping[str, bytes],
+            snapshots: Mapping[str, Mapping[str, object]],
+            output_directory: Path,
+        ) -> Mapping[str, object]:
+            if suite_id != "SWE-bench Verified":
+                return _native_corpus_materializer(
+                    suite_id,
+                    payloads,
+                    snapshots,
+                    output_directory,
+                )
+            return serp_eval_contracts_module._native_corpus_materializer(
+                suite_id,
+                payloads,
+                snapshots,
+                fetch_bytes=archive_fetch,
+                output_directory=output_directory,
+            )
+
+        return materialize_live_benchmark_catalog_artifact(
+            plan.to_canonical_json(),
+            fetch_bytes=fetch_dataset_evidence,
+            snapshot_writer=snapshot_writer,
+            snapshot_bytes_writer=snapshot_bytes_writer,
+            snapshot_file_writer=snapshot_file_writer,
+            native_adapter_materializer=_native_adapter_materializer,
+            native_corpus_materializer=corpus_materializer,
+            execution_substrate_materializer=_execution_substrate_materializer,
+        )
+
+    clean = materialize_with_archive_fetch(lambda _url: archive_bytes)
+    attempts: list[str] = []
+
+    def transient_archive_fetch(url: str) -> bytes:
+        attempts.append(url)
+        if len(attempts) == 1:
+            raise ValueError(f"benchmark upstream evidence fetch failed: {url}") from URLError(
+                "temporary codeload failure"
+            )
+        return archive_bytes
+
+    delays: list[float] = []
+    monkeypatch.setattr(serp_eval_contracts_module, "sleep", delays.append)
+    recovered = materialize_with_archive_fetch(transient_archive_fetch)
+
+    assert recovered["catalogStatus"] == "ready"
+    assert recovered["blockingSuiteIds"] == []
+    assert attempts == [
+        "https://codeload.github.com/swe-bench/django__django/tar.gz/" + "a" * 40,
+        "https://codeload.github.com/swe-bench/django__django/tar.gz/" + "a" * 40,
+    ]
+    assert delays == [0.5]
+    assert recovered["artifactSha256"] == clean["artifactSha256"]
+
+
 def test_swe_native_corpus_materializer_fetches_exact_base_commit_without_task_leakage(
     tmp_path: Path,
 ) -> None:
@@ -1388,6 +1521,72 @@ def test_swe_archive_fetch_stream_submits_only_one_bounded_window() -> None:
     assert len(started) <= 4
     assert len(list(stream)) == 11
     assert len(started) == 12
+
+
+def test_swe_archive_fetch_stream_reuses_one_pinned_archive_address() -> None:
+    sources = [
+        {
+            "baseCommit": "a" * 40,
+            "repositoryUrl": "https://github.com/swe-bench/django__django.git",
+            "sourceId": source_id,
+        }
+        for source_id in ("source-a", "source-b")
+    ]
+    requested_urls: list[str] = []
+
+    def fetch_bytes(url: str) -> bytes:
+        requested_urls.append(url)
+        return b"same-pinned-archive"
+
+    fetched = list(
+        serp_eval_contracts_module._bounded_swe_archive_stream(
+            sources,
+            fetch_bytes,
+            max_workers=2,
+        )
+    )
+
+    expected_url = (
+        "https://codeload.github.com/swe-bench/django__django/tar.gz/" + "a" * 40
+    )
+    assert requested_urls == [expected_url]
+    assert fetched == [
+        ("source-a", b"same-pinned-archive"),
+        ("source-b", b"same-pinned-archive"),
+    ]
+    assert sha256(fetched[0][1]).hexdigest() == sha256(fetched[1][1]).hexdigest()
+
+
+def test_swe_archive_fetch_stream_exhausts_bounded_transport_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = {
+        "baseCommit": "a" * 40,
+        "repositoryUrl": "https://github.com/swe-bench/django__django.git",
+        "sourceId": "source-a",
+    }
+    attempts: list[str] = []
+    delays: list[float] = []
+
+    def fetch_bytes(url: str) -> bytes:
+        attempts.append(url)
+        raise ValueError(f"benchmark upstream evidence fetch failed: {url}") from URLError(
+            "temporary codeload failure"
+        )
+
+    monkeypatch.setattr(serp_eval_contracts_module, "sleep", delays.append)
+
+    with pytest.raises(ValueError, match="benchmark upstream evidence fetch failed"):
+        list(
+            serp_eval_contracts_module._bounded_swe_archive_stream(
+                [source],
+                fetch_bytes,
+                max_workers=1,
+            )
+        )
+
+    assert len(attempts) == 3
+    assert delays == [0.5, 1.0]
 
 
 @pytest.mark.parametrize(
