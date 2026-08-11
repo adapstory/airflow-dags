@@ -874,8 +874,7 @@ def choose_d19_catalog_readiness_transition(
     status = catalog_snapshot.get("catalogStatus")
     raw_blocking_suite_ids = catalog_snapshot.get("blockingSuiteIds")
     if not isinstance(raw_blocking_suite_ids, list) or any(
-        not isinstance(suite_id, str) or not suite_id.strip()
-        for suite_id in raw_blocking_suite_ids
+        not isinstance(suite_id, str) or not suite_id.strip() for suite_id in raw_blocking_suite_ids
     ):
         raise ValueError("D19 benchmark catalog blockingSuiteIds are invalid")
     blocking_suite_ids = list(dict.fromkeys(raw_blocking_suite_ids))
