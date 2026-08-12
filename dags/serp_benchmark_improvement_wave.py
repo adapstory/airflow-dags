@@ -18,6 +18,9 @@ from airflow.sdk import DAG
 from airflow.task.trigger_rule import TriggerRule
 from kubernetes.client import models as k8s
 
+from dags.serp_bc10_capacity_admission import (
+    verify_bc10_ledger_capacity_admission,
+)
 from dags.serp_benchmark_catalog_workload import (
     BENCHMARK_CATALOG_ACQUISITION_NODE_SELECTOR,
     BENCHMARK_CATALOG_ACQUISITION_RESOURCES,
@@ -1441,6 +1444,13 @@ validate_plan = PythonOperator(
     dag=dag,
 )
 
+verify_bc10_ledger_capacity = PythonOperator(
+    task_id="verify_bc10_ledger_capacity_admission",
+    python_callable=verify_bc10_ledger_capacity_admission,
+    executor_config=D19_ADMISSION_EXECUTOR_CONFIG,
+    dag=dag,
+)
+
 materialize_catalog = BoundedKubernetesJobOperator(
     task_id="materialize_live_benchmark_catalog",
     name="serp-d19-benchmark-catalog-acquisition",
@@ -2482,6 +2492,7 @@ release_terminal_complete = EmptyOperator(
     verify_terminal_activation
     >> validate_admission
     >> validate_plan
+    >> verify_bc10_ledger_capacity
     >> materialize_catalog
     >> load_catalog
     >> catalog_readiness_gate

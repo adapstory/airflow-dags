@@ -7982,6 +7982,7 @@ def test_serp_dag_files_declare_expected_airflow_contracts(
             "validate_d19_fence_admission",
             "verify_runtime_terminal_activation_admission",
             "validate_benchmark_improvement_wave_plan",
+            "verify_bc10_ledger_capacity_admission",
             "load_materialized_benchmark_catalog",
             "load_model_catalog_promotion",
             "load_exact_nine_evaluation_binding",

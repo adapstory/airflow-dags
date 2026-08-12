@@ -16,6 +16,10 @@ from adapstory_serp_pipeline.registry.evaluation_release_contract import (
 )
 
 import dags.serp_eval_contracts as serp_eval_contracts
+from dags.serp_bc10_capacity_admission import (
+    validate_bc10_capacity_admission,
+    validate_bc10_capacity_metrics,
+)
 from dags.serp_eval_contracts import (
     MANDATORY_SERP_BENCHMARK_SUITES,
     build_benchmark_improvement_wave_plan,
@@ -813,6 +817,67 @@ def test_event_d6_trigger_templates_consume_typed_invocation() -> None:
     assert "['d19TriggerConf']['generated_at']" in source
     assert "['d19TriggerConf'] }}" in source
     assert "['d19_trigger_conf']" not in source
+
+
+def test_d19_bc10_capacity_admission_requires_row_byte_and_compaction_gates() -> None:
+    admitted = validate_bc10_capacity_metrics(
+        """
+bc10_ledger_capacity_admitted 1
+bc10_ledger_record_headroom 1500000
+bc10_ledger_storage_headroom_bytes 60000000000
+bc10_ledger_cold_wave_required_records 1082500
+bc10_ledger_cold_wave_required_bytes 35471360000
+bc10_ledger_legacy_payload_records 0
+"""
+    )
+
+    assert admitted["schema"] == "Bc10LedgerCapacityAdmission/v1"
+    assert admitted["admitted"] is True
+    assert admitted["recordHeadroom"] == 1_500_000
+
+    with pytest.raises(ValueError, match="legacy replay payload"):
+        validate_bc10_capacity_metrics(
+            """
+bc10_ledger_capacity_admitted 0
+bc10_ledger_record_headroom 1500000
+bc10_ledger_storage_headroom_bytes 60000000000
+bc10_ledger_cold_wave_required_records 1082500
+bc10_ledger_cold_wave_required_bytes 35471360000
+bc10_ledger_legacy_payload_records 1
+"""
+        )
+
+    fresh = validate_bc10_capacity_admission(
+        {
+            "schema": "Bc10LedgerCapacityAdmission/v1",
+            "admitted": True,
+            "blockers": [],
+            "activeRecords": 500_000,
+            "relationBytes": 20_000_000_000,
+            "recordHeadroom": 4_000_000,
+            "storageHeadroomBytes": 141_061_273_600,
+            "observedAt": "2026-08-12T07:00:00+00:00",
+        }
+    )
+    assert fresh["admitted"] is True
+
+    for malformed_counter in (True, "500000"):
+        with pytest.raises(ValueError, match="counters are malformed"):
+            validate_bc10_capacity_admission(
+                {
+                    **fresh,
+                    "activeRecords": malformed_counter,
+                }
+            )
+
+
+def test_d19_bc10_capacity_gate_precedes_catalog_and_pack_work() -> None:
+    source = (Path(__file__).parents[1] / "dags" / "serp_benchmark_improvement_wave.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'task_id="verify_bc10_ledger_capacity_admission"' in source
+    assert "validate_plan\n    >> verify_bc10_ledger_capacity\n    >> materialize_catalog" in source
 
 
 def test_d19_terminal_activation_admission_is_read_only_and_aggregator_is_sole_writer() -> None:
