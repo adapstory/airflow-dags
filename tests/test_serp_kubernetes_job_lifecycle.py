@@ -23,6 +23,12 @@ def _install_airflow_job_operator_stub(monkeypatch: pytest.MonkeyPatch) -> type[
             self.parallelism = parallelism
             self.client: object | None = None
             self.logged_pods: list[object] = []
+            self.created_jobs: list[object] = []
+            self.log = SimpleNamespace(info=lambda *_args: None)
+
+        def create_job(self, job_request_obj: object) -> object:
+            self.created_jobs.append(job_request_obj)
+            return job_request_obj
 
         def _build_find_pod_label_selector(
             self, context: object, *, exclude_checked: bool = True
@@ -67,6 +73,88 @@ class _DelayedPodClient:
     def list_namespaced_pod(self, *, namespace: str, label_selector: str) -> object:
         self.calls.append((namespace, label_selector))
         return SimpleNamespace(items=next(self._responses))
+
+
+class _ExistingJobClient:
+    def __init__(self, jobs: dict[str, object]) -> None:
+        self.jobs = jobs
+        self.reads: list[tuple[str, str]] = []
+
+    def read_namespaced_job(self, *, name: str, namespace: str) -> object:
+        self.reads.append((name, namespace))
+        if name not in self.jobs:
+            raise ApiException(status=404, reason="Not Found")
+        return self.jobs[name]
+
+
+def _job_request(*, try_number: str = "2") -> object:
+    return SimpleNamespace(
+        metadata=SimpleNamespace(name="job-new-attempt", namespace="airflow"),
+        spec=SimpleNamespace(
+            template=SimpleNamespace(
+                metadata=SimpleNamespace(
+                    labels={
+                        "dag_id": "serp_benchmark_improvement_wave",
+                        "task_id": "build_pack_side_swe_bench_verified_candidate",
+                        "run_id": "manual__critical_path_preflight__source__000046",
+                        "kubernetes_pod_operator": "True",
+                        "try_number": try_number,
+                    }
+                )
+            )
+        ),
+    )
+
+
+def _active_prior_attempt_pod(*, owner_job: str | None) -> object:
+    owner_references = []
+    if owner_job:
+        owner_references.append(SimpleNamespace(controller=True, kind="Job", name=owner_job))
+    return SimpleNamespace(
+        metadata=SimpleNamespace(
+            name="prior-worker",
+            namespace="airflow",
+            labels={"try_number": "1"},
+            owner_references=owner_references,
+        ),
+        status=SimpleNamespace(phase="Running"),
+    )
+
+
+def test_job_operator_retry_adopts_active_prior_attempt_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_job_operator_stub(monkeypatch)
+    sys.modules.pop("dags.serp_kubernetes_job_operator", None)
+    module = importlib.import_module("dags.serp_kubernetes_job_operator")
+    prior_job = SimpleNamespace(
+        metadata=SimpleNamespace(name="prior-job", namespace="airflow"),
+        status=SimpleNamespace(active=1, conditions=[]),
+    )
+    operator = module.BoundedKubernetesJobOperator(task_id="retry-adoption")
+    operator.client = _DelayedPodClient([[_active_prior_attempt_pod(owner_job="prior-job")]])
+    operator.job_client = _ExistingJobClient({"prior-job": prior_job})
+
+    result = operator.create_job(_job_request())
+
+    assert result is prior_job
+    assert operator.created_jobs == []
+
+
+def test_job_operator_retry_rejects_active_orphan_before_creating_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    airflow_exception = _install_airflow_job_operator_stub(monkeypatch)
+    sys.modules.pop("dags.serp_kubernetes_job_operator", None)
+    module = importlib.import_module("dags.serp_kubernetes_job_operator")
+    operator = module.BoundedKubernetesJobOperator(task_id="retry-orphan")
+    operator.client = _DelayedPodClient([[_active_prior_attempt_pod(owner_job="deleted-job")]])
+    operator.job_client = _ExistingJobClient({})
+
+    with pytest.raises(airflow_exception, match="active orphan pod prior-worker"):
+        operator.create_job(_job_request())
+
+    assert operator.created_jobs == []
 
 
 def test_job_operator_waits_between_polls_until_delayed_pod_exists(
