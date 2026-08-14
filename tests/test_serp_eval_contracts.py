@@ -9502,6 +9502,20 @@ def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_reque
         )
         assert builder_task.kwargs["priority_weight"] == expected_priority
         assert builder_task.kwargs["weight_rule"] == "absolute"
+        scratch = next(
+            item
+            for item in builder_task.kwargs["volumes"]
+            if item.kwargs["name"] == "d19-pack-builder-scratch"
+        )
+        resources = builder_task.kwargs["container_resources"].kwargs
+        if suite_id == "SWE-bench Verified":
+            assert scratch.kwargs["empty_dir"].kwargs["size_limit"] == "48Gi"
+            assert resources["requests"]["ephemeral-storage"] == "32Gi"
+            assert resources["limits"]["ephemeral-storage"] == "56Gi"
+        else:
+            assert scratch.kwargs["empty_dir"].kwargs["size_limit"] == "24Gi"
+            assert resources["requests"]["ephemeral-storage"] == "8Gi"
+            assert resources["limits"]["ephemeral-storage"] == "28Gi"
     assert aggregator["arguments"][0] == "aggregate-exact-nine"
     assert "--side-result-uris-json" in aggregator["arguments"]
     assert aggregator["do_xcom_push"] is True
@@ -9551,13 +9565,6 @@ def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_reque
     assert "d19-pack-builder-scratch" in builder_volume_names
     assert "/var/run/secrets/adapstory/bc10-workload" in builder_mount_paths
     assert "/var/lib/adapstory/serp-pack" in builder_mount_paths
-    scratch = next(
-        item
-        for item in module.D19_BUILDER_VOLUMES
-        if item.kwargs["name"] == "d19-pack-builder-scratch"
-    )
-    assert scratch.kwargs["empty_dir"].kwargs["size_limit"] == "24Gi"
-
     aggregator_env = {
         item.kwargs["name"]: item.kwargs.get("value") for item in module.d19_aggregator_env_vars()
     }

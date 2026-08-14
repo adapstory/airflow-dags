@@ -186,6 +186,10 @@ D19_PACK_BUILDER_SCRATCH_VOLUME = k8s.V1Volume(
     name="d19-pack-builder-scratch",
     empty_dir=k8s.V1EmptyDirVolumeSource(size_limit="24Gi"),
 )
+D19_SWE_PACK_BUILDER_SCRATCH_VOLUME = k8s.V1Volume(
+    name="d19-pack-builder-scratch",
+    empty_dir=k8s.V1EmptyDirVolumeSource(size_limit="48Gi"),
+)
 D19_PACK_BUILDER_SCRATCH_VOLUME_MOUNT = k8s.V1VolumeMount(
     name="d19-pack-builder-scratch",
     mount_path=D19_PACK_BUILDER_SCRATCH_PATH,
@@ -201,6 +205,18 @@ D19_PACK_BUILDER_RESOURCES = k8s.V1ResourceRequirements(
     limits={
         "cpu": "4",
         "ephemeral-storage": "28Gi",
+        "memory": "8Gi",
+    },
+)
+D19_SWE_PACK_BUILDER_RESOURCES = k8s.V1ResourceRequirements(
+    requests={
+        "cpu": "4",
+        "ephemeral-storage": "32Gi",
+        "memory": "4Gi",
+    },
+    limits={
+        "cpu": "4",
+        "ephemeral-storage": "56Gi",
         "memory": "8Gi",
     },
 )
@@ -258,6 +274,13 @@ D19_BUILDER_VOLUMES = [
     *bc21_workload_volumes(),
     *hardened_runtime_volumes(),
     D19_PACK_BUILDER_SCRATCH_VOLUME,
+]
+D19_SWE_BUILDER_VOLUMES = [
+    *minio_web_identity_volumes(),
+    *bc10_workload_volumes(),
+    *bc21_workload_volumes(),
+    *hardened_runtime_volumes(),
+    D19_SWE_PACK_BUILDER_SCRATCH_VOLUME,
 ]
 D19_BUILDER_VOLUME_MOUNTS = [
     *minio_web_identity_volume_mounts(),
@@ -1601,10 +1624,18 @@ for suite_id, side in D19_PACK_SIDE_IDENTITIES:
         env_vars=d19_builder_env_vars(),
         service_account_name=D19_BUILDER_WORKLOAD_SERVICE_ACCOUNT,
         automount_service_account_token=False,
-        volumes=D19_BUILDER_VOLUMES,
+        volumes=(
+            D19_SWE_BUILDER_VOLUMES
+            if suite_id == "SWE-bench Verified"
+            else D19_BUILDER_VOLUMES
+        ),
         volume_mounts=D19_BUILDER_VOLUME_MOUNTS,
         labels=D19_BUILDER_WORKLOAD_LABELS,
-        container_resources=D19_PACK_BUILDER_RESOURCES,
+        container_resources=(
+            D19_SWE_PACK_BUILDER_RESOURCES
+            if suite_id == "SWE-bench Verified"
+            else D19_PACK_BUILDER_RESOURCES
+        ),
         pool=D19_PACK_BUILDER_POOL,
         pool_slots=1,
         priority_weight=(1000 if (suite_id, side) in D19_DUAL_GPU_CRITICAL_PAIR else 1),
