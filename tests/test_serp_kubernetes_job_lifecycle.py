@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import sys
 from datetime import UTC, datetime, timedelta
 from types import ModuleType, SimpleNamespace
@@ -265,6 +266,7 @@ def _pod(
     name: str,
     *,
     phase: str = "Succeeded",
+    reason: str | None = None,
     owner_job: str | None = None,
     age_minutes: int = 10,
 ) -> object:
@@ -277,18 +279,51 @@ def _pod(
         metadata=SimpleNamespace(
             name=name,
             namespace="airflow",
+            uid=f"00000000-0000-4000-8000-{len(name):012d}",
             creation_timestamp=datetime.now(UTC) - timedelta(minutes=age_minutes),
+            deletion_timestamp=None,
             owner_references=owner_references,
         ),
-        spec=SimpleNamespace(restart_policy="Never"),
-        status=SimpleNamespace(phase=phase, reason=None),
+        spec=SimpleNamespace(restart_policy="Never", node_name="adapstory"),
+        status=SimpleNamespace(
+            phase=phase,
+            reason=reason,
+            message="node pressure evicted the pod" if reason == "Evicted" else None,
+            container_statuses=[
+                SimpleNamespace(
+                    name="base",
+                    ready=False,
+                    restart_count=0,
+                    state=SimpleNamespace(
+                        terminated=SimpleNamespace(
+                            exit_code=137,
+                            reason="OOMKilled",
+                            message="container exceeded memory limit",
+                            signal=9,
+                            started_at=datetime(2026, 8, 16, 10, 0, tzinfo=UTC),
+                            finished_at=datetime(2026, 8, 16, 10, 5, tzinfo=UTC),
+                        )
+                    ),
+                )
+            ],
+        ),
     )
 
 
 class _CoreApi:
-    def __init__(self, pods: list[object]) -> None:
+    def __init__(
+        self,
+        pods: list[object],
+        *,
+        receipt_failure: ApiException | None = None,
+        corrupt_receipt_readback: bool = False,
+    ) -> None:
         self.pods = pods
         self.deleted: list[str] = []
+        self.receipt_failure = receipt_failure
+        self.corrupt_receipt_readback = corrupt_receipt_readback
+        self.receipts: dict[str, Any] = {}
+        self.operations: list[str] = []
 
     def list_namespaced_pod(self, **kwargs: object) -> object:
         assert kwargs["namespace"] == "airflow"
@@ -298,8 +333,32 @@ class _CoreApi:
     def delete_namespaced_pod(self, *, name: str, namespace: str, body: object) -> object:
         assert namespace == "airflow"
         assert body is not None
+        self.operations.append(f"delete:{name}")
         self.deleted.append(name)
         return SimpleNamespace()
+
+    def create_namespaced_config_map(self, *, namespace: str, body: Any, field_manager: str) -> Any:
+        assert namespace == "airflow"
+        assert field_manager == "airflow-pod-cleanup"
+        if self.receipt_failure is not None:
+            raise self.receipt_failure
+        name = str(body.metadata.name)
+        if name in self.receipts:
+            raise ApiException(status=409, reason="Already Exists")
+        self.operations.append(f"create-receipt:{name}")
+        self.receipts[name] = body
+        return body
+
+    def read_namespaced_config_map(self, *, name: str, namespace: str) -> Any:
+        assert namespace == "airflow"
+        self.operations.append(f"read-receipt:{name}")
+        if self.corrupt_receipt_readback:
+            return SimpleNamespace(
+                immutable=True,
+                metadata=SimpleNamespace(name=name),
+                data={"receipt.json": "{}"},
+            )
+        return self.receipts[name]
 
 
 class _BatchApi:
@@ -336,3 +395,92 @@ def test_cleanup_protects_pod_while_its_owning_job_exists() -> None:
     assert report.protected_job_owned_pods == ("operator-still-observing",)
     assert report.deleted_pods == ("orphaned-job-pod", "ordinary-executor-pod")
     assert core_api.deleted == ["orphaned-job-pod", "ordinary-executor-pod"]
+
+
+def test_cleanup_persists_and_reads_back_eviction_receipt_before_delete() -> None:
+    from dags.airflow_pod_cleanup import cleanup_airflow_pods
+
+    core_api = _CoreApi([_pod("evicted-task", phase="Failed", reason="Evicted")])
+
+    report = cleanup_airflow_pods(
+        core_api=core_api,
+        batch_api=_BatchApi(set()),
+        namespace="airflow",
+        now=datetime(2026, 8, 16, 11, 0, tzinfo=UTC),
+    )
+
+    receipt_name = "airflow-pod-termination-00000000-0000-4000-8000-000000000012"
+    receipt_config_map = core_api.receipts[receipt_name]
+    receipt = json.loads(receipt_config_map.data["receipt.json"])
+    assert receipt_config_map.immutable is True
+    assert (
+        receipt_config_map.metadata.annotations["adapstory.com/receipt-sha256"]
+        == receipt["receiptSha256"]
+    )
+    assert receipt["receiptSha256"].startswith("sha256:")
+    assert receipt["schema"] == "AirflowPodTerminationReceipt/v1"
+    assert receipt["classification"] == "evicted"
+    assert receipt["pod"]["name"] == "evicted-task"
+    assert receipt["pod"]["uid"] == "00000000-0000-4000-8000-000000000012"
+    assert receipt["pod"]["phase"] == "Failed"
+    assert receipt["pod"]["reason"] == "Evicted"
+    assert receipt["pod"]["containerStatuses"][0]["terminated"] == {
+        "exitCode": 137,
+        "finishedAt": "2026-08-16T10:05:00Z",
+        "message": "container exceeded memory limit",
+        "reason": "OOMKilled",
+        "signal": 9,
+        "startedAt": "2026-08-16T10:00:00Z",
+    }
+    assert core_api.operations == [
+        f"create-receipt:{receipt_name}",
+        f"read-receipt:{receipt_name}",
+        "delete:evicted-task",
+    ]
+    assert report.deleted_pods == ("evicted-task",)
+
+    core_api.deleted.clear()
+    core_api.operations.clear()
+    repeated = cleanup_airflow_pods(
+        core_api=core_api,
+        batch_api=_BatchApi(set()),
+        namespace="airflow",
+        now=datetime(2026, 8, 16, 11, 15, tzinfo=UTC),
+    )
+    assert core_api.operations == [f"read-receipt:{receipt_name}", "delete:evicted-task"]
+    assert repeated.deleted_pods == ("evicted-task",)
+
+
+def test_cleanup_keeps_failed_pod_when_termination_receipt_cannot_be_persisted() -> None:
+    from dags.airflow_pod_cleanup import cleanup_airflow_pods
+
+    core_api = _CoreApi(
+        [_pod("failed-task", phase="Failed")],
+        receipt_failure=ApiException(status=403, reason="Forbidden"),
+    )
+
+    with pytest.raises(ApiException, match="Forbidden"):
+        cleanup_airflow_pods(
+            core_api=core_api,
+            batch_api=_BatchApi(set()),
+            namespace="airflow",
+            now=datetime(2026, 8, 16, 11, 0, tzinfo=UTC),
+        )
+
+    assert core_api.deleted == []
+
+
+def test_cleanup_keeps_failed_pod_when_termination_receipt_readback_differs() -> None:
+    from dags.airflow_pod_cleanup import cleanup_airflow_pods
+
+    core_api = _CoreApi([_pod("failed-task", phase="Failed")], corrupt_receipt_readback=True)
+
+    with pytest.raises(ValueError, match="exact read-back failed"):
+        cleanup_airflow_pods(
+            core_api=core_api,
+            batch_api=_BatchApi(set()),
+            namespace="airflow",
+            now=datetime(2026, 8, 16, 11, 0, tzinfo=UTC),
+        )
+
+    assert core_api.deleted == []
