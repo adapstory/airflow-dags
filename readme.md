@@ -169,10 +169,13 @@ SERP eval DAG contracts:
   one all-corpus process. Before fan-out, one read-only `classify-pack-cas`
   admission classifies the canonical eighteen suite sides as `COMPATIBLE`,
   `MISS`, `LEGACY_RESEALABLE`, `INCOMPATIBLE`, or `PARTIAL/CORRUPT`. Only the
-  first three states admit the builder branch; either fatal state routes to one
-  explicit blocker while all pack-side jobs are skipped, preventing a single
-  incompatible WORM coordinate from producing a downstream `upstream_failed`
-  wave. Eighteen controller-owned `build-pack-side` Jobs then
+  first three states admit the builder branch. Either deterministic failure
+  state routes to a no-retry `D19PackCasRecoveryPlan/v1`: incompatible identity
+  or schema requires migration to a new immutable coordinate, while partial or
+  corrupt material requires rebuild from the last valid CAS checkpoint. The
+  recovery path then fails closed once and all pack-side jobs are skipped,
+  preventing both three identical Airflow attempts and a downstream
+  `upstream_failed` wave. Eighteen controller-owned `build-pack-side` Jobs then
   each load one suite, build one baseline or candidate index, seal a
   `BC21BenchmarkPackSideBuildResult/v1` at a deterministic URI, and each emits
   only its compact WORM handle to stdout. Heavy builders have no XCom sidecar: Job
@@ -185,6 +188,13 @@ SERP eval DAG contracts:
   reuses an exact matching sealed side result, so completed sides are never embedded
   again; baseline precedes candidate per suite to share immutable paired
   substrate, rights, and partition handles.
+  Pack classification, side construction, and aggregation deliberately set
+  Airflow `retries=0`: an outer task retry cannot distinguish deterministic
+  contract failure from a transient request. Retry is confined to typed,
+  operation-local mechanisms: transport failures, reactive MinIO STS refresh
+  on `InvalidAccessKeyId`/`ExpiredToken`, and provider outcomes explicitly
+  marked transient. A recorded `provider_outcome_unknown` continuation uses a
+  new request identity and CAS checkpoint; it is not a blind Airflow retry.
   CodeRAG and SWE-bench use sealed `SandboxWorkItemSet/v1` fan-out. The selected
   digest-pinned image runs only its suite-specific staged standalone runner as
   the second init container, with no Airflow/Pipeline import, credentials,

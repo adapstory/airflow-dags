@@ -92,7 +92,8 @@ D19_CATALOG_READINESS_GATE_TASK_ID = "choose_d19_catalog_readiness_transition"
 D19_CATALOG_BLOCKER_TASK_ID = "fail_d19_blocked_catalog"
 D19_PACK_CAS_CLASSIFIER_TASK_ID = "classify_pack_cas"
 D19_PACK_CAS_GATE_TASK_ID = "pack_cas_readiness_gate"
-D19_PACK_CAS_BLOCKER_TASK_ID = "pack_cas_blocker"
+D19_PACK_CAS_RECOVERY_PLAN_TASK_ID = "plan_pack_cas_migration_rebuild"
+D19_PACK_CAS_RECOVERY_REQUIRED_TASK_ID = "pack_cas_migration_rebuild_required"
 D19_OFFICIAL_HARNESS_WORK_ITEMS = tuple(
     (suite_id, side, repetition)
     for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
@@ -930,6 +931,17 @@ def fail_d19_blocked_catalog(catalog_snapshot: Mapping[str, Any]) -> None:
 
 
 def choose_d19_pack_cas_transition(classification: Mapping[str, Any]) -> str | list[str]:
+    classifications = _validated_d19_pack_cas_classifications(classification)
+    if any(
+        item["classification"] in {"INCOMPATIBLE", "PARTIAL/CORRUPT"} for item in classifications
+    ):
+        return D19_PACK_CAS_RECOVERY_PLAN_TASK_ID
+    return [task.task_id for task in D19_PACK_SIDE_BUILD_TASKS.values()]
+
+
+def _validated_d19_pack_cas_classifications(
+    classification: Mapping[str, Any],
+) -> list[Mapping[str, Any]]:
     if classification.get("schema") != "BC21PackCasClassification/v1":
         raise ValueError("D19 pack CAS classification schema is unsupported")
     raw = classification.get("classifications")
@@ -941,7 +953,6 @@ def choose_d19_pack_cas_transition(classification: Mapping[str, Any]) -> str | l
         for side in ("baseline", "candidate")
     ]
     observed: list[tuple[str, str]] = []
-    fatal: list[Mapping[str, Any]] = []
     admitted = {"COMPATIBLE", "MISS", "LEGACY_RESEALABLE"}
     for item in raw:
         if not isinstance(item, Mapping):
@@ -951,28 +962,60 @@ def choose_d19_pack_cas_transition(classification: Mapping[str, Any]) -> str | l
         state = item.get("classification")
         if state not in admitted | {"INCOMPATIBLE", "PARTIAL/CORRUPT"}:
             raise ValueError("D19 pack CAS side classification state is unsupported")
-        if state not in admitted:
-            fatal.append(item)
     if observed != expected:
         raise ValueError("D19 pack CAS side classification order is noncanonical")
-    if fatal:
-        return D19_PACK_CAS_BLOCKER_TASK_ID
-    return [task.task_id for task in D19_PACK_SIDE_BUILD_TASKS.values()]
+    return list(raw)
 
 
-def fail_d19_pack_cas_admission(classification: Mapping[str, Any]) -> None:
-    transition = choose_d19_pack_cas_transition(classification)
-    if transition != D19_PACK_CAS_BLOCKER_TASK_ID:
-        raise ValueError("D19 pack CAS blocker requires a fatal classification")
-    fatal = [
-        item
-        for item in classification["classifications"]
-        if item["classification"] in {"INCOMPATIBLE", "PARTIAL/CORRUPT"}
-    ]
-    summary = ", ".join(
-        f"{item['suiteId']}/{item['side']}={item['classification']}" for item in fatal
-    )
-    raise RuntimeError("D19 pack CAS admission blocked before fan-out: " + summary)
+def plan_d19_pack_cas_migration_rebuild(
+    classification: Mapping[str, Any],
+) -> dict[str, Any]:
+    actions: list[dict[str, Any]] = []
+    for item in _validated_d19_pack_cas_classifications(classification):
+        state = item["classification"]
+        if state not in {"INCOMPATIBLE", "PARTIAL/CORRUPT"}:
+            continue
+        reason = item.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("D19 deterministic pack CAS failure requires a reason")
+        actions.append(
+            {
+                "suiteId": item["suiteId"],
+                "side": item["side"],
+                "classification": state,
+                "action": (
+                    "MIGRATE_IDENTITY_OR_SCHEMA"
+                    if state == "INCOMPATIBLE"
+                    else "REBUILD_FROM_LAST_VALID_CAS_CHECKPOINT"
+                ),
+                "reason": reason,
+            }
+        )
+    if not actions:
+        raise ValueError("D19 pack CAS recovery plan requires a deterministic failure")
+    return {
+        "schema": "D19PackCasRecoveryPlan/v1",
+        "retryable": False,
+        "sideCount": len(actions),
+        "actions": actions,
+    }
+
+
+def fail_d19_pack_cas_recovery(recovery_plan: Mapping[str, Any]) -> None:
+    if (
+        recovery_plan.get("schema") != "D19PackCasRecoveryPlan/v1"
+        or recovery_plan.get("retryable") is not False
+    ):
+        raise ValueError("D19 pack CAS recovery plan is unsupported")
+    actions = recovery_plan.get("actions")
+    if (
+        not isinstance(actions, list)
+        or recovery_plan.get("sideCount") != len(actions)
+        or not actions
+    ):
+        raise ValueError("D19 pack CAS recovery plan actions are invalid")
+    summary = ", ".join(f"{item['suiteId']}/{item['side']}={item['action']}" for item in actions)
+    raise RuntimeError("D19 deterministic pack CAS recovery is required without retry: " + summary)
 
 
 def load_model_catalog_promotion(plan_json: str) -> dict[str, Any]:
@@ -1652,8 +1695,7 @@ classify_pack_cas = KubernetesPodOperator(
     reattach_on_restart=True,
     on_kill_action="delete_pod",
     on_finish_action="delete_pod",
-    retries=2,
-    retry_delay=timedelta(seconds=30),
+    retries=0,
     executor_config=kubernetes_pod_launcher_executor_config(),
     dag=dag,
 )
@@ -1666,10 +1708,19 @@ pack_cas_readiness_gate = BranchPythonOperator(
     dag=dag,
 )
 
-pack_cas_blocker = PythonOperator(
-    task_id=D19_PACK_CAS_BLOCKER_TASK_ID,
-    python_callable=fail_d19_pack_cas_admission,
+plan_pack_cas_migration_rebuild_task = PythonOperator(
+    task_id=D19_PACK_CAS_RECOVERY_PLAN_TASK_ID,
+    python_callable=plan_d19_pack_cas_migration_rebuild,
     op_args=["{{ ti.xcom_pull(task_ids='classify_pack_cas') }}"],
+    retries=0,
+    executor_config=D19_AGGREGATOR_EXECUTOR_CONFIG,
+    dag=dag,
+)
+
+pack_cas_migration_rebuild_required = PythonOperator(
+    task_id=D19_PACK_CAS_RECOVERY_REQUIRED_TASK_ID,
+    python_callable=fail_d19_pack_cas_recovery,
+    op_args=["{{ ti.xcom_pull(task_ids='plan_pack_cas_migration_rebuild') }}"],
     retries=0,
     executor_config=D19_AGGREGATOR_EXECUTOR_CONFIG,
     dag=dag,
@@ -1781,8 +1832,7 @@ for suite_id, side in D19_PACK_SIDE_IDENTITIES:
         wait_until_job_complete=True,
         pod_discovery_timeout_seconds=DEFAULT_JOB_POD_DISCOVERY_TIMEOUT_SECONDS,
         pod_discovery_poll_interval_seconds=1,
-        retries=2,
-        retry_delay=timedelta(seconds=30),
+        retries=0,
         executor_config=kubernetes_pod_launcher_executor_config(),
         dag=dag,
     )
@@ -1864,8 +1914,7 @@ aggregate_exact_nine_benchmark_packs = KubernetesPodOperator(
     reattach_on_restart=True,
     on_kill_action="delete_pod",
     on_finish_action="delete_pod",
-    retries=2,
-    retry_delay=timedelta(seconds=30),
+    retries=0,
     executor_config=kubernetes_pod_launcher_executor_config(),
     dag=dag,
 )
@@ -2663,7 +2712,8 @@ catalog_readiness_gate >> catalog_blocker
 catalog_readiness_gate >> classify_pack_cas
 load_promotion >> classify_pack_cas
 classify_pack_cas >> pack_cas_readiness_gate
-pack_cas_readiness_gate >> pack_cas_blocker
+pack_cas_readiness_gate >> plan_pack_cas_migration_rebuild_task
+plan_pack_cas_migration_rebuild_task >> pack_cas_migration_rebuild_required
 for suite_id, side in D19_PACK_SIDE_IDENTITIES:
     side_task = D19_PACK_SIDE_BUILD_TASKS[(suite_id, side)]
     pack_cas_readiness_gate >> side_task

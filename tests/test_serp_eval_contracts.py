@@ -9552,7 +9552,7 @@ def test_d19_blocked_catalog_terminates_before_pack_fanout(
     }
 
 
-def test_d19_pack_cas_classifier_blocks_fatal_inventory_before_pack_fanout(
+def test_d19_pack_cas_classifier_routes_deterministic_failures_to_no_retry_recovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_airflow_import_stubs(monkeypatch)
@@ -9582,23 +9582,88 @@ def test_d19_pack_cas_classifier_blocks_fatal_inventory_before_pack_fanout(
             for side in ("baseline", "candidate")
         ],
     }
-    blocked = json.loads(json.dumps(admitted))
-    blocked["classifications"][7]["classification"] = "INCOMPATIBLE"
+    incompatible = json.loads(json.dumps(admitted))
+    incompatible["classifications"][7].update(
+        classification="INCOMPATIBLE",
+        reason="embeddings CAS schema is incompatible",
+    )
+    corrupt = json.loads(json.dumps(admitted))
+    corrupt["classifications"][11].update(
+        classification="PARTIAL/CORRUPT",
+        reason="embeddings CAS shard Merkle root is corrupt",
+    )
 
     assert set(module.choose_d19_pack_cas_transition(admitted)) == builder_task_ids
-    assert module.choose_d19_pack_cas_transition(blocked) == "pack_cas_blocker"
-    with pytest.raises(RuntimeError, match="INCOMPATIBLE"):
-        module.fail_d19_pack_cas_admission(blocked)
+    assert module.choose_d19_pack_cas_transition(incompatible) == (
+        "plan_pack_cas_migration_rebuild"
+    )
+    assert module.choose_d19_pack_cas_transition(corrupt) == ("plan_pack_cas_migration_rebuild")
+    recovery = module.plan_d19_pack_cas_migration_rebuild(incompatible)
+    assert recovery == {
+        "schema": "D19PackCasRecoveryPlan/v1",
+        "retryable": False,
+        "sideCount": 1,
+        "actions": [
+            {
+                "suiteId": MANDATORY_SERP_BENCHMARK_SUITES[3],
+                "side": "candidate",
+                "classification": "INCOMPATIBLE",
+                "action": "MIGRATE_IDENTITY_OR_SCHEMA",
+                "reason": "embeddings CAS schema is incompatible",
+            }
+        ],
+    }
+    corrupt_recovery = module.plan_d19_pack_cas_migration_rebuild(corrupt)
+    assert corrupt_recovery["retryable"] is False
+    assert corrupt_recovery["actions"] == [
+        {
+            "suiteId": MANDATORY_SERP_BENCHMARK_SUITES[5],
+            "side": "candidate",
+            "classification": "PARTIAL/CORRUPT",
+            "action": "REBUILD_FROM_LAST_VALID_CAS_CHECKPOINT",
+            "reason": "embeddings CAS shard Merkle root is corrupt",
+        }
+    ]
+    with pytest.raises(RuntimeError, match="MIGRATE_IDENTITY_OR_SCHEMA"):
+        module.fail_d19_pack_cas_recovery(recovery)
     classifier = module.classify_pack_cas.kwargs
     assert classifier["arguments"][0] == "classify-pack-cas"
     assert classifier["do_xcom_push"] is True
+    assert classifier["retries"] == 0
     assert module.classify_pack_cas.downstream_task_ids == {"pack_cas_readiness_gate"}
     assert module.pack_cas_readiness_gate.downstream_task_ids == {
-        "pack_cas_blocker",
+        "plan_pack_cas_migration_rebuild",
         *builder_task_ids,
     }
-    assert module.pack_cas_blocker.downstream_task_ids == set()
+    assert module.plan_pack_cas_migration_rebuild_task.kwargs["retries"] == 0
+    assert module.plan_pack_cas_migration_rebuild_task.downstream_task_ids == {
+        "pack_cas_migration_rebuild_required"
+    }
+    assert module.pack_cas_migration_rebuild_required.kwargs["retries"] == 0
+    assert module.pack_cas_migration_rebuild_required.downstream_task_ids == set()
     assert builder_task_ids.isdisjoint(module.classify_pack_cas.downstream_task_ids)
+
+
+def test_d19_pack_lifecycle_disables_untyped_airflow_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    for name, value in {
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT": "http://minio:9000",
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION": "us-east-1",
+        "ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST": "sha256:" + "d" * 64,
+        "ADAPSTORY_SERP_BC21_BASE_URL": "http://context-platform:8080/api/bc-21/serp/v1",
+        "ADAPSTORY_SERP_MCP_GATEWAY_BASE_URL": (
+            "http://prod-serp-mcp-gateway-svc.env-prod.svc.cluster.local:8000"
+        ),
+    }.items():
+        monkeypatch.setenv(name, value)
+    module = importlib.import_module("dags.serp_benchmark_improvement_wave")
+    module = importlib.reload(module)
+
+    assert module.classify_pack_cas.kwargs["retries"] == 0
+    assert all(task.kwargs["retries"] == 0 for task in module.D19_PACK_SIDE_BUILD_TASKS.values())
+    assert module.aggregate_exact_nine_benchmark_packs.kwargs["retries"] == 0
 
 
 def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_request(
@@ -9651,7 +9716,7 @@ def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_reque
         assert arguments[arguments.index("--content-addressed-cache-prefix") + 1] == (
             "s3://airflow-serp-evidence/serp-evals/benchmark-cas/v4"
         )
-        assert builder_task.kwargs["retries"] == 2
+        assert builder_task.kwargs["retries"] == 0
         expected_priority = (
             1000
             if (suite_id, side)
@@ -9677,7 +9742,7 @@ def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_reque
     assert aggregator["arguments"][0] == "aggregate-exact-nine"
     assert "--side-result-uris-json" in aggregator["arguments"]
     assert aggregator["do_xcom_push"] is True
-    assert aggregator["retries"] == 2
+    assert aggregator["retries"] == 0
     assert registrar["arguments"][0] == "register-binding"
     assert registrar["do_xcom_push"] is True
     assert "--lifecycle-input" in registrar["arguments"]
