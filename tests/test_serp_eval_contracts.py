@@ -9601,7 +9601,7 @@ def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_reque
         assert arguments[arguments.index("--side") + 1] == side
         assert "--shared-output-prefix" in arguments
         assert arguments[arguments.index("--content-addressed-cache-prefix") + 1] == (
-            "s3://airflow-serp-evidence/serp-evals/benchmark-cas/v3"
+            "s3://airflow-serp-evidence/serp-evals/benchmark-cas/v4"
         )
         assert builder_task.kwargs["retries"] == 2
         expected_priority = (
