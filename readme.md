@@ -166,7 +166,13 @@ SERP eval DAG contracts:
   pinned provenance, missing rights, or incomplete all-nine coverage are
   `blocked`.
   Exact-nine pack construction is a bounded map/aggregate graph rather than
-  one all-corpus process: eighteen controller-owned `build-pack-side` Jobs
+  one all-corpus process. Before fan-out, one read-only `classify-pack-cas`
+  admission classifies the canonical eighteen suite sides as `COMPATIBLE`,
+  `MISS`, `LEGACY_RESEALABLE`, `INCOMPATIBLE`, or `PARTIAL/CORRUPT`. Only the
+  first three states admit the builder branch; either fatal state routes to one
+  explicit blocker while all pack-side jobs are skipped, preventing a single
+  incompatible WORM coordinate from producing a downstream `upstream_failed`
+  wave. Eighteen controller-owned `build-pack-side` Jobs then
   each load one suite, build one baseline or candidate index, seal a
   `BC21BenchmarkPackSideBuildResult/v1` at a deterministic URI, and each emits
   only its compact WORM handle to stdout. Heavy builders have no XCom sidecar: Job

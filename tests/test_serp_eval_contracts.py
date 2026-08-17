@@ -1786,10 +1786,7 @@ def test_swe_archive_fetch_stream_exhausts_bounded_transport_retries(
 def test_catalog_input_fetch_retries_504_then_reuses_verified_cas(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    url = (
-        "https://api.github.com/repos/stanford-futuredata/ARES/tarball/"
-        + "c" * 40
-    )
+    url = "https://api.github.com/repos/stanford-futuredata/ARES/tarball/" + "c" * 40
     payload = b"pinned catalog archive"
     attempts: list[str] = []
     delays: list[float] = []
@@ -1831,8 +1828,10 @@ def test_catalog_input_cas_root_is_shared_across_operation_ids() -> None:
     first = serp_eval_contracts_module._catalog_input_cas_root(artifact_root)
     second = serp_eval_contracts_module._catalog_input_cas_root(artifact_root)
 
-    assert first == second == (
-        "s3://airflow-serp-evidence/serp-evals/benchmark-cas/v3/catalog-inputs/v1"
+    assert (
+        first
+        == second
+        == ("s3://airflow-serp-evidence/serp-evals/benchmark-cas/v3/catalog-inputs/v1")
     )
 
 
@@ -9541,7 +9540,7 @@ def test_d19_blocked_catalog_terminates_before_pack_fanout(
         match="benchmark catalog blocked preflight: SWE-bench Verified",
     ):
         module.fail_d19_blocked_catalog(blocked)
-    assert set(module.choose_d19_catalog_readiness_transition(ready)) == builder_task_ids
+    assert module.choose_d19_catalog_readiness_transition(ready) == "classify_pack_cas"
     assert len(builder_task_ids) == 18
     assert module.load_catalog.downstream_task_ids == {
         module.catalog_readiness_gate.task_id,
@@ -9549,8 +9548,57 @@ def test_d19_blocked_catalog_terminates_before_pack_fanout(
     assert builder_task_ids.isdisjoint(module.load_catalog.downstream_task_ids)
     assert module.catalog_readiness_gate.downstream_task_ids == {
         module.D19_CATALOG_BLOCKER_TASK_ID,
+        "classify_pack_cas",
+    }
+
+
+def test_d19_pack_cas_classifier_blocks_fatal_inventory_before_pack_fanout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    for name, value in {
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT": "http://minio:9000",
+        "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION": "us-east-1",
+        "ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST": "sha256:" + "d" * 64,
+        "ADAPSTORY_SERP_BC21_BASE_URL": "http://context-platform:8080/api/bc-21/serp/v1",
+        "ADAPSTORY_SERP_MCP_GATEWAY_BASE_URL": (
+            "http://prod-serp-mcp-gateway-svc.env-prod.svc.cluster.local:8000"
+        ),
+    }.items():
+        monkeypatch.setenv(name, value)
+    module = importlib.import_module("dags.serp_benchmark_improvement_wave")
+    module = importlib.reload(module)
+    builder_task_ids = {task.task_id for task in module.D19_PACK_SIDE_BUILD_TASKS.values()}
+    admitted = {
+        "schema": "BC21PackCasClassification/v1",
+        "sideCount": 18,
+        "classifications": [
+            {
+                "suiteId": suite_id,
+                "side": side,
+                "classification": "MISS",
+            }
+            for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+            for side in ("baseline", "candidate")
+        ],
+    }
+    blocked = json.loads(json.dumps(admitted))
+    blocked["classifications"][7]["classification"] = "INCOMPATIBLE"
+
+    assert set(module.choose_d19_pack_cas_transition(admitted)) == builder_task_ids
+    assert module.choose_d19_pack_cas_transition(blocked) == "pack_cas_blocker"
+    with pytest.raises(RuntimeError, match="INCOMPATIBLE"):
+        module.fail_d19_pack_cas_admission(blocked)
+    classifier = module.classify_pack_cas.kwargs
+    assert classifier["arguments"][0] == "classify-pack-cas"
+    assert classifier["do_xcom_push"] is True
+    assert module.classify_pack_cas.downstream_task_ids == {"pack_cas_readiness_gate"}
+    assert module.pack_cas_readiness_gate.downstream_task_ids == {
+        "pack_cas_blocker",
         *builder_task_ids,
     }
+    assert module.pack_cas_blocker.downstream_task_ids == set()
+    assert builder_task_ids.isdisjoint(module.classify_pack_cas.downstream_task_ids)
 
 
 def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_request(
@@ -9862,7 +9910,7 @@ def test_d19_xcom_kpos_delete_pods_when_the_controller_or_base_dies() -> None:
             assert constants.get("on_finish_action") == "delete_pod"
             assert constants.get("on_kill_action") == "delete_pod"
 
-    assert len(xcom_calls) == 10
+    assert len(xcom_calls) == 11
 
 
 def test_d19_runs_exact_ninety_server_owned_official_harness_work_items(

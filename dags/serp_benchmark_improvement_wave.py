@@ -90,6 +90,9 @@ D19_TRIGGER_NEXT_RUN_TASK_ID = "trigger_next_d19_release_run"
 D19_RELEASE_COMPLETE_TASK_ID = "d19_release_terminal_complete"
 D19_CATALOG_READINESS_GATE_TASK_ID = "choose_d19_catalog_readiness_transition"
 D19_CATALOG_BLOCKER_TASK_ID = "fail_d19_blocked_catalog"
+D19_PACK_CAS_CLASSIFIER_TASK_ID = "classify_pack_cas"
+D19_PACK_CAS_GATE_TASK_ID = "pack_cas_readiness_gate"
+D19_PACK_CAS_BLOCKER_TASK_ID = "pack_cas_blocker"
 D19_OFFICIAL_HARNESS_WORK_ITEMS = tuple(
     (suite_id, side, repetition)
     for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
@@ -911,7 +914,7 @@ def choose_d19_catalog_readiness_transition(
     if status == "ready":
         if blocking_suite_ids:
             raise ValueError("D19 ready benchmark catalog contains blocking suites")
-        return [task.task_id for task in D19_PACK_SIDE_BUILD_TASKS.values()]
+        return D19_PACK_CAS_CLASSIFIER_TASK_ID
     raise ValueError("D19 benchmark catalog status is unsupported")
 
 
@@ -924,6 +927,52 @@ def fail_d19_blocked_catalog(catalog_snapshot: Mapping[str, Any]) -> None:
         "D19 benchmark catalog blocked preflight: "
         + ", ".join(str(suite_id) for suite_id in blocking_suite_ids)
     )
+
+
+def choose_d19_pack_cas_transition(classification: Mapping[str, Any]) -> str | list[str]:
+    if classification.get("schema") != "BC21PackCasClassification/v1":
+        raise ValueError("D19 pack CAS classification schema is unsupported")
+    raw = classification.get("classifications")
+    if classification.get("sideCount") != 18 or not isinstance(raw, list) or len(raw) != 18:
+        raise ValueError("D19 pack CAS classification must cover exactly eighteen sides")
+    expected = [
+        (suite_id, side)
+        for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
+        for side in ("baseline", "candidate")
+    ]
+    observed: list[tuple[str, str]] = []
+    fatal: list[Mapping[str, Any]] = []
+    admitted = {"COMPATIBLE", "MISS", "LEGACY_RESEALABLE"}
+    for item in raw:
+        if not isinstance(item, Mapping):
+            raise ValueError("D19 pack CAS side classification must be an object")
+        identity = (str(item.get("suiteId", "")), str(item.get("side", "")))
+        observed.append(identity)
+        state = item.get("classification")
+        if state not in admitted | {"INCOMPATIBLE", "PARTIAL/CORRUPT"}:
+            raise ValueError("D19 pack CAS side classification state is unsupported")
+        if state not in admitted:
+            fatal.append(item)
+    if observed != expected:
+        raise ValueError("D19 pack CAS side classification order is noncanonical")
+    if fatal:
+        return D19_PACK_CAS_BLOCKER_TASK_ID
+    return [task.task_id for task in D19_PACK_SIDE_BUILD_TASKS.values()]
+
+
+def fail_d19_pack_cas_admission(classification: Mapping[str, Any]) -> None:
+    transition = choose_d19_pack_cas_transition(classification)
+    if transition != D19_PACK_CAS_BLOCKER_TASK_ID:
+        raise ValueError("D19 pack CAS blocker requires a fatal classification")
+    fatal = [
+        item
+        for item in classification["classifications"]
+        if item["classification"] in {"INCOMPATIBLE", "PARTIAL/CORRUPT"}
+    ]
+    summary = ", ".join(
+        f"{item['suiteId']}/{item['side']}={item['classification']}" for item in fatal
+    )
+    raise RuntimeError("D19 pack CAS admission blocked before fan-out: " + summary)
 
 
 def load_model_catalog_promotion(plan_json: str) -> dict[str, Any]:
@@ -1548,6 +1597,84 @@ load_promotion = PythonOperator(
     dag=dag,
 )
 
+classify_pack_cas = KubernetesPodOperator(
+    task_id=D19_PACK_CAS_CLASSIFIER_TASK_ID,
+    name="serp-d19-classify-pack-cas",
+    namespace=conf.get("kubernetes_executor", "namespace"),
+    image=current_airflow_runtime_image(),
+    cmds=[
+        "python",
+        "-m",
+        "adapstory_serp_pipeline.registry.bc21_benchmark_pack_lifecycle_cli",
+    ],
+    arguments=[
+        "classify-pack-cas",
+        "--benchmark-catalog",
+        "{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog')['artifactPath'] }}",
+        "--benchmark-catalog-version-id",
+        "{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog')['artifactVersionId'] }}",
+        "--benchmark-catalog-sha256",
+        (
+            "sha256:{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog')"
+            "['artifactSha256'] }}"
+        ),
+        "--promotion",
+        (
+            "{{ ti.xcom_pull(task_ids='load_model_catalog_promotion')"
+            "['promotionEvidence']['s3Uri'] }}"
+        ),
+        "--promotion-version-id",
+        (
+            "{{ ti.xcom_pull(task_ids='load_model_catalog_promotion')"
+            "['promotionEvidence']['versionId'] }}"
+        ),
+        "--promotion-sha256",
+        (
+            "{{ ti.xcom_pull(task_ids='load_model_catalog_promotion')"
+            "['promotionEvidence']['sha256'] }}"
+        ),
+        "--xcom-output",
+        "/airflow/xcom/return.json",
+    ],
+    env_vars=d19_builder_env_vars(),
+    service_account_name=D19_BUILDER_WORKLOAD_SERVICE_ACCOUNT,
+    automount_service_account_token=False,
+    volumes=D19_BUILDER_VOLUMES,
+    volume_mounts=D19_BUILDER_VOLUME_MOUNTS,
+    labels=D19_BUILDER_WORKLOAD_LABELS,
+    container_resources=D19_PACK_BUILDER_RESOURCES,
+    security_context=hardened_runtime_pod_security_context(),
+    container_security_context=hardened_runtime_container_security_context(),
+    do_xcom_push=True,
+    get_logs=True,
+    log_events_on_failure=True,
+    random_name_suffix=True,
+    reattach_on_restart=True,
+    on_kill_action="delete_pod",
+    on_finish_action="delete_pod",
+    retries=2,
+    retry_delay=timedelta(seconds=30),
+    executor_config=kubernetes_pod_launcher_executor_config(),
+    dag=dag,
+)
+
+pack_cas_readiness_gate = BranchPythonOperator(
+    task_id=D19_PACK_CAS_GATE_TASK_ID,
+    python_callable=choose_d19_pack_cas_transition,
+    op_args=["{{ ti.xcom_pull(task_ids='classify_pack_cas') }}"],
+    executor_config=D19_AGGREGATOR_EXECUTOR_CONFIG,
+    dag=dag,
+)
+
+pack_cas_blocker = PythonOperator(
+    task_id=D19_PACK_CAS_BLOCKER_TASK_ID,
+    python_callable=fail_d19_pack_cas_admission,
+    op_args=["{{ ti.xcom_pull(task_ids='classify_pack_cas') }}"],
+    retries=0,
+    executor_config=D19_AGGREGATOR_EXECUTOR_CONFIG,
+    dag=dag,
+)
+
 D19_PACK_SIDE_IDENTITIES = tuple(
     (suite_id, side)
     for suite_id in MANDATORY_SERP_BENCHMARK_SUITES
@@ -1625,9 +1752,7 @@ for suite_id, side in D19_PACK_SIDE_IDENTITIES:
         service_account_name=D19_BUILDER_WORKLOAD_SERVICE_ACCOUNT,
         automount_service_account_token=False,
         volumes=(
-            D19_SWE_BUILDER_VOLUMES
-            if suite_id == "SWE-bench Verified"
-            else D19_BUILDER_VOLUMES
+            D19_SWE_BUILDER_VOLUMES if suite_id == "SWE-bench Verified" else D19_BUILDER_VOLUMES
         ),
         volume_mounts=D19_BUILDER_VOLUME_MOUNTS,
         labels=D19_BUILDER_WORKLOAD_LABELS,
@@ -2535,10 +2660,13 @@ validate_plan >> load_promotion
 # catalog evidence and must not obscure the root cause. Revisit when: pack-side
 # execution can make catalog evidence ready without violating immutability.
 catalog_readiness_gate >> catalog_blocker
+catalog_readiness_gate >> classify_pack_cas
+load_promotion >> classify_pack_cas
+classify_pack_cas >> pack_cas_readiness_gate
+pack_cas_readiness_gate >> pack_cas_blocker
 for suite_id, side in D19_PACK_SIDE_IDENTITIES:
     side_task = D19_PACK_SIDE_BUILD_TASKS[(suite_id, side)]
-    catalog_readiness_gate >> side_task
-    load_promotion >> side_task
+    pack_cas_readiness_gate >> side_task
     side_task >> aggregate_exact_nine_benchmark_packs
 # Context: immutable baseline/candidate routes now terminate on different GPU
 # endpoints and write distinct semantic CAS identities.
