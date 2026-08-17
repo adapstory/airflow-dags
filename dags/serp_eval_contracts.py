@@ -82,10 +82,13 @@ MANDATORY_SERP_BENCHMARK_SUITES = (
     "rusBEIR",
 )
 _D19_CODE_SANDBOX_SUITES = frozenset({"CodeRAG-Bench", "SWE-bench Verified"})
-_SWE_ARCHIVE_FETCH_BACKOFF_SECONDS = (0.5, 1.0)
+_SWE_ARCHIVE_FETCH_BACKOFF_SECONDS = (0.5, 1.0, 2.0, 4.0)
 _SWE_ARCHIVE_RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
 _SWE_ARCHIVE_CACHE_ENTRY_SCHEMA = "SWEArchiveCacheEntry/v1"
 _SWE_ARCHIVE_CACHE_ENTRY_MAX_BYTES = 16 * 1024
+_CATALOG_INPUT_FETCH_BACKOFF_SECONDS = (0.5, 1.0, 2.0, 4.0)
+_CATALOG_INPUT_CACHE_ENTRY_SCHEMA = "BenchmarkCatalogInputCacheEntry/v1"
+_CATALOG_INPUT_CACHE_ENTRY_MAX_BYTES = 16 * 1024
 _AIRFLOW_ARTIFACT_S3_STS_DURATION_SECONDS_ENV = "ADAPSTORY_AIRFLOW_ARTIFACT_S3_STS_DURATION_SECONDS"
 SERP_NORMALIZED_GATE_FLOOR = 0.90
 GATEWAY_CLI_MODULE = "adapstory_serp_mcp_gateway.airflow_eval_cli"
@@ -6404,7 +6407,23 @@ def materialize_live_benchmark_catalog_artifact(
     from dags.serp_benchmark_catalog import build_live_benchmark_catalog_evidence
 
     artifact_root_path = _artifact_parent_path(artifact_paths["benchmark_catalog"])
-    resolved_fetch_bytes = _fetch_https_bytes if fetch_bytes is None else fetch_bytes
+    catalog_input_cache: (
+        tuple[Callable[[str], bytes | None], Callable[[str, bytes], None]] | None
+    ) = None
+    if fetch_bytes is None:
+        catalog_input_cache = _worm_catalog_input_cache(
+            _required_str(plan, "artifact_root_path"),
+            operation_id=_required_str(plan, "operation_id"),
+        )
+        resolved_fetch_bytes = _retrying_catalog_input_fetcher(
+            _fetch_https_bytes,
+            cache_reader=catalog_input_cache[0],
+            cache_writer=catalog_input_cache[1],
+        )
+        native_archive_fetch_bytes = _fetch_https_bytes
+    else:
+        resolved_fetch_bytes = fetch_bytes
+        native_archive_fetch_bytes = fetch_bytes
     bytes_writer = (
         write_immutable_evidence_bytes_snapshot
         if snapshot_bytes_writer is None
@@ -6416,9 +6435,6 @@ def materialize_live_benchmark_catalog_artifact(
         else snapshot_file_writer
     )
     progress_cursor = 0
-    swe_archive_cache: tuple[Callable[[str], bytes | None], Callable[[str, bytes], None]] | None = (
-        None
-    )
 
     def emit_catalog_progress(*, phase: str, pass_number: int, byte_cursor: int) -> None:
         nonlocal progress_cursor
@@ -6473,21 +6489,19 @@ def materialize_live_benchmark_catalog_artifact(
         dataset_snapshots: Mapping[str, Mapping[str, object]],
         output_directory: Path,
     ) -> Mapping[str, object]:
-        nonlocal swe_archive_cache
         corpus_base_cursor = progress_cursor
         suite_pass = MANDATORY_SERP_BENCHMARK_SUITES.index(suite_id) + 1
-        if suite_id == "SWE-bench Verified" and swe_archive_cache is None:
-            swe_archive_cache = _worm_swe_archive_cache(
-                artifact_root_path,
-                operation_id=_required_str(plan, "operation_id"),
-            )
         return _native_corpus_materializer(
             suite_id,
             dataset_payloads,
             dataset_snapshots,
-            fetch_bytes=resolved_fetch_bytes,
-            archive_cache_reader=(None if swe_archive_cache is None else swe_archive_cache[0]),
-            archive_cache_writer=(None if swe_archive_cache is None else swe_archive_cache[1]),
+            fetch_bytes=native_archive_fetch_bytes,
+            archive_cache_reader=(
+                None if catalog_input_cache is None else catalog_input_cache[0]
+            ),
+            archive_cache_writer=(
+                None if catalog_input_cache is None else catalog_input_cache[1]
+            ),
             output_directory=output_directory,
             progress_callback=lambda relative_cursor: emit_catalog_progress(
                 phase="native-corpus",
@@ -6710,7 +6724,146 @@ def _is_retryable_swe_archive_fetch_error(error: Exception) -> bool:
     return False
 
 
-def _swe_archive_cache_client_provider(
+def _retrying_catalog_input_fetcher(
+    fetch_bytes: Callable[[str], bytes],
+    *,
+    cache_reader: Callable[[str], bytes | None],
+    cache_writer: Callable[[str, bytes], None],
+) -> Callable[[str], bytes]:
+    """Return a bounded upstream fetcher backed by verified cross-run CAS bytes."""
+
+    def fetch(url: str) -> bytes:
+        cached = cache_reader(url)
+        if cached is not None:
+            if not isinstance(cached, bytes) or not cached:
+                raise ValueError("benchmark catalog input cache returned invalid bytes")
+            return cached
+        payload: bytes | None = None
+        for attempt in range(len(_CATALOG_INPUT_FETCH_BACKOFF_SECONDS) + 1):
+            try:
+                payload = fetch_bytes(url)
+                break
+            except Exception as exc:
+                if attempt >= len(
+                    _CATALOG_INPUT_FETCH_BACKOFF_SECONDS
+                ) or not _is_retryable_swe_archive_fetch_error(exc):
+                    raise
+                sleep(_CATALOG_INPUT_FETCH_BACKOFF_SECONDS[attempt])
+        if not isinstance(payload, bytes) or not payload:
+            raise ValueError("benchmark catalog input fetch returned no bytes")
+        cache_writer(url, payload)
+        return payload
+
+    return fetch
+
+
+def _catalog_input_cas_root(artifact_root_path: str) -> str:
+    artifact = _artifact_ref("artifact_root_path", artifact_root_path)
+    if artifact.kind != "s3":
+        raise ValueError("benchmark catalog input CAS requires an s3:// artifact root")
+    return f"{artifact.location.rstrip('/')}/benchmark-cas/v3/catalog-inputs/v1"
+
+
+def _worm_catalog_input_cache(
+    artifact_root_path: str,
+    *,
+    operation_id: str,
+    s3_client: Any | None = None,
+) -> tuple[Callable[[str], bytes | None], Callable[[str, bytes], None]]:
+    """Return the shared WORM CAS for immutable catalog coordinates."""
+
+    cache_root = _catalog_input_cas_root(artifact_root_path)
+    current_client = _catalog_cache_client_provider(cache_root, s3_client)
+
+    def cache_entry_path(url: str) -> str:
+        coordinate_digest = sha256(url.encode("utf-8")).hexdigest()
+        return f"{cache_root}/coordinates/{coordinate_digest}.json"
+
+    def read(url: str) -> bytes | None:
+        try:
+            entry_bytes, _, _ = _read_compliance_locked_s3_bytes(
+                current_client(),
+                cache_entry_path(url),
+                field_name="benchmark catalog input cache entry",
+                max_bytes=_CATALOG_INPUT_CACHE_ENTRY_MAX_BYTES,
+            )
+        except Exception as exc:
+            if _is_s3_missing_object(exc):
+                return None
+            raise ValueError("benchmark catalog input cache entry is not readable") from exc
+        entry = _canonical_json_object_bytes(
+            entry_bytes, "benchmark catalog input cache entry"
+        )
+        expected_fields = {"inputSha256", "inputSnapshot", "schema", "url"}
+        if (
+            set(entry) != expected_fields
+            or entry.get("schema") != _CATALOG_INPUT_CACHE_ENTRY_SCHEMA
+        ):
+            raise ValueError("benchmark catalog input cache entry has an invalid shape/schema")
+        if _required_str(entry, "url") != url:
+            raise ValueError("benchmark catalog input cache coordinate does not match request")
+        input_sha256 = _required_str(entry, "inputSha256")
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", input_sha256) is None:
+            raise ValueError("benchmark catalog input cache SHA-256 is invalid")
+        snapshot = _required_mapping(entry, "inputSnapshot")
+        blob_path = f"{cache_root}/blobs/{input_sha256}.bin"
+        if _required_str(snapshot, "artifactPath") != blob_path:
+            raise ValueError("benchmark catalog input cache blob path is not content-addressed")
+        if _required_str(snapshot, "objectLockMode") != "COMPLIANCE":
+            raise ValueError("benchmark catalog input cache blob must use COMPLIANCE retention")
+        version_id = _required_str(snapshot, "artifactVersionId")
+        payload, observed_version_id, _ = _read_compliance_locked_s3_bytes(
+            current_client(),
+            blob_path,
+            field_name="benchmark catalog input cache blob",
+            version_id=version_id,
+        )
+        if observed_version_id != version_id:
+            raise ValueError("benchmark catalog input cache blob version does not match entry")
+        if "sha256:" + sha256(payload).hexdigest() != input_sha256:
+            raise ValueError("benchmark catalog input cache blob SHA-256 does not match entry")
+        return payload
+
+    def write(url: str, payload: bytes) -> None:
+        if not isinstance(payload, bytes) or not payload:
+            raise ValueError("benchmark catalog input cache refuses empty bytes")
+        input_sha256 = "sha256:" + sha256(payload).hexdigest()
+        blob_path = f"{cache_root}/blobs/{input_sha256}.bin"
+        blob_snapshot = write_immutable_evidence_bytes_snapshot(
+            blob_path,
+            artifact_type="benchmark_catalog_input_cache_blob",
+            operation_id=operation_id,
+            payload=payload,
+            content_type="application/octet-stream",
+            s3_client=current_client(),
+        )
+        if (
+            _required_str(blob_snapshot, "artifactPath") != blob_path
+            or "sha256:" + _required_str(blob_snapshot, "artifactSha256") != input_sha256
+            or _required_str(blob_snapshot, "objectLockMode") != "COMPLIANCE"
+        ):
+            raise ValueError("benchmark catalog input cache blob snapshot is invalid")
+        write_immutable_evidence_snapshot(
+            cache_entry_path(url),
+            artifact_type="benchmark_catalog_input_cache_entry",
+            operation_id=operation_id,
+            payload={
+                "inputSha256": input_sha256,
+                "inputSnapshot": {
+                    "artifactPath": blob_path,
+                    "artifactVersionId": _required_str(blob_snapshot, "artifactVersionId"),
+                    "objectLockMode": "COMPLIANCE",
+                },
+                "schema": _CATALOG_INPUT_CACHE_ENTRY_SCHEMA,
+                "url": url,
+            },
+            s3_client=current_client(),
+        )
+
+    return read, write
+
+
+def _catalog_cache_client_provider(
     cache_root: str, injected_client: Any | None
 ) -> Callable[[], Any]:
     if injected_client is not None:
@@ -6723,7 +6876,7 @@ def _swe_archive_cache_client_provider(
     client: Any | None = None
     created_at = 0.0
 
-    # Context: one SWE catalog CAS batch can outlive its 900-second STS lease.
+    # Context: one catalog CAS batch can outlive its 900-second STS lease.
     # Decision: lazily reuse one client until a monotonic proactive refresh threshold,
     # then replace it under a double-checked lock.
     # Reason: every S3 compound operation receives valid credentials without blind
@@ -6754,7 +6907,7 @@ def _worm_swe_archive_cache(
     """Return a WORM CAS shared by every retry of one catalog operation."""
 
     cache_root = f"{artifact_root_path}/benchmark-catalog-inputs/swe-archive-cas/v1"
-    current_client = _swe_archive_cache_client_provider(cache_root, s3_client)
+    current_client = _catalog_cache_client_provider(cache_root, s3_client)
 
     def cache_entry_path(archive_url: str) -> str:
         coordinate_digest = sha256(archive_url.encode("utf-8")).hexdigest()

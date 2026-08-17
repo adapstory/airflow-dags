@@ -1779,8 +1779,118 @@ def test_swe_archive_fetch_stream_exhausts_bounded_transport_retries(
             )
         )
 
-    assert len(attempts) == 3
-    assert delays == [0.5, 1.0]
+    assert len(attempts) == 5
+    assert delays == [0.5, 1.0, 2.0, 4.0]
+
+
+def test_catalog_input_fetch_retries_504_then_reuses_verified_cas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = (
+        "https://api.github.com/repos/stanford-futuredata/ARES/tarball/"
+        + "c" * 40
+    )
+    payload = b"pinned catalog archive"
+    attempts: list[str] = []
+    delays: list[float] = []
+    cache: dict[str, bytes] = {}
+
+    def transient_fetch(requested_url: str) -> bytes:
+        attempts.append(requested_url)
+        if len(attempts) == 1:
+            raise ValueError(
+                f"benchmark upstream evidence fetch failed: {requested_url}"
+            ) from HTTPError(requested_url, 504, "Gateway Timeout", Message(), None)
+        return payload
+
+    monkeypatch.setattr(serp_eval_contracts_module, "sleep", delays.append)
+    fetch = serp_eval_contracts_module._retrying_catalog_input_fetcher(
+        transient_fetch,
+        cache_reader=cache.get,
+        cache_writer=cache.__setitem__,
+    )
+
+    assert fetch(url) == payload
+
+    def forbidden_fetch(requested_url: str) -> bytes:
+        raise AssertionError(f"verified catalog input was not reused: {requested_url}")
+
+    replay = serp_eval_contracts_module._retrying_catalog_input_fetcher(
+        forbidden_fetch,
+        cache_reader=cache.get,
+        cache_writer=cache.__setitem__,
+    )
+    assert replay(url) == payload
+    assert attempts == [url, url]
+    assert delays == [0.5]
+
+
+def test_catalog_input_cas_root_is_shared_across_operation_ids() -> None:
+    artifact_root = "s3://airflow-serp-evidence/serp-evals"
+
+    first = serp_eval_contracts_module._catalog_input_cas_root(artifact_root)
+    second = serp_eval_contracts_module._catalog_input_cas_root(artifact_root)
+
+    assert first == second == (
+        "s3://airflow-serp-evidence/serp-evals/benchmark-cas/v3/catalog-inputs/v1"
+    )
+
+
+def test_catalog_input_worm_cas_reuses_digest_verified_bytes_across_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MissingObject(Exception):
+        response: ClassVar[dict[str, dict[str, str]]] = {"Error": {"Code": "NoSuchKey"}}
+
+    class FakeS3Client:
+        def __init__(self) -> None:
+            self.latest: dict[str, str] = {}
+            self.objects: dict[tuple[str, str], bytes] = {}
+
+        def put_object(self, **kwargs: object) -> dict[str, str]:
+            key = cast(str, kwargs["Key"])
+            body = bytes(cast(bytes, kwargs["Body"]))
+            version_id = f"version-{len(self.objects) + 1}"
+            self.latest[key] = version_id
+            self.objects[(key, version_id)] = body
+            return {"ETag": f'"etag-{version_id}"', "VersionId": version_id}
+
+        def head_object(
+            self, *, Bucket: str, Key: str, VersionId: str | None = None
+        ) -> dict[str, object]:
+            assert Bucket == "airflow-serp-evidence"
+            observed_version = VersionId or self.latest.get(Key)
+            if observed_version is None or (Key, observed_version) not in self.objects:
+                raise MissingObject(Key)
+            return {
+                "ContentLength": len(self.objects[(Key, observed_version)]),
+                "ObjectLockMode": "COMPLIANCE",
+                "ObjectLockRetainUntilDate": datetime.now(UTC) + timedelta(days=366),
+                "VersionId": observed_version,
+            }
+
+        def get_object(self, *, Bucket: str, Key: str, VersionId: str) -> dict[str, object]:
+            assert Bucket == "airflow-serp-evidence"
+            return {"Body": io.BytesIO(self.objects[(Key, VersionId)])}
+
+    monkeypatch.setenv("ADAPSTORY_AIRFLOW_EVIDENCE_RETENTION_DAYS", "365")
+    client = FakeS3Client()
+    root = "s3://airflow-serp-evidence/serp-evals"
+    url = "https://api.github.com/repos/datadotworld/cwd-benchmark-data/tarball/" + "d" * 40
+    payload = b"immutable cwd benchmark archive"
+    first_reader, first_writer = serp_eval_contracts_module._worm_catalog_input_cache(
+        root, operation_id="jenkins-run-53", s3_client=client
+    )
+
+    assert first_reader(url) is None
+    first_writer(url, payload)
+
+    next_reader, _ = serp_eval_contracts_module._worm_catalog_input_cache(
+        root, operation_id="jenkins-run-54", s3_client=client
+    )
+    assert next_reader(url) == payload
+    assert len(client.objects) == 2
+    assert all("/benchmark-cas/v3/catalog-inputs/v1/" in key for key in client.latest)
 
 
 @pytest.mark.parametrize(
