@@ -25,6 +25,7 @@ def _install_airflow_job_operator_stub(monkeypatch: pytest.MonkeyPatch) -> type[
             self.client: object | None = None
             self.logged_pods: list[object] = []
             self.created_jobs: list[object] = []
+            self.cleanup_calls: list[tuple[object, object]] = []
             self.log = SimpleNamespace(info=lambda *_args: None)
 
         def create_job(self, job_request_obj: object) -> object:
@@ -42,6 +43,19 @@ def _install_airflow_job_operator_stub(monkeypatch: pytest.MonkeyPatch) -> type[
             assert context == {"run_id": "delayed-pod"}
             self.logged_pods.append(pod)
 
+        def cleanup(
+            self,
+            pod: object,
+            remote_pod: object,
+            xcom_result: object = None,
+            context: object = None,
+        ) -> None:
+            del xcom_result, context
+            self.cleanup_calls.append((pod, remote_pod))
+
+    class KubernetesPodOperator(KubernetesJobOperator):
+        pass
+
     modules = {
         "airflow": ModuleType("airflow"),
         "airflow.providers": ModuleType("airflow.providers"),
@@ -53,6 +67,9 @@ def _install_airflow_job_operator_stub(monkeypatch: pytest.MonkeyPatch) -> type[
         "airflow.providers.cncf.kubernetes.operators.job": ModuleType(
             "airflow.providers.cncf.kubernetes.operators.job"
         ),
+        "airflow.providers.cncf.kubernetes.operators.pod": ModuleType(
+            "airflow.providers.cncf.kubernetes.operators.pod"
+        ),
         "airflow.providers.common": ModuleType("airflow.providers.common"),
         "airflow.providers.common.compat": ModuleType("airflow.providers.common.compat"),
         "airflow.providers.common.compat.sdk": ModuleType("airflow.providers.common.compat.sdk"),
@@ -60,10 +77,61 @@ def _install_airflow_job_operator_stub(monkeypatch: pytest.MonkeyPatch) -> type[
     cast(
         Any, modules["airflow.providers.cncf.kubernetes.operators.job"]
     ).KubernetesJobOperator = KubernetesJobOperator
+    cast(
+        Any, modules["airflow.providers.cncf.kubernetes.operators.pod"]
+    ).KubernetesPodOperator = KubernetesPodOperator
     cast(Any, modules["airflow.providers.common.compat.sdk"]).AirflowException = AirflowException
     for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)
     return AirflowException
+
+
+def test_operator_cleanup_persists_failed_pod_receipt_before_parent_deletion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_job_operator_stub(monkeypatch)
+    sys.modules.pop("dags.serp_kubernetes_job_operator", None)
+    module = importlib.import_module("dags.serp_kubernetes_job_operator")
+    events: list[str] = []
+    monkeypatch.setattr(
+        module,
+        "persist_airflow_pod_termination_receipt",
+        lambda **_kwargs: events.append("receipt-read-back"),
+    )
+    operator = module.ReceiptKubernetesPodOperator(task_id="failed-cleanup")
+    operator.client = object()
+    remote_pod = SimpleNamespace(
+        metadata=SimpleNamespace(name="failed", namespace="airflow"),
+        status=SimpleNamespace(phase="Failed", reason="Evicted"),
+    )
+
+    operator.cleanup(object(), remote_pod)
+
+    assert events == ["receipt-read-back"]
+    assert operator.cleanup_calls == [(operator.cleanup_calls[0][0], remote_pod)]
+
+
+def test_operator_cleanup_fails_closed_when_receipt_read_back_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_job_operator_stub(monkeypatch)
+    sys.modules.pop("dags.serp_kubernetes_job_operator", None)
+    module = importlib.import_module("dags.serp_kubernetes_job_operator")
+
+    def fail(**_kwargs: object) -> None:
+        raise ValueError("exact read-back failed")
+
+    monkeypatch.setattr(module, "persist_airflow_pod_termination_receipt", fail)
+    operator = module.BoundedKubernetesJobOperator(task_id="failed-cleanup")
+    operator.client = object()
+    remote_pod = SimpleNamespace(
+        metadata=SimpleNamespace(name="failed", namespace="airflow"),
+        status=SimpleNamespace(phase="Failed", reason="Evicted"),
+    )
+
+    with pytest.raises(ValueError, match="exact read-back failed"):
+        operator.cleanup(object(), remote_pod)
+    assert operator.cleanup_calls == []
 
 
 class _DelayedPodClient:

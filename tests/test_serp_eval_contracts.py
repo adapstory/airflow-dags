@@ -8102,7 +8102,7 @@ def test_serp_dag_files_declare_expected_airflow_contracts(
             "write_official_serp_mcp_measurement",
             "publish_official_serp_mcp_measurement",
         ]
-        assert _keyword_values(tree, "KubernetesPodOperator", "task_id") == [
+        assert _keyword_values(tree, "ReceiptKubernetesPodOperator", "task_id") == [
             "aggregate_exact_nine_benchmark_packs",
             "register_exact_nine_evaluation_binding",
             "materialize_official_harness_work_items",
@@ -9370,11 +9370,8 @@ def test_serp_improvement_dag_uses_pipeline_executor_for_d19_path() -> None:
 def test_serp_improvement_dag_runs_paired_evaluation_in_an_isolated_evaluator_pod() -> None:
     source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(encoding="utf-8")
 
-    assert (
-        "from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator"
-        in source
-    )
-    assert "run_paired_evaluation = KubernetesPodOperator(" in source
+    assert "ReceiptKubernetesPodOperator," in source
+    assert "run_paired_evaluation = ReceiptKubernetesPodOperator(" in source
     assert "service_account_name=D19_AGGREGATOR_WORKLOAD_SERVICE_ACCOUNT" in source
     assert "labels=D19_AGGREGATOR_WORKLOAD_LABELS" in source
     tree = ast.parse(source)
@@ -9382,7 +9379,7 @@ def test_serp_improvement_dag_runs_paired_evaluation_in_an_isolated_evaluator_po
         call
         for call in ast.walk(tree)
         if isinstance(call, ast.Call)
-        and _matches_call(call, "KubernetesPodOperator")
+        and _matches_call(call, "ReceiptKubernetesPodOperator")
         and any(
             keyword.arg == "task_id"
             and isinstance(keyword.value, ast.Constant)
@@ -9956,12 +9953,12 @@ def test_d19_xcom_kpos_delete_pods_when_the_controller_or_base_dies() -> None:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        is_kpo = _matches_call(node, "KubernetesPodOperator")
+        is_kpo = _matches_call(node, "ReceiptKubernetesPodOperator")
         is_mapped_kpo = (
             isinstance(node.func, ast.Attribute)
             and node.func.attr == "partial"
             and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == "KubernetesPodOperator"
+            and node.func.value.id == "ReceiptKubernetesPodOperator"
         )
         if not (is_kpo or is_mapped_kpo):
             continue
@@ -10794,8 +10791,8 @@ def test_d19_assembly_plan_seals_exact_canonical_ninety_without_scores(
 def test_d19_assembly_manifest_is_server_owned_and_feeds_only_the_v2_aggregator() -> None:
     source = (REPO_ROOT / "dags" / "serp_benchmark_improvement_wave.py").read_text(encoding="utf-8")
 
-    assert "materialize_official_harness_work_items = KubernetesPodOperator(" in source
-    assert "assemble_paired_execution_manifest = KubernetesPodOperator(" in source
+    assert "materialize_official_harness_work_items = ReceiptKubernetesPodOperator(" in source
+    assert "assemble_paired_execution_manifest = ReceiptKubernetesPodOperator(" in source
     assert '"materialize-work-items"' in source
     assert "'assemble-manifest'" in source
     assert "'assemble-preflight'" in source

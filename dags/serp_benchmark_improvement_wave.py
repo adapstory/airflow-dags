@@ -10,7 +10,6 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from airflow.configuration import conf
-from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.providers.standard.operators.python import BranchPythonOperator, PythonOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
@@ -80,6 +79,7 @@ from dags.serp_evidence_workload_identity import (
 from dags.serp_kubernetes_job_operator import (
     DEFAULT_JOB_POD_DISCOVERY_TIMEOUT_SECONDS,
     BoundedKubernetesJobOperator,
+    ReceiptKubernetesPodOperator,
 )
 from dags.serp_web_seed_crawl_refresh import current_airflow_runtime_image
 
@@ -1640,7 +1640,7 @@ load_promotion = PythonOperator(
     dag=dag,
 )
 
-classify_pack_cas = KubernetesPodOperator(
+classify_pack_cas = ReceiptKubernetesPodOperator(
     task_id=D19_PACK_CAS_CLASSIFIER_TASK_ID,
     name="serp-d19-classify-pack-cas",
     namespace=conf.get("kubernetes_executor", "namespace"),
@@ -1852,7 +1852,7 @@ _D19_PACK_SIDE_RESULT_URIS_JSON = json.dumps(
     ensure_ascii=True,
     separators=(",", ":"),
 )
-aggregate_exact_nine_benchmark_packs = KubernetesPodOperator(
+aggregate_exact_nine_benchmark_packs = ReceiptKubernetesPodOperator(
     task_id="aggregate_exact_nine_benchmark_packs",
     name="serp-d19-aggregate-exact-nine-benchmark-packs",
     namespace=conf.get("kubernetes_executor", "namespace"),
@@ -1919,7 +1919,7 @@ aggregate_exact_nine_benchmark_packs = KubernetesPodOperator(
     dag=dag,
 )
 
-register_exact_nine_evaluation_binding = KubernetesPodOperator(
+register_exact_nine_evaluation_binding = ReceiptKubernetesPodOperator(
     task_id="register_exact_nine_evaluation_binding",
     name="serp-d19-register-exact-nine-evaluation-binding",
     namespace=conf.get("kubernetes_executor", "namespace"),
@@ -2000,7 +2000,7 @@ write_request = PythonOperator(
     dag=dag,
 )
 
-materialize_official_harness_work_items = KubernetesPodOperator(
+materialize_official_harness_work_items = ReceiptKubernetesPodOperator(
     task_id="materialize_official_harness_work_items",
     name="serp-d19-materialize-official-harness-work-items",
     namespace=conf.get("kubernetes_executor", "namespace"),
@@ -2124,14 +2124,14 @@ def select_code_sandbox_result(
     return available[0]
 
 
-D19_STANDARD_HARNESS_RUN_TASKS: dict[tuple[str, str, int], KubernetesPodOperator] = {}
-D19_CODE_SANDBOX_PREPARE_TASKS: dict[tuple[str, str, int], KubernetesPodOperator] = {}
+D19_STANDARD_HARNESS_RUN_TASKS: dict[tuple[str, str, int], ReceiptKubernetesPodOperator] = {}
+D19_CODE_SANDBOX_PREPARE_TASKS: dict[tuple[str, str, int], ReceiptKubernetesPodOperator] = {}
 D19_CODE_SANDBOX_BRANCH_TASKS: dict[tuple[str, str, int], BranchPythonOperator] = {}
-D19_CODE_SANDBOX_REUSE_TASKS: dict[tuple[str, str, int], KubernetesPodOperator] = {}
+D19_CODE_SANDBOX_REUSE_TASKS: dict[tuple[str, str, int], ReceiptKubernetesPodOperator] = {}
 D19_CODE_SANDBOX_FANOUT_TASKS: dict[tuple[str, str, int], PythonOperator] = {}
 D19_CODE_SANDBOX_TASKS: dict[tuple[str, str, int], Any] = {}
 D19_CODE_SANDBOX_RESULT_SET_PLAN_TASKS: dict[tuple[str, str, int], PythonOperator] = {}
-D19_CODE_SANDBOX_SEAL_TASKS: dict[tuple[str, str, int], KubernetesPodOperator] = {}
+D19_CODE_SANDBOX_SEAL_TASKS: dict[tuple[str, str, int], ReceiptKubernetesPodOperator] = {}
 D19_CODE_SANDBOX_JOIN_TASKS: dict[tuple[str, str, int], PythonOperator] = {}
 D19_OFFICIAL_HARNESS_RUN_TASKS: dict[tuple[str, str, int], Any] = {}
 for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARNESS_WORK_ITEMS):
@@ -2163,7 +2163,7 @@ for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARN
             executor_config=D19_AGGREGATOR_EXECUTOR_CONFIG,
             dag=dag,
         )
-        reuse_task = KubernetesPodOperator(
+        reuse_task = ReceiptKubernetesPodOperator(
             task_id=reuse_task_id,
             name=f"serp-d19-reuse-code-receipt-{work_item_index + 1:02d}",
             namespace=conf.get("kubernetes_executor", "namespace"),
@@ -2206,7 +2206,7 @@ for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARN
             executor_config=kubernetes_pod_launcher_executor_config(),
             dag=dag,
         )
-        prepare_task = KubernetesPodOperator(
+        prepare_task = ReceiptKubernetesPodOperator(
             task_id=prepare_task_id,
             name=f"serp-d19-prepare-code-sandbox-{work_item_index + 1:02d}",
             namespace=conf.get("kubernetes_executor", "namespace"),
@@ -2264,7 +2264,7 @@ for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARN
             executor_config=D19_AGGREGATOR_EXECUTOR_CONFIG,
             dag=dag,
         )
-        sandbox_task = KubernetesPodOperator.partial(
+        sandbox_task = ReceiptKubernetesPodOperator.partial(
             task_id=sandbox_task_id,
             namespace=conf.get("kubernetes_executor", "namespace"),
             image=trusted_sandbox_io_image,
@@ -2313,7 +2313,7 @@ for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARN
         result_set_plan_root = (
             "{{ ti.xcom_pull(task_ids='" + result_set_plan_task_id + "')['resultSetPlanEvidence']"
         )
-        seal_task = KubernetesPodOperator(
+        seal_task = ReceiptKubernetesPodOperator(
             task_id=seal_task_id,
             name=f"serp-d19-seal-code-receipt-{work_item_index + 1:02d}",
             namespace=conf.get("kubernetes_executor", "namespace"),
@@ -2381,7 +2381,7 @@ for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARN
         D19_CODE_SANDBOX_JOIN_TASKS[identity] = join_task
         D19_OFFICIAL_HARNESS_RUN_TASKS[identity] = join_task
         continue
-    runner = KubernetesPodOperator(
+    runner = ReceiptKubernetesPodOperator(
         task_id=_official_harness_task_id(suite_id, side, repetition),
         name=f"serp-d19-official-harness-{work_item_index + 1:02d}",
         namespace=conf.get("kubernetes_executor", "namespace"),
@@ -2445,7 +2445,7 @@ write_assembly_plan = PythonOperator(
     dag=dag,
 )
 
-assemble_paired_execution_manifest = KubernetesPodOperator(
+assemble_paired_execution_manifest = ReceiptKubernetesPodOperator(
     task_id="assemble_paired_execution_manifest",
     name="serp-d19-assemble-paired-execution-manifest",
     namespace=conf.get("kubernetes_executor", "namespace"),
@@ -2504,7 +2504,7 @@ assemble_paired_execution_manifest = KubernetesPodOperator(
     dag=dag,
 )
 
-run_paired_evaluation = KubernetesPodOperator(
+run_paired_evaluation = ReceiptKubernetesPodOperator(
     task_id="run_paired_benchmark_evaluation",
     name="serp-paired-benchmark-evaluation",
     namespace=conf.get("kubernetes_executor", "namespace"),

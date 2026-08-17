@@ -7,13 +7,45 @@ from time import monotonic, sleep
 from typing import Any, cast
 
 from airflow.providers.cncf.kubernetes.operators.job import KubernetesJobOperator
+from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 from airflow.providers.common.compat.sdk import AirflowException
 from kubernetes.client import models as k8s
+
+from dags.airflow_pod_cleanup import (
+    persist_airflow_pod_termination_receipt,
+    requires_airflow_pod_termination_receipt,
+)
 
 DEFAULT_JOB_POD_DISCOVERY_TIMEOUT_SECONDS = 6 * 60 * 60
 
 
-class BoundedKubernetesJobOperator(KubernetesJobOperator):  # type: ignore[misc]
+class _TerminationReceiptCleanupMixin:
+    """Seal failed/evicted pod evidence in the operator cleanup critical section."""
+
+    client: Any
+
+    def cleanup(
+        self,
+        pod: k8s.V1Pod,
+        remote_pod: k8s.V1Pod,
+        xcom_result: Any = None,
+        context: Any = None,
+    ) -> None:
+        if remote_pod is not None and requires_airflow_pod_termination_receipt(remote_pod):
+            namespace = str(remote_pod.metadata.namespace)
+            persist_airflow_pod_termination_receipt(
+                core_api=self.client,
+                pod=remote_pod,
+                namespace=namespace,
+            )
+        super().cleanup(pod, remote_pod, xcom_result=xcom_result, context=context)  # type: ignore[misc]
+
+
+class ReceiptKubernetesPodOperator(_TerminationReceiptCleanupMixin, KubernetesPodOperator):  # type: ignore[misc]
+    """KPO that cannot delete a failed pod before receipt read-back."""
+
+
+class BoundedKubernetesJobOperator(_TerminationReceiptCleanupMixin, KubernetesJobOperator):  # type: ignore[misc]
     """Wait for the Job controller to create observable pods."""
 
     def __init__(
