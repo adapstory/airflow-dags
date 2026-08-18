@@ -41,6 +41,11 @@ from adapstory_serp_pipeline.orchestration.vault_transit_attestation import (
     VaultTransitClient,
     verify_artifact_attestation,
 )
+from adapstory_serp_pipeline.registry.bc21_benchmark_build_inputs import (
+    BENCHMARK_ARTIFACT_HANDLE_SCHEMA,
+    BenchmarkArtifactHandle,
+    normalize_benchmark_artifact_handle,
+)
 from adapstory_serp_pipeline.registry.evaluation_release_contract import (
     normalize_airflow_runtime_terminal_activation,
     normalize_runtime_terminal_activation_binding,
@@ -7350,19 +7355,17 @@ def _validate_benchmark_catalog_corpus_evidence(
             ):
                 raise ValueError(f"benchmark catalog corpus URL mismatch: {suite_id}")
             artifact = _required_mapping(snapshot, "immutable_artifact")
-            if _required_str(artifact, "objectLockMode") != "COMPLIANCE":
-                raise ValueError(f"benchmark catalog corpus must be COMPLIANCE WORM: {suite_id}")
-            artifact_sha = _required_str(artifact, "artifactSha256")
-            if "sha256:" + artifact_sha != digest:
+            handle = _canonical_benchmark_artifact_handle(
+                artifact,
+                field_name=f"{suite_id}.corpus_snapshots.{source_id}.immutable_artifact",
+            )
+            if handle.sha256 != digest:
                 raise ValueError(f"benchmark catalog corpus artifact digest mismatch: {suite_id}")
-            artifact_path = _required_str(artifact, "artifactPath")
-            if not artifact_path.startswith("s3://"):
-                raise ValueError(f"benchmark catalog corpus path must be s3://: {suite_id}")
             expected_evidence.append(
                 {
-                    "artifactPath": artifact_path,
-                    "artifactSha256": artifact_sha,
-                    "artifactVersionId": _required_str(artifact, "artifactVersionId"),
+                    "artifactPath": handle.s3_uri,
+                    "artifactSha256": handle.sha256.removeprefix("sha256:"),
+                    "artifactVersionId": handle.version_id,
                     "corpusRole": corpus_role,
                     "objectLockMode": "COMPLIANCE",
                     "sourceId": source_id,
@@ -7371,6 +7374,27 @@ def _validate_benchmark_catalog_corpus_evidence(
         corpus_evidence = native_manifest.get("corpusEvidence")
         if not isinstance(corpus_evidence, list) or corpus_evidence != expected_evidence:
             raise ValueError(f"benchmark catalog corpus evidence mismatch: {suite_id}")
+
+
+def _canonical_benchmark_artifact_handle(
+    value: Mapping[str, Any], *, field_name: str
+) -> BenchmarkArtifactHandle:
+    """Admit only the canonical public WORM handle at the catalog boundary."""
+
+    expected_fields = {
+        "schema",
+        "s3Uri",
+        "versionId",
+        "sha256",
+        "retainUntil",
+        "objectLockMode",
+    }
+    if set(value) != expected_fields or value.get("schema") != BENCHMARK_ARTIFACT_HANDLE_SCHEMA:
+        raise ValueError(f"{field_name} must use {BENCHMARK_ARTIFACT_HANDLE_SCHEMA}")
+    handle = normalize_benchmark_artifact_handle(value, field_name=field_name)
+    if handle.legacy:
+        raise ValueError(f"{field_name} must not use a legacy artifact handle")
+    return handle
 
 
 def _validate_benchmark_catalog_suite_shapes(
