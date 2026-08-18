@@ -2826,9 +2826,7 @@ def test_load_materialized_catalog_binds_receipt_and_catalog_s3_versions() -> No
         legacy_catalog_payload
     ).encode("utf-8")
     receipt_payload = deepcopy(canonical_receipt_payload)
-    receipt_payload["catalogSnapshot"]["artifactSha256"] = sha256(
-        legacy_catalog_bytes
-    ).hexdigest()
+    receipt_payload["catalogSnapshot"]["artifactSha256"] = sha256(legacy_catalog_bytes).hexdigest()
     catalog_bytes = legacy_catalog_bytes
     with pytest.raises(ValueError, match="must use BenchmarkArtifactHandle/v2"):
         load_materialized_benchmark_catalog_snapshot(
@@ -8279,6 +8277,11 @@ def test_every_kubernetes_workload_operator_uses_the_dedicated_controller_execut
         ]
 
         assert workload_operator_calls, dag_file
+        expected_executor_config = (
+            "d19_remote_kubernetes_pod_launcher_executor_config"
+            if dag_file == "serp_benchmark_improvement_wave.py"
+            else "kubernetes_pod_launcher_executor_config"
+        )
         for call in workload_operator_calls:
             executor_config = next(
                 (keyword.value for keyword in call.keywords if keyword.arg == "executor_config"),
@@ -8286,7 +8289,7 @@ def test_every_kubernetes_workload_operator_uses_the_dedicated_controller_execut
             )
             assert isinstance(executor_config, ast.Call), dag_file
             assert isinstance(executor_config.func, ast.Name), dag_file
-            assert executor_config.func.id == "kubernetes_pod_launcher_executor_config", dag_file
+            assert executor_config.func.id == expected_executor_config, dag_file
 
 
 def test_serp_nightly_dag_uses_fenced_native_d19_without_gateway_scorer() -> None:

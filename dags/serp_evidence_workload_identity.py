@@ -515,7 +515,11 @@ def _validated_additional_env_vars(
     return validated
 
 
-def kubernetes_pod_launcher_executor_config() -> dict[str, Any]:
+def kubernetes_pod_launcher_executor_config(
+    *,
+    node_selector: Mapping[str, str] | None = None,
+    tolerations: Sequence[k8s.V1Toleration] | None = None,
+) -> dict[str, Any]:
     """Build the sole executor override allowed to create child Kubernetes pods.
 
     The controller receives a Kubernetes API token from its narrowly-bound
@@ -541,6 +545,8 @@ def kubernetes_pod_launcher_executor_config() -> dict[str, Any]:
                 ],
                 security_context=hardened_runtime_pod_security_context(),
                 service_account_name=KUBERNETES_POD_LAUNCHER_SERVICE_ACCOUNT,
+                node_selector=dict(node_selector) if node_selector else None,
+                tolerations=list(tolerations) if tolerations else None,
                 volumes=[*minio_web_identity_volumes(), *hardened_runtime_volumes()],
             ),
         )

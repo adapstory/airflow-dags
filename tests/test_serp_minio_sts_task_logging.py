@@ -447,6 +447,25 @@ def test_kubernetes_pod_launcher_executor_config_keeps_minio_sts_and_api_access_
     _assert_hardened_runtime_pod(pod)
 
 
+def test_kubernetes_pod_launcher_executor_config_can_follow_remote_child_workloads() -> None:
+    with _isolated_task_log_modules() as (_task_logging, workload_identity):
+        toleration = workload_identity.k8s.V1Toleration(
+            effect="NoSchedule",
+            key="adapstory.com/compute-class",
+            operator="Equal",
+            value="remote",
+        )
+        config = workload_identity.kubernetes_pod_launcher_executor_config(
+            node_selector={"adapstory.com/compute-class": "remote"},
+            tolerations=[toleration],
+        )
+
+    pod = config["pod_override"]
+    assert pod.spec is not None
+    assert pod.spec.node_selector == {"adapstory.com/compute-class": "remote"}
+    assert pod.spec.tolerations == [toleration]
+
+
 def test_evidence_executor_config_is_explicitly_hardened_and_writable_only_at_runtime_paths() -> (
     None
 ):
