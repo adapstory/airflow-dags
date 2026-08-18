@@ -753,8 +753,14 @@ def build_live_benchmark_catalog_evidence(
         _validate_native_adapter_manifest(native_manifest, entry.suite_id)
         suites.append(
             {
-                "dataset_snapshots": dataset_snapshots,
-                "corpus_snapshots": corpus_snapshots,
+                "dataset_snapshots": {
+                    source_id: _versioned_catalog_snapshot(snapshot, entry.suite_id, source_id)
+                    for source_id, snapshot in dataset_snapshots.items()
+                },
+                "corpus_snapshots": {
+                    source_id: _versioned_catalog_snapshot(snapshot, entry.suite_id, source_id)
+                    for source_id, snapshot in corpus_snapshots.items()
+                },
                 "dataset_id": entry.dataset_id,
                 "dataset_license_id": entry.dataset_license_id,
                 "dataset_revision": entry.dataset_revision,
@@ -888,6 +894,25 @@ def _immutable_dataset_snapshot(
         "s3Uri": _required_catalog_str(artifact, "artifactPath"),
         "sha256": f"sha256:{digest}",
         "versionId": _required_catalog_str(artifact, "artifactVersionId"),
+    }
+
+
+def _versioned_catalog_snapshot(
+    snapshot: Mapping[str, object], suite_id: str, source_id: str
+) -> dict[str, object]:
+    """Separate the stable public WORM handle from producer-internal receipt evidence."""
+
+    artifact = snapshot.get("immutable_artifact")
+    if not isinstance(artifact, Mapping):
+        raise ValueError(f"benchmark snapshot is not immutable: {suite_id}/{source_id}")
+    canonical = _immutable_dataset_snapshot(snapshot, suite_id, source_id)
+    return {
+        **{key: value for key, value in snapshot.items() if key != "immutable_artifact"},
+        "immutable_artifact": {
+            "schema": "BenchmarkArtifactHandle/v2",
+            **canonical,
+        },
+        "producer_receipt_evidence": dict(artifact),
     }
 
 

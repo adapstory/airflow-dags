@@ -758,6 +758,18 @@ def test_live_catalog_retains_immutable_source_and_license_snapshots(tmp_path: P
     assert (
         beir["dataset_snapshots"]["dataset"]["immutable_artifact"]["objectLockMode"] == "COMPLIANCE"
     )
+    assert beir["dataset_snapshots"]["dataset"]["immutable_artifact"] == {
+        "schema": "BenchmarkArtifactHandle/v2",
+        "s3Uri": "s3://airflow-serp-evidence/catalog/BEIR/dataset-dataset",
+        "versionId": "version-BEIR-dataset-dataset",
+        "sha256": beir["dataset_snapshots"]["dataset"]["sha256"],
+        "retainUntil": "2027-07-13T00:00:00Z",
+        "objectLockMode": "COMPLIANCE",
+    }
+    assert (
+        beir["dataset_snapshots"]["dataset"]["producer_receipt_evidence"]["artifactVersionId"]
+        == "version-BEIR-dataset-dataset"
+    )
     assert beir["source_snapshot"]["immutable_artifact"]["objectLockMode"] == "COMPLIANCE"
     assert beir["license_snapshot"]["immutable_artifact"]["artifactVersionId"] == (
         "version-BEIR-license"

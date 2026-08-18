@@ -978,11 +978,15 @@ def plan_d19_pack_cas_migration_rebuild(
         reason = item.get("reason")
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("D19 deterministic pack CAS failure requires a reason")
+        subtype = item.get("subtype")
+        if not isinstance(subtype, str) or not subtype.strip():
+            raise ValueError("D19 deterministic pack CAS failure requires a safe subtype")
         actions.append(
             {
                 "suiteId": item["suiteId"],
                 "side": item["side"],
                 "classification": state,
+                "subtype": subtype,
                 "action": (
                     "MIGRATE_IDENTITY_OR_SCHEMA"
                     if state == "INCOMPATIBLE"

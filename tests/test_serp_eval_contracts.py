@@ -9204,6 +9204,9 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         def __init__(self, *_args: object, **kwargs: object) -> None:
             self.kwargs = kwargs
 
+    class FakeKubernetesApiException(Exception):
+        pass
+
     for name in (
         "ADAPSTORY_BC10_GATEWAY_URL",
         "ADAPSTORY_BC10_SERP_CONTEXT_EMBEDDING_BUDGET_POLICY_ID",
@@ -9286,7 +9289,12 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         "kubernetes": types.ModuleType("kubernetes"),
         "kubernetes.client": types.ModuleType("kubernetes.client"),
         "kubernetes.client.models": types.ModuleType("kubernetes.client.models"),
+        "kubernetes.client.rest": types.ModuleType("kubernetes.client.rest"),
+        "kubernetes.config": types.ModuleType("kubernetes.config"),
     }
+    cast(Any, modules["kubernetes"]).client = modules["kubernetes.client"]
+    cast(Any, modules["kubernetes"]).config = modules["kubernetes.config"]
+    cast(Any, modules["kubernetes.client.rest"]).ApiException = FakeKubernetesApiException
     cast(Any, modules["airflow.configuration"]).conf = FakeConf()
     cast(
         Any, modules["airflow.providers.standard.operators.python"]
@@ -9582,11 +9590,13 @@ def test_d19_pack_cas_classifier_routes_deterministic_failures_to_no_retry_recov
     incompatible = json.loads(json.dumps(admitted))
     incompatible["classifications"][7].update(
         classification="INCOMPATIBLE",
+        subtype="artifact_schema_mismatch",
         reason="embeddings CAS schema is incompatible",
     )
     corrupt = json.loads(json.dumps(admitted))
     corrupt["classifications"][11].update(
         classification="PARTIAL/CORRUPT",
+        subtype="artifact_digest_mismatch",
         reason="embeddings CAS shard Merkle root is corrupt",
     )
 
@@ -9605,6 +9615,7 @@ def test_d19_pack_cas_classifier_routes_deterministic_failures_to_no_retry_recov
                 "suiteId": MANDATORY_SERP_BENCHMARK_SUITES[3],
                 "side": "candidate",
                 "classification": "INCOMPATIBLE",
+                "subtype": "artifact_schema_mismatch",
                 "action": "MIGRATE_IDENTITY_OR_SCHEMA",
                 "reason": "embeddings CAS schema is incompatible",
             }
@@ -9617,6 +9628,7 @@ def test_d19_pack_cas_classifier_routes_deterministic_failures_to_no_retry_recov
             "suiteId": MANDATORY_SERP_BENCHMARK_SUITES[5],
             "side": "candidate",
             "classification": "PARTIAL/CORRUPT",
+            "subtype": "artifact_digest_mismatch",
             "action": "REBUILD_FROM_LAST_VALID_CAS_CHECKPOINT",
             "reason": "embeddings CAS shard Merkle root is corrupt",
         }
@@ -9633,6 +9645,12 @@ def test_d19_pack_cas_classifier_routes_deterministic_failures_to_no_retry_recov
         *builder_task_ids,
     }
     assert module.plan_pack_cas_migration_rebuild_task.kwargs["retries"] == 0
+    # The imported DAG binds its Kubernetes helpers to the lightweight modules
+    # installed above. Do not leak those cached helpers into later tests that
+    # exercise the real kubernetes client models and ApiException type.
+    sys.modules.pop("dags.airflow_pod_cleanup", None)
+    sys.modules.pop("dags.serp_kubernetes_job_operator", None)
+    sys.modules.pop("dags.serp_benchmark_improvement_wave", None)
     assert module.plan_pack_cas_migration_rebuild_task.downstream_task_ids == {
         "pack_cas_migration_rebuild_required"
     }
