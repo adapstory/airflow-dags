@@ -2635,12 +2635,23 @@ def test_load_materialized_catalog_binds_receipt_and_catalog_s3_versions() -> No
                     "corpus": {
                         "corpus_role": corpus_role_by_suite[entry.suite_id],
                         "immutable_artifact": {
+                            "schema": "BenchmarkArtifactHandle/v2",
+                            "s3Uri": (
+                                f"s3://airflow-serp-evidence/catalog/{entry.suite_id}/corpus"
+                            ),
+                            "sha256": "sha256:" + "e" * 64,
+                            "versionId": f"{entry.suite_id}-corpus-v1",
+                            "objectLockMode": "COMPLIANCE",
+                            "retainUntil": "2027-07-13T00:00:00Z",
+                        },
+                        "producer_receipt_evidence": {
                             "artifactPath": (
                                 f"s3://airflow-serp-evidence/catalog/{entry.suite_id}/corpus"
                             ),
                             "artifactSha256": "e" * 64,
                             "artifactVersionId": f"{entry.suite_id}-corpus-v1",
                             "objectLockMode": "COMPLIANCE",
+                            "retainUntil": "2027-07-13T00:00:00Z",
                         },
                         "sha256": "sha256:" + "e" * 64,
                         "url": f"derived://native-corpus/{entry.suite_id}/corpus",
@@ -2804,6 +2815,29 @@ def test_load_materialized_catalog_binds_receipt_and_catalog_s3_versions() -> No
     assert snapshot["blockingSuiteIds"] == []
     assert snapshot["blockingReasonBySuite"] == {}
 
+    canonical_catalog_bytes = catalog_bytes
+    canonical_receipt_payload = deepcopy(receipt_payload)
+    legacy_catalog_payload = deepcopy(catalog_payload)
+    legacy_corpus_snapshot = legacy_catalog_payload["suites"][0]["corpus_snapshots"]["corpus"]
+    legacy_corpus_snapshot["immutable_artifact"] = legacy_corpus_snapshot[
+        "producer_receipt_evidence"
+    ]
+    legacy_catalog_bytes = serp_eval_contracts_module._canonical_json(
+        legacy_catalog_payload
+    ).encode("utf-8")
+    receipt_payload = deepcopy(canonical_receipt_payload)
+    receipt_payload["catalogSnapshot"]["artifactSha256"] = sha256(
+        legacy_catalog_bytes
+    ).hexdigest()
+    catalog_bytes = legacy_catalog_bytes
+    with pytest.raises(ValueError, match="must use BenchmarkArtifactHandle/v2"):
+        load_materialized_benchmark_catalog_snapshot(
+            plan.to_canonical_json(),
+            s3_client=FakeS3Client(),
+        )
+
+    catalog_bytes = canonical_catalog_bytes
+    receipt_payload = canonical_receipt_payload
     receipt_payload["catalogSnapshot"]["suiteSummary"][0]["distributionRule"] = "internal-only"
     with pytest.raises(ValueError, match="suite summary does not match catalog object"):
         load_materialized_benchmark_catalog_snapshot(
