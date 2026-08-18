@@ -17,6 +17,11 @@ from dags.airflow_pod_cleanup import (
 )
 
 DEFAULT_JOB_POD_DISCOVERY_TIMEOUT_SECONDS = 6 * 60 * 60
+_REMOTE_COMPUTE_SELECTOR_KEY = "adapstory.com/compute-class"
+_REMOTE_COMPUTE_SELECTOR_VALUE = "remote"
+_XCOM_SIDECAR_NAME = "airflow-xcom-sidecar"
+_XCOM_EPHEMERAL_STORAGE_REQUEST = "32Mi"
+_XCOM_EPHEMERAL_STORAGE_LIMIT = "128Mi"
 
 
 class _TerminationReceiptCleanupMixin:
@@ -65,6 +70,7 @@ class BoundedKubernetesJobOperator(_TerminationReceiptCleanupMixin, KubernetesJo
 
     def create_job(self, job_request_obj: k8s.V1Job) -> k8s.V1Job:
         """Adopt an active prior-attempt Job instead of duplicating its worker."""
+        self._harden_remote_xcom_sidecar(job_request_obj)
         prior_job = self._active_prior_attempt_job(job_request_obj)
         if prior_job is not None:
             self.log.info(
@@ -74,6 +80,41 @@ class BoundedKubernetesJobOperator(_TerminationReceiptCleanupMixin, KubernetesJo
             )
             return prior_job
         return super().create_job(job_request_obj)
+
+    @staticmethod
+    def _harden_remote_xcom_sidecar(job_request_obj: k8s.V1Job) -> None:
+        """Make Airflow's injected sidecar admissible on the tainted remote node."""
+
+        job_spec = getattr(job_request_obj, "spec", None)
+        template = getattr(job_spec, "template", None)
+        pod_spec = getattr(template, "spec", None)
+        if pod_spec is None:
+            return
+        if (pod_spec.node_selector or {}).get(_REMOTE_COMPUTE_SELECTOR_KEY) != (
+            _REMOTE_COMPUTE_SELECTOR_VALUE
+        ):
+            return
+        for container in pod_spec.containers:
+            if container.name != _XCOM_SIDECAR_NAME:
+                continue
+            resources = container.resources or k8s.V1ResourceRequirements()
+            requests = dict(resources.requests or {})
+            limits = dict(resources.limits or {})
+            requests.setdefault("ephemeral-storage", _XCOM_EPHEMERAL_STORAGE_REQUEST)
+            limits.setdefault("ephemeral-storage", _XCOM_EPHEMERAL_STORAGE_LIMIT)
+            resources.requests = requests
+            resources.limits = limits
+            container.resources = resources
+
+            security_context = container.security_context or k8s.V1SecurityContext()
+            security_context.allow_privilege_escalation = False
+            security_context.capabilities = k8s.V1Capabilities(drop=["ALL"])
+            security_context.read_only_root_filesystem = True
+            security_context.run_as_group = 65532
+            security_context.run_as_non_root = True
+            security_context.run_as_user = 65532
+            container.security_context = security_context
+            return
 
     def _active_prior_attempt_job(self, job_request_obj: k8s.V1Job) -> k8s.V1Job | None:
         labels = getattr(

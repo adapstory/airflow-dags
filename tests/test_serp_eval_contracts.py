@@ -8277,11 +8277,7 @@ def test_every_kubernetes_workload_operator_uses_the_dedicated_controller_execut
         ]
 
         assert workload_operator_calls, dag_file
-        expected_executor_config = (
-            "d19_remote_kubernetes_pod_launcher_executor_config"
-            if dag_file == "serp_benchmark_improvement_wave.py"
-            else "kubernetes_pod_launcher_executor_config"
-        )
+        expected_executor_config = "kubernetes_pod_launcher_executor_config"
         for call in workload_operator_calls:
             executor_config = next(
                 (keyword.value for keyword in call.keywords if keyword.arg == "executor_config"),
@@ -10008,7 +10004,9 @@ def test_d19_xcom_kpos_delete_pods_when_the_controller_or_base_dies() -> None:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        is_kpo = _matches_call(node, "ReceiptKubernetesPodOperator")
+        is_kpo = _matches_call(node, "ReceiptKubernetesPodOperator") or _matches_call(
+            node, "BoundedKubernetesJobOperator"
+        )
         is_mapped_kpo = (
             isinstance(node.func, ast.Attribute)
             and node.func.attr == "partial"
@@ -10064,15 +10062,27 @@ def test_d19_runs_exact_ninety_server_owned_official_harness_work_items(
         == "benchmark-model-runner"
     )
     expected_limits = {
-        "APIBench": {"cpu": "2000m", "memory": "4Gi"},
-        "ARES": {"cpu": "4000m", "memory": "8Gi"},
-        "BEIR": {"cpu": "4000m", "memory": "8Gi"},
-        "CodeRAG-Bench": {"cpu": "8000m", "memory": "16Gi"},
-        "RAGBench": {"cpu": "4000m", "memory": "8Gi"},
-        "RepoQA": {"cpu": "8000m", "memory": "16Gi"},
-        "SWE-bench Verified": {"cpu": "8000m", "memory": "16Gi"},
-        "cwd-benchmark-data": {"cpu": "4000m", "memory": "8Gi"},
-        "rusBEIR": {"cpu": "4000m", "memory": "8Gi"},
+        "APIBench": {"cpu": "2000m", "ephemeral-storage": "8Gi", "memory": "4Gi"},
+        "ARES": {"cpu": "4000m", "ephemeral-storage": "8Gi", "memory": "8Gi"},
+        "BEIR": {"cpu": "4000m", "ephemeral-storage": "8Gi", "memory": "8Gi"},
+        "CodeRAG-Bench": {
+            "cpu": "8000m",
+            "ephemeral-storage": "8Gi",
+            "memory": "16Gi",
+        },
+        "RAGBench": {"cpu": "4000m", "ephemeral-storage": "8Gi", "memory": "8Gi"},
+        "RepoQA": {"cpu": "8000m", "ephemeral-storage": "8Gi", "memory": "16Gi"},
+        "SWE-bench Verified": {
+            "cpu": "8000m",
+            "ephemeral-storage": "8Gi",
+            "memory": "16Gi",
+        },
+        "cwd-benchmark-data": {
+            "cpu": "4000m",
+            "ephemeral-storage": "8Gi",
+            "memory": "8Gi",
+        },
+        "rusBEIR": {"cpu": "4000m", "ephemeral-storage": "8Gi", "memory": "8Gi"},
     }
     for (suite_id, _side, _repetition), task in module.D19_STANDARD_HARNESS_RUN_TASKS.items():
         assert task.kwargs["service_account_name"] == ("airflow-serp-benchmark-model-runner")

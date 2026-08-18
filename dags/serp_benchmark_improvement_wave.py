@@ -235,15 +235,6 @@ D19_REMOTE_COMPUTE_TOLERATIONS = [
 ]
 
 
-def d19_remote_kubernetes_pod_launcher_executor_config() -> dict[str, Any]:
-    """Keep long-lived D19 child-job supervision off the control-plane node."""
-
-    return kubernetes_pod_launcher_executor_config(
-        node_selector=D19_REMOTE_COMPUTE_NODE_SELECTOR,
-        tolerations=D19_REMOTE_COMPUTE_TOLERATIONS,
-    )
-
-
 D19_OFFICIAL_HARNESS_LIMITS: Mapping[str, Mapping[str, str]] = {
     "APIBench": {"cpu": "2000m", "memory": "4Gi"},
     "ARES": {"cpu": "4000m", "memory": "8Gi"},
@@ -574,8 +565,8 @@ def d19_official_harness_runner_resources(
     except KeyError as error:
         raise ValueError("D19 official harness suite is unsupported") from error
     return k8s.V1ResourceRequirements(
-        requests={"cpu": "1000m", "memory": "2Gi"},
-        limits=dict(limits),
+        requests={"cpu": "1000m", "ephemeral-storage": "4Gi", "memory": "2Gi"},
+        limits={**limits, "ephemeral-storage": "8Gi"},
     )
 
 
@@ -1618,7 +1609,7 @@ materialize_catalog = BoundedKubernetesJobOperator(
     pod_discovery_poll_interval_seconds=1,
     retries=1,
     retry_delay=timedelta(seconds=BENCHMARK_CATALOG_ACQUISITION_RETRY_DELAY_SECONDS),
-    executor_config=d19_remote_kubernetes_pod_launcher_executor_config(),
+    executor_config=kubernetes_pod_launcher_executor_config(),
     dag=dag,
 )
 
@@ -1655,7 +1646,7 @@ load_promotion = PythonOperator(
     dag=dag,
 )
 
-classify_pack_cas = ReceiptKubernetesPodOperator(
+classify_pack_cas = BoundedKubernetesJobOperator(
     task_id=D19_PACK_CAS_CLASSIFIER_TASK_ID,
     name="serp-d19-classify-pack-cas",
     namespace=conf.get("kubernetes_executor", "namespace"),
@@ -1712,8 +1703,13 @@ classify_pack_cas = ReceiptKubernetesPodOperator(
     reattach_on_restart=True,
     on_kill_action="delete_pod",
     on_finish_action="delete_pod",
+    backoff_limit=0,
+    ttl_seconds_after_finished=300,
+    wait_until_job_complete=True,
+    pod_discovery_timeout_seconds=DEFAULT_JOB_POD_DISCOVERY_TIMEOUT_SECONDS,
+    pod_discovery_poll_interval_seconds=1,
     retries=0,
-    executor_config=d19_remote_kubernetes_pod_launcher_executor_config(),
+    executor_config=kubernetes_pod_launcher_executor_config(),
     dag=dag,
 )
 
@@ -1850,7 +1846,7 @@ for suite_id, side in D19_PACK_SIDE_IDENTITIES:
         pod_discovery_timeout_seconds=DEFAULT_JOB_POD_DISCOVERY_TIMEOUT_SECONDS,
         pod_discovery_poll_interval_seconds=1,
         retries=0,
-        executor_config=d19_remote_kubernetes_pod_launcher_executor_config(),
+        executor_config=kubernetes_pod_launcher_executor_config(),
         dag=dag,
     )
 
@@ -1932,7 +1928,7 @@ aggregate_exact_nine_benchmark_packs = ReceiptKubernetesPodOperator(
     on_kill_action="delete_pod",
     on_finish_action="delete_pod",
     retries=0,
-    executor_config=d19_remote_kubernetes_pod_launcher_executor_config(),
+    executor_config=kubernetes_pod_launcher_executor_config(),
     dag=dag,
 )
 
@@ -1988,7 +1984,7 @@ register_exact_nine_evaluation_binding = ReceiptKubernetesPodOperator(
     on_kill_action="delete_pod",
     on_finish_action="delete_pod",
     retries=0,
-    executor_config=d19_remote_kubernetes_pod_launcher_executor_config(),
+    executor_config=kubernetes_pod_launcher_executor_config(),
     dag=dag,
 )
 
@@ -2089,7 +2085,7 @@ materialize_official_harness_work_items = ReceiptKubernetesPodOperator(
     on_kill_action="delete_pod",
     on_finish_action="delete_pod",
     retries=0,
-    executor_config=d19_remote_kubernetes_pod_launcher_executor_config(),
+    executor_config=kubernetes_pod_launcher_executor_config(),
     dag=dag,
 )
 
@@ -2220,7 +2216,7 @@ for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARN
             on_kill_action="delete_pod",
             on_finish_action="delete_pod",
             retries=0,
-            executor_config=d19_remote_kubernetes_pod_launcher_executor_config(),
+            executor_config=kubernetes_pod_launcher_executor_config(),
             dag=dag,
         )
         prepare_task = ReceiptKubernetesPodOperator(
@@ -2264,7 +2260,7 @@ for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARN
             on_kill_action="delete_pod",
             on_finish_action="delete_pod",
             retries=0,
-            executor_config=d19_remote_kubernetes_pod_launcher_executor_config(),
+            executor_config=kubernetes_pod_launcher_executor_config(),
             dag=dag,
         )
         trusted_sandbox_io_image = d19_code_sandbox_runtime_image()
@@ -2308,7 +2304,7 @@ for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARN
             on_kill_action="delete_pod",
             on_finish_action="delete_pod",
             retries=0,
-            executor_config=d19_remote_kubernetes_pod_launcher_executor_config(),
+            executor_config=kubernetes_pod_launcher_executor_config(),
             dag=dag,
         ).expand_kwargs(fanout_task.output)
         result_set_plan_task = PythonOperator(
@@ -2377,7 +2373,7 @@ for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARN
             on_kill_action="delete_pod",
             on_finish_action="delete_pod",
             retries=0,
-            executor_config=d19_remote_kubernetes_pod_launcher_executor_config(),
+            executor_config=kubernetes_pod_launcher_executor_config(),
             dag=dag,
         )
         join_task = PythonOperator(
@@ -2398,7 +2394,7 @@ for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARN
         D19_CODE_SANDBOX_JOIN_TASKS[identity] = join_task
         D19_OFFICIAL_HARNESS_RUN_TASKS[identity] = join_task
         continue
-    runner = ReceiptKubernetesPodOperator(
+    runner = BoundedKubernetesJobOperator(
         task_id=_official_harness_task_id(suite_id, side, repetition),
         name=f"serp-d19-official-harness-{work_item_index + 1:02d}",
         namespace=conf.get("kubernetes_executor", "namespace"),
@@ -2428,6 +2424,8 @@ for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARN
         volume_mounts=D19_MODEL_RUNNER_VOLUME_MOUNTS,
         labels=D19_MODEL_RUNNER_WORKLOAD_LABELS,
         container_resources=d19_official_harness_runner_resources(suite_id),
+        node_selector=D19_REMOTE_COMPUTE_NODE_SELECTOR,
+        tolerations=D19_REMOTE_COMPUTE_TOLERATIONS,
         security_context=hardened_runtime_pod_security_context(),
         container_security_context=hardened_runtime_container_security_context(),
         do_xcom_push=True,
@@ -2437,9 +2435,14 @@ for work_item_index, (suite_id, side, repetition) in enumerate(D19_OFFICIAL_HARN
         reattach_on_restart=True,
         on_kill_action="delete_pod",
         on_finish_action="delete_pod",
+        backoff_limit=0,
+        ttl_seconds_after_finished=300,
+        wait_until_job_complete=True,
+        pod_discovery_timeout_seconds=DEFAULT_JOB_POD_DISCOVERY_TIMEOUT_SECONDS,
+        pod_discovery_poll_interval_seconds=1,
         retries=1,
         retry_delay=timedelta(seconds=15),
-        executor_config=d19_remote_kubernetes_pod_launcher_executor_config(),
+        executor_config=kubernetes_pod_launcher_executor_config(),
         dag=dag,
     )
     D19_STANDARD_HARNESS_RUN_TASKS[identity] = runner
@@ -2517,7 +2520,7 @@ assemble_paired_execution_manifest = ReceiptKubernetesPodOperator(
     on_kill_action="delete_pod",
     on_finish_action="delete_pod",
     retries=0,
-    executor_config=d19_remote_kubernetes_pod_launcher_executor_config(),
+    executor_config=kubernetes_pod_launcher_executor_config(),
     dag=dag,
 )
 
@@ -2591,7 +2594,7 @@ run_paired_evaluation = ReceiptKubernetesPodOperator(
     retries=0,
     retry_delay=timedelta(seconds=5),
     do_xcom_push=True,
-    executor_config=d19_remote_kubernetes_pod_launcher_executor_config(),
+    executor_config=kubernetes_pod_launcher_executor_config(),
     dag=dag,
 )
 

@@ -210,6 +210,38 @@ def test_job_operator_retry_adopts_active_prior_attempt_job(
     assert operator.created_jobs == []
 
 
+def test_remote_job_hardens_and_budgets_the_xcom_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_job_operator_stub(monkeypatch)
+    sys.modules.pop("dags.serp_kubernetes_job_operator", None)
+    module = importlib.import_module("dags.serp_kubernetes_job_operator")
+    job = module.k8s.V1Job(
+        metadata=module.k8s.V1ObjectMeta(name="remote-job", namespace="airflow"),
+        spec=module.k8s.V1JobSpec(
+            template=module.k8s.V1PodTemplateSpec(
+                metadata=module.k8s.V1ObjectMeta(labels={"try_number": "1"}),
+                spec=module.k8s.V1PodSpec(
+                    containers=[
+                        module.k8s.V1Container(name="base"),
+                        module.k8s.V1Container(name="airflow-xcom-sidecar"),
+                    ],
+                    node_selector={"adapstory.com/compute-class": "remote"},
+                ),
+            )
+        ),
+    )
+    operator = module.BoundedKubernetesJobOperator(task_id="remote-xcom")
+
+    result = operator.create_job(job)
+
+    sidecar = result.spec.template.spec.containers[1]
+    assert sidecar.resources.requests["ephemeral-storage"] == "32Mi"
+    assert sidecar.resources.limits["ephemeral-storage"] == "128Mi"
+    assert sidecar.security_context.allow_privilege_escalation is False
+    assert sidecar.security_context.capabilities.drop == ["ALL"]
+
+
 def test_job_operator_retry_rejects_active_orphan_before_creating_duplicate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
