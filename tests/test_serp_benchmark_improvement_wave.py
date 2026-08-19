@@ -53,6 +53,24 @@ def test_pack_builders_have_bounded_checkpoint_aware_execution_recovery() -> Non
     assert "max_retry_delay=timedelta(minutes=2)," in builder
 
 
+def test_pack_builder_job_policy_retries_only_typed_infrastructure_failures() -> None:
+    source = (Path(__file__).parents[1] / "dags" / "serp_benchmark_improvement_wave.py").read_text(
+        encoding="utf-8"
+    )
+    builder = source.split(
+        "D19_PACK_SIDE_BUILD_TASKS[(suite_id, side)] = BoundedKubernetesJobOperator(",
+        maxsplit=1,
+    )[1].split("_D19_PACK_SIDE_RESULT_URIS_JSON", maxsplit=1)[0]
+
+    assert "pod_failure_policy=D19_PACK_BUILDER_POD_FAILURE_POLICY," in builder
+    assert 'action="Count"' in source
+    assert 'type="DisruptionTarget"' in source
+    assert 'operator="In"' in source
+    assert "values=[137, 143]" in source
+    assert 'action="FailJob"' in source
+    assert 'operator="NotIn"' in source
+
+
 def test_swe_pack_sides_prefer_parallel_placement_across_both_compute_nodes() -> None:
     source = (Path(__file__).parents[1] / "dags" / "serp_benchmark_improvement_wave.py").read_text(
         encoding="utf-8"

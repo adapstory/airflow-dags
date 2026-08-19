@@ -254,6 +254,35 @@ D19_SWE_PACK_BUILDER_AFFINITY = k8s.V1Affinity(
         ]
     )
 )
+D19_PACK_BUILDER_POD_FAILURE_POLICY = k8s.V1PodFailurePolicy(
+    rules=[
+        k8s.V1PodFailurePolicyRule(
+            action="Count",
+            on_pod_conditions=[
+                k8s.V1PodFailurePolicyOnPodConditionsPattern(
+                    type="DisruptionTarget",
+                    status="True",
+                )
+            ],
+        ),
+        k8s.V1PodFailurePolicyRule(
+            action="Count",
+            on_exit_codes=k8s.V1PodFailurePolicyOnExitCodesRequirement(
+                container_name="base",
+                operator="In",
+                values=[137, 143],
+            ),
+        ),
+        k8s.V1PodFailurePolicyRule(
+            action="FailJob",
+            on_exit_codes=k8s.V1PodFailurePolicyOnExitCodesRequirement(
+                container_name="base",
+                operator="NotIn",
+                values=[137, 143],
+            ),
+        ),
+    ]
+)
 
 
 D19_OFFICIAL_HARNESS_LIMITS: Mapping[str, Mapping[str, str]] = {
@@ -1869,6 +1898,7 @@ for suite_id, side in D19_PACK_SIDE_IDENTITIES:
         on_kill_action="delete_pod",
         on_finish_action="delete_pod",
         backoff_limit=1,
+        pod_failure_policy=D19_PACK_BUILDER_POD_FAILURE_POLICY,
         ttl_seconds_after_finished=300,
         wait_until_job_complete=True,
         pod_discovery_timeout_seconds=DEFAULT_JOB_POD_DISCOVERY_TIMEOUT_SECONDS,

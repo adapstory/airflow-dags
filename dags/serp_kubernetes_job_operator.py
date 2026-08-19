@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from functools import cached_property
 from time import monotonic, sleep
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 from airflow.providers.cncf.kubernetes.hooks.kubernetes import KubernetesHook
 from airflow.providers.cncf.kubernetes.operators.job import KubernetesJobOperator
@@ -27,9 +27,10 @@ _XCOM_SIDECAR_NAME = "airflow-xcom-sidecar"
 _XCOM_EPHEMERAL_STORAGE_REQUEST = "32Mi"
 _XCOM_EPHEMERAL_STORAGE_LIMIT = "128Mi"
 _CONTROL_PLANE_RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+_Observation = TypeVar("_Observation")
 
 
-class ResilientKubernetesHook(KubernetesHook):
+class ResilientKubernetesHook(KubernetesHook):  # type: ignore[misc]
     """Observe a running Job across bounded Kubernetes control-plane outages."""
 
     def __init__(
@@ -62,36 +63,36 @@ class ResilientKubernetesHook(KubernetesHook):
         )
         super().__init__(**kwargs)
 
-    def wait_until_job_complete(
-        self, job_name: str, namespace: str, job_poll_interval: float = 10
-    ) -> k8s.V1Job:
-        observation_deadline: float | None = None
+    def observe_control_plane(
+        self,
+        *,
+        description: str,
+        operation: Callable[[], _Observation],
+    ) -> _Observation:
+        """Retry one read-only Kubernetes observation within the shared bound."""
+
+        observation_deadline = monotonic() + self.control_plane_observation_timeout_seconds
         backoff_seconds = self.control_plane_observation_initial_backoff_seconds
         while True:
-            self.log.info("Requesting status for the job '%s' ", job_name)
             try:
-                job = self.get_job_status(job_name=job_name, namespace=namespace)
+                return operation()
             except (ApiException, HTTPError, ConnectionError, TimeoutError) as error:
                 if isinstance(error, ApiException) and (
                     error.status not in _CONTROL_PLANE_RETRYABLE_STATUSES
                 ):
                     raise
-                if observation_deadline is None:
-                    observation_deadline = (
-                        monotonic() + self.control_plane_observation_timeout_seconds
-                    )
                 remaining_seconds = observation_deadline - monotonic()
                 if remaining_seconds <= 0:
                     raise AirflowException(
                         "control_plane_observation_unavailable: Kubernetes control-plane "
-                        "observation remained unavailable for "
+                        f"observation for {description} remained unavailable for "
                         f"{self.control_plane_observation_timeout_seconds:g} seconds"
                     ) from error
                 delay = min(backoff_seconds, remaining_seconds)
                 self.log.warning(
-                    "Kubernetes control-plane observation unavailable for Job %s; "
+                    "Kubernetes control-plane observation unavailable for %s; "
                     "retrying in %.1f seconds",
-                    job_name,
+                    description,
                     delay,
                 )
                 sleep(delay)
@@ -99,9 +100,28 @@ class ResilientKubernetesHook(KubernetesHook):
                     backoff_seconds * 2,
                     self.control_plane_observation_max_backoff_seconds,
                 )
-                continue
-            observation_deadline = None
-            backoff_seconds = self.control_plane_observation_initial_backoff_seconds
+
+    def wait_until_job_complete(
+        self, job_name: str, namespace: str, job_poll_interval: float = 10
+    ) -> k8s.V1Job:
+        expected_uid: str | None = None
+        while True:
+            self.log.info("Requesting status for the job '%s' ", job_name)
+            job = self.observe_control_plane(
+                description=f"Job {namespace}/{job_name}",
+                operation=lambda: self.get_job_status(
+                    job_name=job_name,
+                    namespace=namespace,
+                ),
+            )
+            observed_uid = str(getattr(getattr(job, "metadata", None), "uid", "") or "")
+            if expected_uid is None and observed_uid:
+                expected_uid = observed_uid
+            elif expected_uid is not None and observed_uid != expected_uid:
+                raise AirflowException(
+                    f"Job UID changed for {namespace}/{job_name}: expected {expected_uid}, "
+                    f"observed {observed_uid or '<missing>'}"
+                )
             if self.is_job_complete(job=job):
                 return job
             self.log.info(
@@ -149,6 +169,7 @@ class BoundedKubernetesJobOperator(_TerminationReceiptCleanupMixin, KubernetesJo
         control_plane_observation_timeout_seconds: float = 5 * 60,
         control_plane_observation_initial_backoff_seconds: float = 1,
         control_plane_observation_max_backoff_seconds: float = 30,
+        pod_failure_policy: k8s.V1PodFailurePolicy | None = None,
         **kwargs: Any,
     ) -> None:
         if pod_discovery_timeout_seconds <= 0:
@@ -164,6 +185,7 @@ class BoundedKubernetesJobOperator(_TerminationReceiptCleanupMixin, KubernetesJo
         self.control_plane_observation_max_backoff_seconds = (
             control_plane_observation_max_backoff_seconds
         )
+        self.pod_failure_policy = pod_failure_policy
         super().__init__(**kwargs)
 
     @cached_property
@@ -187,6 +209,8 @@ class BoundedKubernetesJobOperator(_TerminationReceiptCleanupMixin, KubernetesJo
     def create_job(self, job_request_obj: k8s.V1Job) -> k8s.V1Job:
         """Adopt an active prior-attempt Job instead of duplicating its worker."""
         self._harden_remote_xcom_sidecar(job_request_obj)
+        if self.pod_failure_policy is not None:
+            job_request_obj.spec.pod_failure_policy = self.pod_failure_policy
         prior_job = self._active_prior_attempt_job(job_request_obj)
         if prior_job is not None:
             self.log.info(
@@ -250,10 +274,13 @@ class BoundedKubernetesJobOperator(_TerminationReceiptCleanupMixin, KubernetesJo
             )
         label_selector = ",".join(f"{key}={labels[key]}" for key in identity_keys)
         namespace = job_request_obj.metadata.namespace
-        pods = self.client.list_namespaced_pod(
-            namespace=namespace,
-            label_selector=label_selector,
-        ).items
+        pods = self.hook.observe_control_plane(
+            description=f"prior-attempt Pods in {namespace}",
+            operation=lambda: self.client.list_namespaced_pod(
+                namespace=namespace,
+                label_selector=label_selector,
+            ).items,
+        )
 
         jobs_by_name: dict[str, k8s.V1Job] = {}
         for pod in pods:
@@ -275,10 +302,20 @@ class BoundedKubernetesJobOperator(_TerminationReceiptCleanupMixin, KubernetesJo
                     f"active orphan pod {pod.metadata.name} has no owning Job; "
                     "refusing to create a concurrent retry worker"
                 )
+
+            def read_owner_job(owner_job_name: str = str(owner_job_name)) -> k8s.V1Job:
+                return cast(
+                    k8s.V1Job,
+                    self.job_client.read_namespaced_job(
+                        name=owner_job_name,
+                        namespace=namespace,
+                    ),
+                )
+
             try:
-                owner_job = self.job_client.read_namespaced_job(
-                    name=owner_job_name,
-                    namespace=namespace,
+                owner_job = self.hook.observe_control_plane(
+                    description=f"prior-attempt Job {namespace}/{owner_job_name}",
+                    operation=read_owner_job,
                 )
             except Exception as error:
                 if getattr(error, "status", None) != 404:
@@ -317,12 +354,17 @@ class BoundedKubernetesJobOperator(_TerminationReceiptCleanupMixin, KubernetesJo
         deadline = monotonic() + self.pod_discovery_timeout_seconds
 
         while True:
-            pod_list = cast(
-                Sequence[k8s.V1Pod],
-                self.client.list_namespaced_pod(
-                    namespace=pod_request_obj.metadata.namespace,
-                    label_selector=label_selector,
-                ).items,
+            pod_list = self.hook.observe_control_plane(
+                description=(
+                    f"Pods in {pod_request_obj.metadata.namespace} with {label_selector}"
+                ),
+                operation=lambda: cast(
+                    Sequence[k8s.V1Pod],
+                    self.client.list_namespaced_pod(
+                        namespace=pod_request_obj.metadata.namespace,
+                        label_selector=label_selector,
+                    ).items,
+                ),
             )
             if len(pod_list) >= self.parallelism:
                 for pod_instance in pod_list:

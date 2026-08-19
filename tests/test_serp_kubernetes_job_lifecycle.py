@@ -192,6 +192,79 @@ def test_job_status_observation_recovers_after_connection_refused(
     assert sleeps == [1]
 
 
+def test_job_status_observation_rebinds_to_the_original_job_uid_after_503(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    airflow_exception = _install_airflow_job_operator_stub(monkeypatch)
+    sys.modules.pop("dags.serp_kubernetes_job_operator", None)
+    module = importlib.import_module("dags.serp_kubernetes_job_operator")
+    responses = iter(
+        [
+            SimpleNamespace(
+                metadata=SimpleNamespace(uid="original-job-uid"),
+                status=SimpleNamespace(complete=False),
+            ),
+            ApiException(status=503, reason="apiserver not ready"),
+            SimpleNamespace(
+                metadata=SimpleNamespace(uid="replacement-with-same-name"),
+                status=SimpleNamespace(complete=True),
+            ),
+        ]
+    )
+    hook = module.ResilientKubernetesHook(
+        control_plane_observation_timeout_seconds=10,
+        control_plane_observation_initial_backoff_seconds=0.01,
+        control_plane_observation_max_backoff_seconds=0.01,
+    )
+    monkeypatch.setattr(module, "sleep", lambda _seconds: None)
+
+    def get_job_status(**_kwargs: object) -> object:
+        value = next(responses)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(hook, "get_job_status", get_job_status)
+
+    with pytest.raises(airflow_exception, match="Job UID changed"):
+        hook.wait_until_job_complete("swe-baseline", "airflow", job_poll_interval=0.01)
+
+
+def test_job_operator_pod_discovery_recovers_after_transient_apiserver_503(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_job_operator_stub(monkeypatch)
+    sys.modules.pop("dags.serp_kubernetes_job_operator", None)
+    module = importlib.import_module("dags.serp_kubernetes_job_operator")
+    pod = SimpleNamespace(metadata=SimpleNamespace(name="recovered-pod"))
+
+    class Client:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def list_namespaced_pod(self, **_kwargs: object) -> object:
+            self.calls += 1
+            if self.calls == 1:
+                raise ApiException(status=503, reason="apiserver not ready")
+            return SimpleNamespace(items=[pod])
+
+    operator = module.BoundedKubernetesJobOperator(
+        task_id="delayed-pod",
+        control_plane_observation_initial_backoff_seconds=0.01,
+        control_plane_observation_max_backoff_seconds=0.01,
+    )
+    operator.client = Client()
+    monkeypatch.setattr(module, "sleep", lambda _seconds: None)
+
+    result = operator.get_pods(
+        SimpleNamespace(metadata=SimpleNamespace(namespace="airflow")),
+        {"run_id": "delayed-pod"},
+    )
+
+    assert result == [pod]
+    assert operator.client.calls == 2
+
+
 def test_job_status_observation_budget_exhaustion_is_typed_and_bounded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -247,6 +320,36 @@ def test_job_operator_uses_bounded_control_plane_observation_hook(
     assert operator.hook.control_plane_observation_timeout_seconds == 120
     assert operator.hook.control_plane_observation_initial_backoff_seconds == 2
     assert operator.hook.control_plane_observation_max_backoff_seconds == 20
+
+
+def test_job_operator_applies_pod_failure_policy_to_the_created_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_job_operator_stub(monkeypatch)
+    sys.modules.pop("dags.serp_kubernetes_job_operator", None)
+    module = importlib.import_module("dags.serp_kubernetes_job_operator")
+    policy = module.k8s.V1PodFailurePolicy(
+        rules=[module.k8s.V1PodFailurePolicyRule(action="FailJob")]
+    )
+    operator = module.BoundedKubernetesJobOperator(
+        task_id="typed-pod-failure-policy",
+        pod_failure_policy=policy,
+    )
+    job = module.k8s.V1Job(
+        metadata=module.k8s.V1ObjectMeta(name="typed-job", namespace="airflow"),
+        spec=module.k8s.V1JobSpec(
+            template=module.k8s.V1PodTemplateSpec(
+                metadata=module.k8s.V1ObjectMeta(labels={"try_number": "1"}),
+                spec=module.k8s.V1PodSpec(
+                    containers=[module.k8s.V1Container(name="base")],
+                ),
+            )
+        ),
+    )
+
+    result = operator.create_job(job)
+
+    assert result.spec.pod_failure_policy is policy
 
 
 def test_operator_cleanup_persists_failed_pod_receipt_before_parent_deletion(
@@ -637,8 +740,16 @@ class _BatchApi:
         return SimpleNamespace(metadata=SimpleNamespace(name=name))
 
 
+def _fresh_cleanup_airflow_pods() -> Any:
+    # DAG-construction tests replace the Kubernetes module tree with import
+    # stubs. Reload this independently owned module so the full-suite order
+    # cannot leak those stubs into cleanup behavior tests.
+    sys.modules.pop("dags.airflow_pod_cleanup", None)
+    return importlib.import_module("dags.airflow_pod_cleanup").cleanup_airflow_pods
+
+
 def test_cleanup_protects_pod_while_its_owning_job_exists() -> None:
-    from dags.airflow_pod_cleanup import cleanup_airflow_pods
+    cleanup_airflow_pods = _fresh_cleanup_airflow_pods()
 
     core_api = _CoreApi(
         [
@@ -661,7 +772,7 @@ def test_cleanup_protects_pod_while_its_owning_job_exists() -> None:
 
 
 def test_cleanup_persists_and_reads_back_eviction_receipt_before_delete() -> None:
-    from dags.airflow_pod_cleanup import cleanup_airflow_pods
+    cleanup_airflow_pods = _fresh_cleanup_airflow_pods()
 
     core_api = _CoreApi([_pod("evicted-task", phase="Failed", reason="Evicted")])
 
@@ -715,7 +826,7 @@ def test_cleanup_persists_and_reads_back_eviction_receipt_before_delete() -> Non
 
 
 def test_cleanup_keeps_failed_pod_when_termination_receipt_cannot_be_persisted() -> None:
-    from dags.airflow_pod_cleanup import cleanup_airflow_pods
+    cleanup_airflow_pods = _fresh_cleanup_airflow_pods()
 
     core_api = _CoreApi(
         [_pod("failed-task", phase="Failed")],
@@ -734,7 +845,7 @@ def test_cleanup_keeps_failed_pod_when_termination_receipt_cannot_be_persisted()
 
 
 def test_cleanup_keeps_failed_pod_when_termination_receipt_readback_differs() -> None:
-    from dags.airflow_pod_cleanup import cleanup_airflow_pods
+    cleanup_airflow_pods = _fresh_cleanup_airflow_pods()
 
     core_api = _CoreApi([_pod("failed-task", phase="Failed")], corrupt_receipt_readback=True)
 

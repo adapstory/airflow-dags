@@ -9428,6 +9428,10 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     models.V1LabelSelectorRequirement = FakeKubernetesModel
     models.V1PodAffinityTerm = FakeKubernetesModel
     models.V1PodAntiAffinity = FakeKubernetesModel
+    models.V1PodFailurePolicy = FakeKubernetesModel
+    models.V1PodFailurePolicyOnExitCodesRequirement = FakeKubernetesModel
+    models.V1PodFailurePolicyOnPodConditionsPattern = FakeKubernetesModel
+    models.V1PodFailurePolicyRule = FakeKubernetesModel
     models.V1ObjectFieldSelector = FakeKubernetesModel
     models.V1Pod = FakeKubernetesModel
     models.V1PodSpec = FakeKubernetesModel
