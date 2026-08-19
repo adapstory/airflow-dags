@@ -22,6 +22,10 @@ def _install_airflow_job_operator_stub(monkeypatch: pytest.MonkeyPatch) -> type[
 
         def __init__(self, *, parallelism: int = 1, **_: object) -> None:
             self.parallelism = parallelism
+            self.kubernetes_conn_id = "kubernetes_default"
+            self.in_cluster = True
+            self.config_file = None
+            self.cluster_context = None
             self.client: object | None = None
             self.logged_pods: list[object] = []
             self.created_jobs: list[object] = []
@@ -56,6 +60,17 @@ def _install_airflow_job_operator_stub(monkeypatch: pytest.MonkeyPatch) -> type[
     class KubernetesPodOperator(KubernetesJobOperator):
         pass
 
+    class KubernetesHook:
+        def __init__(self, **_: object) -> None:
+            self.log = SimpleNamespace(info=lambda *_args: None, warning=lambda *_args: None)
+
+        def get_job_status(self, *, job_name: str, namespace: str) -> object:
+            raise AssertionError(f"unexpected Job status read: {namespace}/{job_name}")
+
+        @staticmethod
+        def is_job_complete(job: object) -> bool:
+            return bool(getattr(getattr(job, "status", None), "complete", False))
+
     modules = {
         "airflow": ModuleType("airflow"),
         "airflow.providers": ModuleType("airflow.providers"),
@@ -70,6 +85,12 @@ def _install_airflow_job_operator_stub(monkeypatch: pytest.MonkeyPatch) -> type[
         "airflow.providers.cncf.kubernetes.operators.pod": ModuleType(
             "airflow.providers.cncf.kubernetes.operators.pod"
         ),
+        "airflow.providers.cncf.kubernetes.hooks": ModuleType(
+            "airflow.providers.cncf.kubernetes.hooks"
+        ),
+        "airflow.providers.cncf.kubernetes.hooks.kubernetes": ModuleType(
+            "airflow.providers.cncf.kubernetes.hooks.kubernetes"
+        ),
         "airflow.providers.common": ModuleType("airflow.providers.common"),
         "airflow.providers.common.compat": ModuleType("airflow.providers.common.compat"),
         "airflow.providers.common.compat.sdk": ModuleType("airflow.providers.common.compat.sdk"),
@@ -80,10 +101,152 @@ def _install_airflow_job_operator_stub(monkeypatch: pytest.MonkeyPatch) -> type[
     cast(
         Any, modules["airflow.providers.cncf.kubernetes.operators.pod"]
     ).KubernetesPodOperator = KubernetesPodOperator
+    cast(
+        Any, modules["airflow.providers.cncf.kubernetes.hooks.kubernetes"]
+    ).KubernetesHook = KubernetesHook
     cast(Any, modules["airflow.providers.common.compat.sdk"]).AirflowException = AirflowException
     for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)
     return AirflowException
+
+
+def test_job_status_observation_recovers_after_transient_apiserver_503(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_job_operator_stub(monkeypatch)
+    sys.modules.pop("dags.serp_kubernetes_job_operator", None)
+    module = importlib.import_module("dags.serp_kubernetes_job_operator")
+    clock = SimpleNamespace(now=100.0)
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock.now += seconds
+
+    responses = iter(
+        [
+            ApiException(status=503, reason="apiserver not ready"),
+            SimpleNamespace(status=SimpleNamespace(complete=True)),
+        ]
+    )
+    hook = module.ResilientKubernetesHook(
+        control_plane_observation_timeout_seconds=10,
+        control_plane_observation_initial_backoff_seconds=1,
+        control_plane_observation_max_backoff_seconds=4,
+    )
+    monkeypatch.setattr(module, "monotonic", lambda: clock.now)
+    monkeypatch.setattr(module, "sleep", sleep)
+
+    def get_job_status(*, job_name: str, namespace: str) -> object:
+        assert (job_name, namespace) == ("swe-baseline", "airflow")
+        value = next(responses)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(hook, "get_job_status", get_job_status)
+
+    result = hook.wait_until_job_complete("swe-baseline", "airflow", job_poll_interval=10)
+
+    assert result.status.complete is True
+    assert sleeps == [1]
+
+
+def test_job_status_observation_recovers_after_connection_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_job_operator_stub(monkeypatch)
+    sys.modules.pop("dags.serp_kubernetes_job_operator", None)
+    module = importlib.import_module("dags.serp_kubernetes_job_operator")
+    clock = SimpleNamespace(now=100.0)
+    sleeps: list[float] = []
+    responses = iter(
+        [
+            ConnectionError("Kubernetes API connection refused"),
+            SimpleNamespace(status=SimpleNamespace(complete=True)),
+        ]
+    )
+    hook = module.ResilientKubernetesHook(
+        control_plane_observation_timeout_seconds=10,
+        control_plane_observation_initial_backoff_seconds=1,
+        control_plane_observation_max_backoff_seconds=4,
+    )
+    monkeypatch.setattr(module, "monotonic", lambda: clock.now)
+    monkeypatch.setattr(
+        module,
+        "sleep",
+        lambda seconds: (sleeps.append(seconds), setattr(clock, "now", clock.now + seconds)),
+    )
+
+    def get_job_status(*, job_name: str, namespace: str) -> object:
+        value = next(responses)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(hook, "get_job_status", get_job_status)
+
+    result = hook.wait_until_job_complete("swe-candidate", "airflow")
+
+    assert result.status.complete is True
+    assert sleeps == [1]
+
+
+def test_job_status_observation_budget_exhaustion_is_typed_and_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    airflow_exception = _install_airflow_job_operator_stub(monkeypatch)
+    sys.modules.pop("dags.serp_kubernetes_job_operator", None)
+    module = importlib.import_module("dags.serp_kubernetes_job_operator")
+    clock = SimpleNamespace(now=10.0)
+    sleeps: list[float] = []
+    hook = module.ResilientKubernetesHook(
+        control_plane_observation_timeout_seconds=5,
+        control_plane_observation_initial_backoff_seconds=2,
+        control_plane_observation_max_backoff_seconds=4,
+    )
+    monkeypatch.setattr(module, "monotonic", lambda: clock.now)
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock.now += seconds
+
+    monkeypatch.setattr(module, "sleep", sleep)
+    monkeypatch.setattr(
+        hook,
+        "get_job_status",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            ApiException(status=503, reason="apiserver not ready")
+        ),
+    )
+
+    with pytest.raises(
+        airflow_exception,
+        match="control_plane_observation_unavailable.*5 seconds",
+    ):
+        hook.wait_until_job_complete("swe-baseline", "airflow")
+
+    assert sleeps == [2, 3]
+
+
+def test_job_operator_uses_bounded_control_plane_observation_hook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_job_operator_stub(monkeypatch)
+    sys.modules.pop("dags.serp_kubernetes_job_operator", None)
+    module = importlib.import_module("dags.serp_kubernetes_job_operator")
+
+    operator = module.BoundedKubernetesJobOperator(
+        task_id="swe-baseline",
+        control_plane_observation_timeout_seconds=120,
+        control_plane_observation_initial_backoff_seconds=2,
+        control_plane_observation_max_backoff_seconds=20,
+    )
+
+    assert isinstance(operator.hook, module.ResilientKubernetesHook)
+    assert operator.hook.control_plane_observation_timeout_seconds == 120
+    assert operator.hook.control_plane_observation_initial_backoff_seconds == 2
+    assert operator.hook.control_plane_observation_max_backoff_seconds == 20
 
 
 def test_operator_cleanup_persists_failed_pod_receipt_before_parent_deletion(

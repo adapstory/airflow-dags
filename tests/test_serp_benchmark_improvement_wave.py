@@ -36,3 +36,41 @@ def test_d19_supervisors_stay_home_while_controller_owned_work_runs_remote() -> 
     assert "BoundedKubernetesJobOperator(" in standard_runner
     assert "node_selector=D19_REMOTE_COMPUTE_NODE_SELECTOR," in standard_runner
     assert "tolerations=D19_REMOTE_COMPUTE_TOLERATIONS," in standard_runner
+
+
+def test_pack_builders_have_bounded_checkpoint_aware_execution_recovery() -> None:
+    source = (Path(__file__).parents[1] / "dags" / "serp_benchmark_improvement_wave.py").read_text(
+        encoding="utf-8"
+    )
+    builder = source.split(
+        "D19_PACK_SIDE_BUILD_TASKS[(suite_id, side)] = BoundedKubernetesJobOperator(",
+        maxsplit=1,
+    )[1].split("_D19_PACK_SIDE_RESULT_URIS_JSON", maxsplit=1)[0]
+    assert "backoff_limit=1," in builder
+    assert "retries=2," in builder
+    assert "retry_delay=timedelta(minutes=1)," in builder
+    assert "retry_exponential_backoff=True," in builder
+    assert "max_retry_delay=timedelta(minutes=2)," in builder
+
+
+def test_swe_pack_sides_prefer_parallel_placement_across_both_compute_nodes() -> None:
+    source = (Path(__file__).parents[1] / "dags" / "serp_benchmark_improvement_wave.py").read_text(
+        encoding="utf-8"
+    )
+    builder = source.split(
+        "D19_PACK_SIDE_BUILD_TASKS[(suite_id, side)] = BoundedKubernetesJobOperator(",
+        maxsplit=1,
+    )[1].split("_D19_PACK_SIDE_RESULT_URIS_JSON", maxsplit=1)[0]
+    normalized_builder = " ".join(builder.split())
+
+    assert '"adapstory.com/serp-pack-suite": artifact_slug' in builder
+    assert (
+        'None if suite_id == "SWE-bench Verified" else D19_REMOTE_COMPUTE_NODE_SELECTOR'
+        in normalized_builder
+    )
+    assert (
+        'D19_SWE_PACK_BUILDER_AFFINITY if suite_id == "SWE-bench Verified" else None'
+        in normalized_builder
+    )
+    assert 'topology_key="kubernetes.io/hostname"' in source
+    assert 'values=["swe-bench-verified"]' in source

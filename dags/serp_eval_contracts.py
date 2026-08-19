@@ -2512,6 +2512,7 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
         "frozen_benchmark_release_evidence",
         "source_sha",
     }
+    replacement_lineage: dict[str, Any] | None = None
     if execution_purpose == "critical-path-preflight":
         for field_name in sorted(preflight_fields - {"source_sha"}):
             evidence = _worm_evidence_reference(payload, field_name)
@@ -2523,7 +2524,24 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
         if re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
             raise ValueError("critical path preflight source_sha is invalid")
         preflight_bindings["source_sha"] = source_sha
-    elif any(field_name in payload for field_name in preflight_fields):
+        if "preflight_replacement" in payload:
+            raw_replacement_lineage = payload["preflight_replacement"]
+            if not isinstance(raw_replacement_lineage, Mapping):
+                raise ValueError("preflight_replacement is invalid")
+            replacement_lineage = dict(raw_replacement_lineage)
+            if (
+                set(replacement_lineage) != {"ordinal", "reason", "replacementOf"}
+                or replacement_lineage.get("ordinal") != 1
+                or replacement_lineage.get("reason") != "control_plane_observation_unavailable"
+                or not isinstance(replacement_lineage.get("replacementOf"), str)
+                or re.fullmatch(
+                    r"manual__critical_path_preflight__[0-9a-f]{16}__[0-9]{6}",
+                    replacement_lineage["replacementOf"],
+                )
+                is None
+            ):
+                raise ValueError("preflight_replacement is invalid")
+    elif any(field_name in payload for field_name in preflight_fields | {"preflight_replacement"}):
         raise ValueError("measurement execution cannot accept preflight evidence")
     registry_resource_type = _required_resource_type(payload, "registry_resource_type")
     registry_resource_id = _required_uuid(payload, "registry_resource_id")
@@ -2562,6 +2580,15 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
             ]
             + [str(preflight_bindings["source_sha"])]
             if preflight_bindings
+            else []
+        ),
+        *(
+            [
+                str(replacement_lineage["replacementOf"]),
+                str(replacement_lineage["ordinal"]),
+                str(replacement_lineage["reason"]),
+            ]
+            if replacement_lineage is not None
             else []
         ),
         generated_at,
@@ -2645,6 +2672,8 @@ def build_benchmark_improvement_wave_plan(conf: Mapping[str, Any]) -> SerpDagPla
         "tenant_id": str(tenant_id),
         **preflight_bindings,
     }
+    if replacement_lineage is not None:
+        plan_payload["preflight_replacement"] = replacement_lineage
     if resume_manifest_evidence is not None:
         plan_payload["resume_manifest_evidence"] = resume_manifest_evidence
     return SerpDagPlan(plan_payload)
@@ -6501,12 +6530,8 @@ def materialize_live_benchmark_catalog_artifact(
             dataset_payloads,
             dataset_snapshots,
             fetch_bytes=native_archive_fetch_bytes,
-            archive_cache_reader=(
-                None if catalog_input_cache is None else catalog_input_cache[0]
-            ),
-            archive_cache_writer=(
-                None if catalog_input_cache is None else catalog_input_cache[1]
-            ),
+            archive_cache_reader=(None if catalog_input_cache is None else catalog_input_cache[0]),
+            archive_cache_writer=(None if catalog_input_cache is None else catalog_input_cache[1]),
             output_directory=output_directory,
             progress_callback=lambda relative_cursor: emit_catalog_progress(
                 phase="native-corpus",
@@ -6796,9 +6821,7 @@ def _worm_catalog_input_cache(
             if _is_s3_missing_object(exc):
                 return None
             raise ValueError("benchmark catalog input cache entry is not readable") from exc
-        entry = _canonical_json_object_bytes(
-            entry_bytes, "benchmark catalog input cache entry"
-        )
+        entry = _canonical_json_object_bytes(entry_bytes, "benchmark catalog input cache entry")
         expected_fields = {"inputSha256", "inputSnapshot", "schema", "url"}
         if (
             set(entry) != expected_fields

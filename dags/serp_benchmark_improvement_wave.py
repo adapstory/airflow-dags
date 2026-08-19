@@ -233,6 +233,27 @@ D19_REMOTE_COMPUTE_TOLERATIONS = [
         value="remote",
     )
 ]
+D19_SWE_PACK_BUILDER_AFFINITY = k8s.V1Affinity(
+    pod_anti_affinity=k8s.V1PodAntiAffinity(
+        preferred_during_scheduling_ignored_during_execution=[
+            k8s.V1WeightedPodAffinityTerm(
+                weight=100,
+                pod_affinity_term=k8s.V1PodAffinityTerm(
+                    label_selector=k8s.V1LabelSelector(
+                        match_expressions=[
+                            k8s.V1LabelSelectorRequirement(
+                                key="adapstory.com/serp-pack-suite",
+                                operator="In",
+                                values=["swe-bench-verified"],
+                            )
+                        ]
+                    ),
+                    topology_key="kubernetes.io/hostname",
+                ),
+            )
+        ]
+    )
+)
 
 
 D19_OFFICIAL_HARNESS_LIMITS: Mapping[str, Mapping[str, str]] = {
@@ -1819,7 +1840,11 @@ for suite_id, side in D19_PACK_SIDE_IDENTITIES:
             D19_SWE_BUILDER_VOLUMES if suite_id == "SWE-bench Verified" else D19_BUILDER_VOLUMES
         ),
         volume_mounts=D19_BUILDER_VOLUME_MOUNTS,
-        labels=D19_BUILDER_WORKLOAD_LABELS,
+        labels={
+            **D19_BUILDER_WORKLOAD_LABELS,
+            "adapstory.com/serp-pack-suite": artifact_slug,
+            "adapstory.com/serp-pack-side": side,
+        },
         container_resources=(
             D19_SWE_PACK_BUILDER_RESOURCES
             if suite_id == "SWE-bench Verified"
@@ -1829,7 +1854,10 @@ for suite_id, side in D19_PACK_SIDE_IDENTITIES:
         pool_slots=1,
         priority_weight=(1000 if (suite_id, side) in D19_DUAL_GPU_CRITICAL_PAIR else 1),
         weight_rule="absolute",
-        node_selector=D19_REMOTE_COMPUTE_NODE_SELECTOR,
+        node_selector=(
+            None if suite_id == "SWE-bench Verified" else D19_REMOTE_COMPUTE_NODE_SELECTOR
+        ),
+        affinity=(D19_SWE_PACK_BUILDER_AFFINITY if suite_id == "SWE-bench Verified" else None),
         tolerations=D19_REMOTE_COMPUTE_TOLERATIONS,
         security_context=hardened_runtime_pod_security_context(),
         container_security_context=hardened_runtime_container_security_context(),
@@ -1840,12 +1868,15 @@ for suite_id, side in D19_PACK_SIDE_IDENTITIES:
         reattach_on_restart=True,
         on_kill_action="delete_pod",
         on_finish_action="delete_pod",
-        backoff_limit=0,
+        backoff_limit=1,
         ttl_seconds_after_finished=300,
         wait_until_job_complete=True,
         pod_discovery_timeout_seconds=DEFAULT_JOB_POD_DISCOVERY_TIMEOUT_SECONDS,
         pod_discovery_poll_interval_seconds=1,
-        retries=0,
+        retries=2,
+        retry_delay=timedelta(minutes=1),
+        retry_exponential_backoff=True,
+        max_retry_delay=timedelta(minutes=2),
         executor_config=kubernetes_pod_launcher_executor_config(),
         dag=dag,
     )

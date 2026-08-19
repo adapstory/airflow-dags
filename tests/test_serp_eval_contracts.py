@@ -3925,6 +3925,43 @@ def test_benchmark_improvement_wave_plan_binds_nonmeasurement_preflight_purpose(
         "preflight_execution_manifest",
         "preflight_progress_snapshot",
     }.issubset(plan.payload["artifact_paths"])
+
+
+def test_preflight_replacement_is_typed_lineage_bound_and_measurement_rejects_it() -> None:
+    conf = _improvement_wave_conf()
+    conf.update(
+        {
+            "execution_purpose": "critical-path-preflight",
+            "adapter_parity_evidence": _d19_worm_evidence("preflight/parity", "1"),
+            "bc10_route_set_evidence": _d19_worm_evidence("preflight/bc10-routes", "2"),
+            "fault_injection_evidence": _d19_worm_evidence("preflight/faults", "3"),
+            "frozen_benchmark_release_evidence": _d19_worm_evidence(
+                "preflight/frozen-release", "4"
+            ),
+            "source_sha": "a" * 40,
+            "preflight_replacement": {
+                "ordinal": 1,
+                "reason": "control_plane_observation_unavailable",
+                "replacementOf": ("manual__critical_path_preflight__aaaaaaaaaaaaaaaa__000017"),
+            },
+        }
+    )
+
+    plan = build_benchmark_improvement_wave_plan(conf)
+
+    assert plan.payload["preflight_replacement"] == conf["preflight_replacement"]
+    measurement = _improvement_wave_conf()
+    measurement["preflight_replacement"] = conf["preflight_replacement"]
+    with pytest.raises(ValueError, match="measurement execution cannot accept preflight"):
+        build_benchmark_improvement_wave_plan(measurement)
+
+    invalid = dict(conf)
+    invalid["preflight_replacement"] = {
+        **conf["preflight_replacement"],
+        "reason": "contract_violation",
+    }
+    with pytest.raises(ValueError, match="preflight_replacement is invalid"):
+        build_benchmark_improvement_wave_plan(invalid)
     assert [task["task_id"] for task in plan.payload["tasks"]] == [
         "verify_runtime_terminal_activation_admission",
         "validate_d19_fence_admission",
@@ -9220,6 +9257,10 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeKubernetesJobOperator(FakeKubernetesPodOperator):
         pass
 
+    class FakeKubernetesHook:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
     class FakeTimeDeltaSensor(FakePythonOperator):
         pass
 
@@ -9282,6 +9323,12 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         "airflow.providers": types.ModuleType("airflow.providers"),
         "airflow.providers.cncf": types.ModuleType("airflow.providers.cncf"),
         "airflow.providers.cncf.kubernetes": types.ModuleType("airflow.providers.cncf.kubernetes"),
+        "airflow.providers.cncf.kubernetes.hooks": types.ModuleType(
+            "airflow.providers.cncf.kubernetes.hooks"
+        ),
+        "airflow.providers.cncf.kubernetes.hooks.kubernetes": types.ModuleType(
+            "airflow.providers.cncf.kubernetes.hooks.kubernetes"
+        ),
         "airflow.providers.cncf.kubernetes.operators": types.ModuleType(
             "airflow.providers.cncf.kubernetes.operators"
         ),
@@ -9360,10 +9407,14 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     cast(
         Any, modules["airflow.providers.cncf.kubernetes.operators.job"]
     ).KubernetesJobOperator = FakeKubernetesJobOperator
+    cast(
+        Any, modules["airflow.providers.cncf.kubernetes.hooks.kubernetes"]
+    ).KubernetesHook = FakeKubernetesHook
     cast(Any, modules["airflow.sdk"]).DAG = FakeDAG
     cast(Any, modules["airflow.sdk"]).literal = lambda value: value
     cast(Any, modules["airflow.task.trigger_rule"]).TriggerRule = FakeTriggerRule
     models = cast(Any, modules["kubernetes.client.models"])
+    models.V1Affinity = FakeKubernetesModel
     models.V1Capabilities = FakeKubernetesModel
     models.V1ConfigMapKeySelector = FakeKubernetesModel
     models.V1ConfigMapProjection = FakeKubernetesModel
@@ -9373,11 +9424,16 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     models.V1Container = FakeKubernetesModel
     models.V1EmptyDirVolumeSource = FakeKubernetesModel
     models.V1ObjectMeta = FakeKubernetesModel
+    models.V1LabelSelector = FakeKubernetesModel
+    models.V1LabelSelectorRequirement = FakeKubernetesModel
+    models.V1PodAffinityTerm = FakeKubernetesModel
+    models.V1PodAntiAffinity = FakeKubernetesModel
     models.V1ObjectFieldSelector = FakeKubernetesModel
     models.V1Pod = FakeKubernetesModel
     models.V1PodSpec = FakeKubernetesModel
     models.V1PodSecurityContext = FakeKubernetesModel
     models.V1ResourceRequirements = FakeKubernetesModel
+    models.V1WeightedPodAffinityTerm = FakeKubernetesModel
     models.V1ResourceFieldSelector = FakeKubernetesModel
     models.V1SeccompProfile = FakeKubernetesModel
     models.V1SecretKeySelector = FakeKubernetesModel
@@ -9692,7 +9748,7 @@ def test_d19_pack_cas_classifier_routes_deterministic_failures_to_no_retry_recov
     assert builder_task_ids.isdisjoint(module.classify_pack_cas.downstream_task_ids)
 
 
-def test_d19_pack_lifecycle_disables_untyped_airflow_retries(
+def test_d19_pack_lifecycle_limits_retries_to_checkpoint_aware_builders(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_airflow_import_stubs(monkeypatch)
@@ -9710,7 +9766,7 @@ def test_d19_pack_lifecycle_disables_untyped_airflow_retries(
     module = importlib.reload(module)
 
     assert module.classify_pack_cas.kwargs["retries"] == 0
-    assert all(task.kwargs["retries"] == 0 for task in module.D19_PACK_SIDE_BUILD_TASKS.values())
+    assert all(task.kwargs["retries"] == 2 for task in module.D19_PACK_SIDE_BUILD_TASKS.values())
     assert module.aggregate_exact_nine_benchmark_packs.kwargs["retries"] == 0
 
 
@@ -9764,7 +9820,7 @@ def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_reque
         assert arguments[arguments.index("--content-addressed-cache-prefix") + 1] == (
             "s3://airflow-serp-evidence/serp-evals/benchmark-cas/v4"
         )
-        assert builder_task.kwargs["retries"] == 0
+        assert builder_task.kwargs["retries"] == 2
         expected_priority = (
             1000
             if (suite_id, side)
@@ -9892,14 +9948,13 @@ def test_d19_pack_side_builders_are_controller_owned_remote_jobs() -> None:
     )
     keywords = {keyword.arg: keyword.value for keyword in builder_job.keywords}
 
-    assert isinstance(keywords["node_selector"], ast.Name)
-    assert keywords["node_selector"].id == "D19_REMOTE_COMPUTE_NODE_SELECTOR"
+    assert isinstance(keywords["node_selector"], ast.IfExp)
     assert isinstance(keywords["tolerations"], ast.Name)
     assert keywords["tolerations"].id == "D19_REMOTE_COMPUTE_TOLERATIONS"
     assert isinstance(keywords["wait_until_job_complete"], ast.Constant)
     assert keywords["wait_until_job_complete"].value is True
     assert isinstance(keywords["backoff_limit"], ast.Constant)
-    assert keywords["backoff_limit"].value == 0
+    assert keywords["backoff_limit"].value == 1
     assert isinstance(keywords["do_xcom_push"], ast.Constant)
     assert keywords["do_xcom_push"].value is False
     resource_call = next(

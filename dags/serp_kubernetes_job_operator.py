@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from functools import cached_property
 from time import monotonic, sleep
 from typing import Any, cast
 
+from airflow.providers.cncf.kubernetes.hooks.kubernetes import KubernetesHook
 from airflow.providers.cncf.kubernetes.operators.job import KubernetesJobOperator
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 from airflow.providers.common.compat.sdk import AirflowException
 from kubernetes.client import models as k8s
+from kubernetes.client.rest import ApiException
+from urllib3.exceptions import HTTPError
 
 from dags.airflow_pod_cleanup import (
     persist_airflow_pod_termination_receipt,
@@ -22,6 +26,90 @@ _REMOTE_COMPUTE_SELECTOR_VALUE = "remote"
 _XCOM_SIDECAR_NAME = "airflow-xcom-sidecar"
 _XCOM_EPHEMERAL_STORAGE_REQUEST = "32Mi"
 _XCOM_EPHEMERAL_STORAGE_LIMIT = "128Mi"
+_CONTROL_PLANE_RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+
+class ResilientKubernetesHook(KubernetesHook):
+    """Observe a running Job across bounded Kubernetes control-plane outages."""
+
+    def __init__(
+        self,
+        *,
+        control_plane_observation_timeout_seconds: float = 5 * 60,
+        control_plane_observation_initial_backoff_seconds: float = 1,
+        control_plane_observation_max_backoff_seconds: float = 30,
+        **kwargs: Any,
+    ) -> None:
+        if control_plane_observation_timeout_seconds <= 0:
+            raise ValueError("control_plane_observation_timeout_seconds must be greater than zero")
+        if control_plane_observation_initial_backoff_seconds <= 0:
+            raise ValueError(
+                "control_plane_observation_initial_backoff_seconds must be greater than zero"
+            )
+        if (
+            control_plane_observation_max_backoff_seconds
+            < control_plane_observation_initial_backoff_seconds
+        ):
+            raise ValueError(
+                "control_plane_observation_max_backoff_seconds must be at least the initial backoff"
+            )
+        self.control_plane_observation_timeout_seconds = control_plane_observation_timeout_seconds
+        self.control_plane_observation_initial_backoff_seconds = (
+            control_plane_observation_initial_backoff_seconds
+        )
+        self.control_plane_observation_max_backoff_seconds = (
+            control_plane_observation_max_backoff_seconds
+        )
+        super().__init__(**kwargs)
+
+    def wait_until_job_complete(
+        self, job_name: str, namespace: str, job_poll_interval: float = 10
+    ) -> k8s.V1Job:
+        observation_deadline: float | None = None
+        backoff_seconds = self.control_plane_observation_initial_backoff_seconds
+        while True:
+            self.log.info("Requesting status for the job '%s' ", job_name)
+            try:
+                job = self.get_job_status(job_name=job_name, namespace=namespace)
+            except (ApiException, HTTPError, ConnectionError, TimeoutError) as error:
+                if isinstance(error, ApiException) and (
+                    error.status not in _CONTROL_PLANE_RETRYABLE_STATUSES
+                ):
+                    raise
+                if observation_deadline is None:
+                    observation_deadline = (
+                        monotonic() + self.control_plane_observation_timeout_seconds
+                    )
+                remaining_seconds = observation_deadline - monotonic()
+                if remaining_seconds <= 0:
+                    raise AirflowException(
+                        "control_plane_observation_unavailable: Kubernetes control-plane "
+                        "observation remained unavailable for "
+                        f"{self.control_plane_observation_timeout_seconds:g} seconds"
+                    ) from error
+                delay = min(backoff_seconds, remaining_seconds)
+                self.log.warning(
+                    "Kubernetes control-plane observation unavailable for Job %s; "
+                    "retrying in %.1f seconds",
+                    job_name,
+                    delay,
+                )
+                sleep(delay)
+                backoff_seconds = min(
+                    backoff_seconds * 2,
+                    self.control_plane_observation_max_backoff_seconds,
+                )
+                continue
+            observation_deadline = None
+            backoff_seconds = self.control_plane_observation_initial_backoff_seconds
+            if self.is_job_complete(job=job):
+                return job
+            self.log.info(
+                "The job '%s' is incomplete. Sleeping for %i sec.",
+                job_name,
+                job_poll_interval,
+            )
+            sleep(job_poll_interval)
 
 
 class _TerminationReceiptCleanupMixin:
@@ -58,6 +146,9 @@ class BoundedKubernetesJobOperator(_TerminationReceiptCleanupMixin, KubernetesJo
         *,
         pod_discovery_timeout_seconds: float = DEFAULT_JOB_POD_DISCOVERY_TIMEOUT_SECONDS,
         pod_discovery_poll_interval_seconds: float = 1,
+        control_plane_observation_timeout_seconds: float = 5 * 60,
+        control_plane_observation_initial_backoff_seconds: float = 1,
+        control_plane_observation_max_backoff_seconds: float = 30,
         **kwargs: Any,
     ) -> None:
         if pod_discovery_timeout_seconds <= 0:
@@ -66,7 +157,32 @@ class BoundedKubernetesJobOperator(_TerminationReceiptCleanupMixin, KubernetesJo
             raise ValueError("pod_discovery_poll_interval_seconds must be greater than zero")
         self.pod_discovery_timeout_seconds = pod_discovery_timeout_seconds
         self.pod_discovery_poll_interval_seconds = pod_discovery_poll_interval_seconds
+        self.control_plane_observation_timeout_seconds = control_plane_observation_timeout_seconds
+        self.control_plane_observation_initial_backoff_seconds = (
+            control_plane_observation_initial_backoff_seconds
+        )
+        self.control_plane_observation_max_backoff_seconds = (
+            control_plane_observation_max_backoff_seconds
+        )
         super().__init__(**kwargs)
+
+    @cached_property
+    def hook(self) -> ResilientKubernetesHook:
+        return ResilientKubernetesHook(
+            conn_id=self.kubernetes_conn_id,
+            in_cluster=self.in_cluster,
+            config_file=self.config_file,
+            cluster_context=self.cluster_context,
+            control_plane_observation_timeout_seconds=(
+                self.control_plane_observation_timeout_seconds
+            ),
+            control_plane_observation_initial_backoff_seconds=(
+                self.control_plane_observation_initial_backoff_seconds
+            ),
+            control_plane_observation_max_backoff_seconds=(
+                self.control_plane_observation_max_backoff_seconds
+            ),
+        )
 
     def create_job(self, job_request_obj: k8s.V1Job) -> k8s.V1Job:
         """Adopt an active prior-attempt Job instead of duplicating its worker."""
