@@ -30,7 +30,11 @@ def _install_airflow_job_operator_stub(monkeypatch: pytest.MonkeyPatch) -> type[
             self.logged_pods: list[object] = []
             self.created_jobs: list[object] = []
             self.cleanup_calls: list[tuple[object, object]] = []
-            self.log = SimpleNamespace(info=lambda *_args: None)
+            self.log_messages: list[tuple[str, tuple[object, ...]]] = []
+            self.log = SimpleNamespace(
+                error=lambda *args: self.log_messages.append(("error", args)),
+                info=lambda *args: self.log_messages.append(("info", args)),
+            )
 
         def create_job(self, job_request_obj: object) -> object:
             self.created_jobs.append(job_request_obj)
@@ -293,13 +297,26 @@ def test_job_status_observation_budget_exhaustion_is_typed_and_bounded(
         ),
     )
 
-    with pytest.raises(
-        airflow_exception,
-        match="control_plane_observation_unavailable.*5 seconds",
-    ):
+    with pytest.raises(airflow_exception) as raised:
         hook.wait_until_job_complete("swe-baseline", "airflow")
 
     assert sleeps == [2, 3]
+    message = str(raised.value)
+    assert message.startswith("SERP_CONTROL_PLANE_EVENT ")
+    event = json.loads(message.removeprefix("SERP_CONTROL_PLANE_EVENT "))
+    assert event == {
+        "errorCode": "control_plane_observation_unavailable",
+        "operation": "job-status",
+        "remediation": "restore-kubernetes-api-observation",
+        "resource": {
+            "kind": "Job",
+            "name": "swe-baseline",
+            "namespace": "airflow",
+            "uid": None,
+        },
+        "retryCount": 2,
+        "schema": "SerpControlPlaneObservationFailure/v1",
+    }
 
 
 def test_job_operator_uses_bounded_control_plane_observation_hook(
@@ -474,6 +491,18 @@ def test_job_operator_retry_adopts_active_prior_attempt_job(
 
     assert result is prior_job
     assert operator.created_jobs == []
+    structured = [
+        args[-1]
+        for level, args in operator.log_messages
+        if level == "info"
+        and isinstance(args[-1], str)
+        and args[-1].startswith("SERP_PRIOR_ATTEMPT_COMPUTE ")
+    ]
+    assert len(structured) == 1
+    event = json.loads(structured[0].removeprefix("SERP_PRIOR_ATTEMPT_COMPUTE "))
+    assert event["schema"] == "SerpPriorAttemptCompute/v1"
+    assert event["status"] == "adopted"
+    assert event["job"]["name"] == "prior-job"
 
 
 def test_remote_job_hardens_and_budgets_the_xcom_sidecar(
@@ -522,6 +551,67 @@ def test_job_operator_retry_rejects_active_orphan_before_creating_duplicate(
         operator.create_job(_job_request())
 
     assert operator.created_jobs == []
+    structured = [
+        args[-1]
+        for level, args in operator.log_messages
+        if level == "info"
+        and isinstance(args[-1], str)
+        and args[-1].startswith("SERP_PRIOR_ATTEMPT_COMPUTE ")
+    ]
+    assert len(structured) == 1
+    event = json.loads(structured[0].removeprefix("SERP_PRIOR_ATTEMPT_COMPUTE "))
+    assert event["schema"] == "SerpPriorAttemptCompute/v1"
+    assert event["status"] == "orphan-blocked"
+    assert event["pod"]["name"] == "prior-worker"
+
+
+def test_failed_cleanup_logs_exact_termination_receipt_for_observer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_job_operator_stub(monkeypatch)
+    sys.modules.pop("dags.serp_kubernetes_job_operator", None)
+    module = importlib.import_module("dags.serp_kubernetes_job_operator")
+    receipt = {
+        "classification": "terminated",
+        "pod": {
+            "containerStatuses": [
+                {"name": "base", "terminated": {"exitCode": 137, "reason": "OOMKilled"}}
+            ],
+            "name": "failed",
+            "namespace": "airflow",
+            "nodeName": "gpu-1",
+            "phase": "Failed",
+            "reason": "Evicted",
+            "uid": "pod-uid",
+        },
+        "receiptSha256": "sha256:" + "a" * 64,
+        "schema": "AirflowPodTerminationReceipt/v1",
+    }
+    monkeypatch.setattr(
+        module,
+        "persist_airflow_pod_termination_receipt",
+        lambda **_kwargs: receipt,
+    )
+    operator = module.BoundedKubernetesJobOperator(task_id="failed-cleanup")
+    operator.client = object()
+    remote_pod = SimpleNamespace(
+        metadata=SimpleNamespace(name="failed", namespace="airflow"),
+        status=SimpleNamespace(phase="Failed", reason="Evicted"),
+    )
+
+    operator.cleanup(object(), remote_pod)
+
+    structured = [
+        args[-1]
+        for level, args in operator.log_messages
+        if level == "info"
+        and isinstance(args[-1], str)
+        and args[-1].startswith("SERP_POD_TERMINATION_RECEIPT ")
+    ]
+    assert structured == [
+        "SERP_POD_TERMINATION_RECEIPT "
+        + json.dumps(receipt, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    ]
 
 
 def test_job_operator_waits_between_polls_until_delayed_pod_exists(

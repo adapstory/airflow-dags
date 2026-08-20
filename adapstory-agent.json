@@ -1,0 +1,35 @@
+{
+  "schema": "AdapstoryAgentProfile/v1",
+  "kind": "ModuleProfile",
+  "module": "airflow-dags",
+  "context_sources": ["AGENTS.md"],
+  "actions": {
+    "serp-kubernetes-contracts": {
+      "command": [
+        "uv",
+        "run",
+        "--project",
+        "airflow-dags",
+        "--frozen",
+        "--group",
+        "dev",
+        "pytest",
+        "-q",
+        "airflow-dags/tests/test_serp_kubernetes_job_lifecycle.py"
+      ],
+      "outputs": [],
+      "resources": ["airflow-serp-kubernetes-feedback"]
+    },
+    "serp-kubernetes-lint": {
+      "command": [
+        "uv", "run", "--project", "airflow-dags", "--frozen", "--group", "dev",
+        "ruff", "check",
+        "airflow-dags/dags/airflow_pod_cleanup.py",
+        "airflow-dags/dags/serp_kubernetes_job_operator.py",
+        "airflow-dags/tests/test_serp_kubernetes_job_lifecycle.py"
+      ],
+      "outputs": [],
+      "resources": ["airflow-serp-kubernetes-feedback"]
+    }
+  }
+}

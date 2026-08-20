@@ -136,7 +136,9 @@ def _termination_receipt_name(pod: Any) -> str:
     return f"airflow-pod-termination-{suffix}"
 
 
-def persist_airflow_pod_termination_receipt(*, core_api: Any, pod: Any, namespace: str) -> None:
+def persist_airflow_pod_termination_receipt(
+    *, core_api: Any, pod: Any, namespace: str
+) -> dict[str, Any]:
     """Persist and exactly read back an immutable receipt before pod deletion."""
     receipt = _termination_receipt(pod)
     receipt_json = _canonical_json(receipt)
@@ -172,6 +174,7 @@ def persist_airflow_pod_termination_receipt(*, core_api: Any, pod: Any, namespac
         or stored.data != {_RECEIPT_DATA_KEY: receipt_json}
     ):
         raise ValueError("Airflow pod termination receipt exact read-back failed")
+    return receipt
 
 
 def requires_airflow_pod_termination_receipt(pod: Any) -> bool:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Sequence
 from functools import cached_property
 from time import monotonic, sleep
@@ -28,6 +29,10 @@ _XCOM_EPHEMERAL_STORAGE_REQUEST = "32Mi"
 _XCOM_EPHEMERAL_STORAGE_LIMIT = "128Mi"
 _CONTROL_PLANE_RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 _Observation = TypeVar("_Observation")
+
+
+def _event(prefix: str, payload: dict[str, Any]) -> str:
+    return prefix + json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
 
 
 class ResilientKubernetesHook(KubernetesHook):  # type: ignore[misc]
@@ -68,11 +73,14 @@ class ResilientKubernetesHook(KubernetesHook):  # type: ignore[misc]
         *,
         description: str,
         operation: Callable[[], _Observation],
+        operation_name: str = "kubernetes-observation",
+        resource: dict[str, str | None] | None = None,
     ) -> _Observation:
         """Retry one read-only Kubernetes observation within the shared bound."""
 
         observation_deadline = monotonic() + self.control_plane_observation_timeout_seconds
         backoff_seconds = self.control_plane_observation_initial_backoff_seconds
+        retry_count = 0
         while True:
             try:
                 return operation()
@@ -83,12 +91,20 @@ class ResilientKubernetesHook(KubernetesHook):  # type: ignore[misc]
                     raise
                 remaining_seconds = observation_deadline - monotonic()
                 if remaining_seconds <= 0:
-                    raise AirflowException(
-                        "control_plane_observation_unavailable: Kubernetes control-plane "
-                        f"observation for {description} remained unavailable for "
-                        f"{self.control_plane_observation_timeout_seconds:g} seconds"
-                    ) from error
+                    failure = {
+                        "errorCode": "control_plane_observation_unavailable",
+                        "operation": operation_name,
+                        "remediation": "restore-kubernetes-api-observation",
+                        "resource": resource
+                        or {"kind": "Unknown", "name": description, "namespace": None, "uid": None},
+                        "retryCount": retry_count,
+                        "schema": "SerpControlPlaneObservationFailure/v1",
+                    }
+                    rendered = _event("SERP_CONTROL_PLANE_EVENT ", failure)
+                    self.log.warning(rendered)
+                    raise AirflowException(rendered) from error
                 delay = min(backoff_seconds, remaining_seconds)
+                retry_count += 1
                 self.log.warning(
                     "Kubernetes control-plane observation unavailable for %s; "
                     "retrying in %.1f seconds",
@@ -109,6 +125,13 @@ class ResilientKubernetesHook(KubernetesHook):  # type: ignore[misc]
             self.log.info("Requesting status for the job '%s' ", job_name)
             job = self.observe_control_plane(
                 description=f"Job {namespace}/{job_name}",
+                operation_name="job-status",
+                resource={
+                    "kind": "Job",
+                    "name": job_name,
+                    "namespace": namespace,
+                    "uid": expected_uid,
+                },
                 operation=lambda: self.get_job_status(
                     job_name=job_name,
                     namespace=namespace,
@@ -146,11 +169,12 @@ class _TerminationReceiptCleanupMixin:
     ) -> None:
         if remote_pod is not None and requires_airflow_pod_termination_receipt(remote_pod):
             namespace = str(remote_pod.metadata.namespace)
-            persist_airflow_pod_termination_receipt(
+            receipt = persist_airflow_pod_termination_receipt(
                 core_api=self.client,
                 pod=remote_pod,
                 namespace=namespace,
             )
+            self.log.info(_event("SERP_POD_TERMINATION_RECEIPT ", receipt))
         super().cleanup(pod, remote_pod, xcom_result=xcom_result, context=context)  # type: ignore[misc]
 
 
@@ -298,6 +322,21 @@ class BoundedKubernetesJobOperator(_TerminationReceiptCleanupMixin, KubernetesJo
                 None,
             )
             if not owner_job_name:
+                self.log.info(
+                    _event(
+                        "SERP_PRIOR_ATTEMPT_COMPUTE ",
+                        {
+                            "job": None,
+                            "pod": {
+                                "name": str(pod.metadata.name),
+                                "namespace": str(pod.metadata.namespace),
+                                "uid": str(getattr(pod.metadata, "uid", "") or "") or None,
+                            },
+                            "schema": "SerpPriorAttemptCompute/v1",
+                            "status": "orphan-blocked",
+                        },
+                    )
+                )
                 raise AirflowException(
                     f"active orphan pod {pod.metadata.name} has no owning Job; "
                     "refusing to create a concurrent retry worker"
@@ -320,6 +359,25 @@ class BoundedKubernetesJobOperator(_TerminationReceiptCleanupMixin, KubernetesJo
             except Exception as error:
                 if getattr(error, "status", None) != 404:
                     raise
+                self.log.info(
+                    _event(
+                        "SERP_PRIOR_ATTEMPT_COMPUTE ",
+                        {
+                            "job": {
+                                "name": str(owner_job_name),
+                                "namespace": str(namespace),
+                                "uid": None,
+                            },
+                            "pod": {
+                                "name": str(pod.metadata.name),
+                                "namespace": str(pod.metadata.namespace),
+                                "uid": str(getattr(pod.metadata, "uid", "") or "") or None,
+                            },
+                            "schema": "SerpPriorAttemptCompute/v1",
+                            "status": "orphan-blocked",
+                        },
+                    )
+                )
                 raise AirflowException(
                     f"active orphan pod {pod.metadata.name} references missing Job "
                     f"{owner_job_name}; refusing to create a concurrent retry worker"
@@ -338,7 +396,24 @@ class BoundedKubernetesJobOperator(_TerminationReceiptCleanupMixin, KubernetesJo
             raise AirflowException(
                 f"multiple active prior-attempt Jobs found ({names}); refusing another duplicate"
             )
-        return next(iter(jobs_by_name.values()), None)
+        adopted = next(iter(jobs_by_name.values()), None)
+        if adopted is not None:
+            metadata = adopted.metadata
+            self.log.info(
+                _event(
+                    "SERP_PRIOR_ATTEMPT_COMPUTE ",
+                    {
+                        "job": {
+                            "name": str(metadata.name),
+                            "namespace": str(metadata.namespace),
+                            "uid": str(getattr(metadata, "uid", "") or "") or None,
+                        },
+                        "schema": "SerpPriorAttemptCompute/v1",
+                        "status": "adopted",
+                    },
+                )
+            )
+        return adopted
 
     def get_pods(
         self,
@@ -355,9 +430,7 @@ class BoundedKubernetesJobOperator(_TerminationReceiptCleanupMixin, KubernetesJo
 
         while True:
             pod_list = self.hook.observe_control_plane(
-                description=(
-                    f"Pods in {pod_request_obj.metadata.namespace} with {label_selector}"
-                ),
+                description=(f"Pods in {pod_request_obj.metadata.namespace} with {label_selector}"),
                 operation=lambda: cast(
                     Sequence[k8s.V1Pod],
                     self.client.list_namespaced_pod(
