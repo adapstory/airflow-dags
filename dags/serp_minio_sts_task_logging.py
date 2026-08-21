@@ -1,5 +1,6 @@
 """Airflow logging configuration using projected MinIO web identity."""
 
+from collections.abc import Iterator
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,21 @@ class MinioStsTaskHandler(FileTaskHandler):  # type: ignore[misc]
         self.upload_on_close = not bool(getattr(ti, "raw", False))
         if self.upload_on_close:
             Path(self.handler.baseFilename).write_text("", encoding="utf-8")
+
+    def _read(
+        self,
+        ti: Any,
+        try_number: int,
+        metadata: Any = None,
+    ) -> tuple[Any, Any]:
+        stream, output_metadata = super()._read(ti, try_number, metadata)
+        if isinstance(stream, Iterator):
+            # Airflow 3.3.0 turns a paged log stream into itertools.islice, but
+            # FileTaskHandler.read accepts only chain or GeneratorType streams.
+            # Adapt at our handler boundary without rereading or materializing
+            # the potentially growing task log.
+            stream = (message for message in stream)
+        return stream, output_metadata
 
     def close(self) -> None:
         if self.closed:

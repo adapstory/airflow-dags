@@ -8,7 +8,7 @@ import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from types import ModuleType
+from types import GeneratorType, ModuleType
 from typing import Any, ClassVar, cast
 
 import pytest
@@ -101,6 +101,26 @@ def _isolated_airflow_logging_module() -> Iterator[tuple[ModuleType, ModuleType]
             del max_bytes, backup_count, delay
             self.local_base = base_log_folder
             self.handler: logging.Handler | None = None
+            self.read_result: tuple[object, dict[str, object]] = ([], {})
+
+        def _read(
+            self,
+            _task_instance: object,
+            _try_number: int,
+            _metadata: dict[str, object] | None = None,
+        ) -> tuple[object, dict[str, object]]:
+            return self.read_result
+
+        def read(
+            self,
+            task_instance: object,
+            try_number: int,
+            metadata: dict[str, object] | None = None,
+        ) -> tuple[object, dict[str, object]]:
+            stream, output_metadata = self._read(task_instance, try_number, metadata)
+            if isinstance(stream, GeneratorType):
+                return stream, output_metadata
+            raise TypeError(f"Invalid log stream type: {type(stream).__name__}")
 
         def close(self) -> None:
             if self.handler is not None:
@@ -420,6 +440,28 @@ def test_minio_sts_task_handler_uploads_complete_log_on_close(
                 b"root cause survives pod deletion"
             )
         }
+
+
+def test_minio_sts_task_handler_adapts_airflow_paged_islice_to_supported_generator(
+    tmp_path: Path,
+) -> None:
+    from itertools import islice
+
+    with _isolated_airflow_logging_module() as (logging_module, _task_logging):
+        handler = logging_module.MinioStsTaskHandler(
+            base_log_folder=str(tmp_path / "logs"),
+            remote_base_log_folder="s3://airflow-serp-artifacts/airflow-task-logs",
+        )
+        handler.read_result = (
+            islice(iter(["already-returned", "next-page"]), 1, None),
+            {"end_of_log": False, "log_pos": 2},
+        )
+
+        stream, metadata = handler.read(object(), 1, {"log_pos": 1})
+
+        assert isinstance(stream, GeneratorType)
+        assert list(stream) == ["next-page"]
+        assert metadata == {"end_of_log": False, "log_pos": 2}
 
 
 def test_kubernetes_pod_launcher_executor_config_keeps_minio_sts_and_api_access_separate() -> None:
