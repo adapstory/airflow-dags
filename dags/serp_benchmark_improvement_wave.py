@@ -1798,6 +1798,8 @@ D19_PACK_SIDE_BUILD_TASKS: dict[tuple[str, str], BoundedKubernetesJobOperator] =
 D19_DUAL_GPU_CRITICAL_PAIR = frozenset(
     {("SWE-bench Verified", "baseline"), ("CodeRAG-Bench", "candidate")}
 )
+D19_PACK_BUILDER_RETRIES = 2
+D19_SWE_PACK_BUILDER_RETRIES = 8
 for suite_id, side in D19_PACK_SIDE_IDENTITIES:
     suite_slug = suite_id.casefold().replace(" ", "_").replace("-", "_")
     artifact_slug = suite_id.casefold().replace(" ", "-").replace("_", "-")
@@ -1903,7 +1905,11 @@ for suite_id, side in D19_PACK_SIDE_IDENTITIES:
         wait_until_job_complete=True,
         pod_discovery_timeout_seconds=DEFAULT_JOB_POD_DISCOVERY_TIMEOUT_SECONDS,
         pod_discovery_poll_interval_seconds=1,
-        retries=2,
+        retries=(
+            D19_SWE_PACK_BUILDER_RETRIES
+            if suite_id == "SWE-bench Verified"
+            else D19_PACK_BUILDER_RETRIES
+        ),
         retry_delay=timedelta(minutes=1),
         retry_exponential_backoff=True,
         max_retry_delay=timedelta(minutes=2),

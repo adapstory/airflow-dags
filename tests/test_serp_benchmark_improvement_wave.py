@@ -47,7 +47,11 @@ def test_pack_builders_have_bounded_checkpoint_aware_execution_recovery() -> Non
         maxsplit=1,
     )[1].split("_D19_PACK_SIDE_RESULT_URIS_JSON", maxsplit=1)[0]
     assert "backoff_limit=1," in builder
-    assert "retries=2," in builder
+    assert "D19_SWE_PACK_BUILDER_RETRIES" in builder
+    assert 'if suite_id == "SWE-bench Verified"' in builder
+    assert "else D19_PACK_BUILDER_RETRIES" in builder
+    assert "D19_PACK_BUILDER_RETRIES = 2" in source
+    assert "D19_SWE_PACK_BUILDER_RETRIES = 8" in source
     assert "retry_delay=timedelta(minutes=1)," in builder
     assert "retry_exponential_backoff=True," in builder
     assert "max_retry_delay=timedelta(minutes=2)," in builder

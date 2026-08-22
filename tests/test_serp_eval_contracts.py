@@ -9770,7 +9770,13 @@ def test_d19_pack_lifecycle_limits_retries_to_checkpoint_aware_builders(
     module = importlib.reload(module)
 
     assert module.classify_pack_cas.kwargs["retries"] == 0
-    assert all(task.kwargs["retries"] == 2 for task in module.D19_PACK_SIDE_BUILD_TASKS.values())
+    assert {
+        identity: task.kwargs["retries"]
+        for identity, task in module.D19_PACK_SIDE_BUILD_TASKS.items()
+    } == {
+        identity: (8 if identity[0] == "SWE-bench Verified" else 2)
+        for identity in module.D19_PACK_SIDE_BUILD_TASKS
+    }
     assert module.aggregate_exact_nine_benchmark_packs.kwargs["retries"] == 0
 
 
