@@ -9830,7 +9830,7 @@ def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_reque
         assert arguments[arguments.index("--content-addressed-cache-prefix") + 1] == (
             "s3://airflow-serp-evidence/serp-evals/benchmark-cas/v4"
         )
-        assert builder_task.kwargs["retries"] == 2
+        assert builder_task.kwargs["retries"] == (8 if suite_id == "SWE-bench Verified" else 2)
         expected_priority = (
             1000
             if (suite_id, side)
@@ -9846,9 +9846,9 @@ def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_reque
         )
         resources = builder_task.kwargs["container_resources"].kwargs
         if suite_id == "SWE-bench Verified":
-            assert scratch.kwargs["empty_dir"].kwargs["size_limit"] == "48Gi"
-            assert resources["requests"]["ephemeral-storage"] == "32Gi"
-            assert resources["limits"]["ephemeral-storage"] == "56Gi"
+            assert scratch.kwargs["empty_dir"].kwargs["size_limit"] == "96Gi"
+            assert resources["requests"]["ephemeral-storage"] == "64Gi"
+            assert resources["limits"]["ephemeral-storage"] == "104Gi"
         else:
             assert scratch.kwargs["empty_dir"].kwargs["size_limit"] == "24Gi"
             assert resources["requests"]["ephemeral-storage"] == "8Gi"

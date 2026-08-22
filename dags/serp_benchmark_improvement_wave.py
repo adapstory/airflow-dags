@@ -192,7 +192,10 @@ D19_PACK_BUILDER_SCRATCH_VOLUME = k8s.V1Volume(
 )
 D19_SWE_PACK_BUILDER_SCRATCH_VOLUME = k8s.V1Volume(
     name="d19-pack-builder-scratch",
-    empty_dir=k8s.V1EmptyDirVolumeSource(size_limit="48Gi"),
+    # A full SWE baseline keeps the 18.14 GB canonical chunks file alongside
+    # content-addressed shards. Run #88 crossed 48 GiB after only 5.21 GB of
+    # that file had been sharded, so the bounded full-run envelope is 96 GiB.
+    empty_dir=k8s.V1EmptyDirVolumeSource(size_limit="96Gi"),
 )
 D19_PACK_BUILDER_SCRATCH_VOLUME_MOUNT = k8s.V1VolumeMount(
     name="d19-pack-builder-scratch",
@@ -215,12 +218,12 @@ D19_PACK_BUILDER_RESOURCES = k8s.V1ResourceRequirements(
 D19_SWE_PACK_BUILDER_RESOURCES = k8s.V1ResourceRequirements(
     requests={
         "cpu": "4",
-        "ephemeral-storage": "32Gi",
+        "ephemeral-storage": "64Gi",
         "memory": "4Gi",
     },
     limits={
         "cpu": "4",
-        "ephemeral-storage": "56Gi",
+        "ephemeral-storage": "104Gi",
         "memory": "8Gi",
     },
 )
