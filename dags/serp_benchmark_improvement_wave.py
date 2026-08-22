@@ -227,6 +227,15 @@ D19_SWE_PACK_BUILDER_RESOURCES = k8s.V1ResourceRequirements(
         "memory": "8Gi",
     },
 )
+D19_SWE_PACK_WORK_SHARD_COUNT = 16
+D19_SWE_PACK_SHARD_SCRATCH_VOLUME = k8s.V1Volume(
+    name="d19-pack-builder-scratch",
+    empty_dir=k8s.V1EmptyDirVolumeSource(size_limit="24Gi"),
+)
+D19_SWE_PACK_SHARD_RESOURCES = k8s.V1ResourceRequirements(
+    requests={"cpu": "2", "ephemeral-storage": "8Gi", "memory": "2Gi"},
+    limits={"cpu": "4", "ephemeral-storage": "24Gi", "memory": "6Gi"},
+)
 D19_REMOTE_COMPUTE_NODE_SELECTOR = {"adapstory.com/compute-class": "remote"}
 D19_REMOTE_COMPUTE_TOLERATIONS = [
     k8s.V1Toleration(
@@ -257,6 +266,7 @@ D19_SWE_PACK_BUILDER_AFFINITY = k8s.V1Affinity(
         ]
     )
 )
+D19_SWE_PACK_SHARD_AFFINITY = D19_SWE_PACK_BUILDER_AFFINITY
 D19_PACK_BUILDER_POD_FAILURE_POLICY = k8s.V1PodFailurePolicy(
     rules=[
         k8s.V1PodFailurePolicyRule(
@@ -340,6 +350,13 @@ D19_SWE_BUILDER_VOLUMES = [
     *bc21_workload_volumes(),
     *hardened_runtime_volumes(),
     D19_SWE_PACK_BUILDER_SCRATCH_VOLUME,
+]
+D19_SWE_SHARD_VOLUMES = [
+    *minio_web_identity_volumes(),
+    *bc10_workload_volumes(),
+    *bc21_workload_volumes(),
+    *hardened_runtime_volumes(),
+    D19_SWE_PACK_SHARD_SCRATCH_VOLUME,
 ]
 D19_BUILDER_VOLUME_MOUNTS = [
     *minio_web_identity_volume_mounts(),
@@ -991,7 +1008,14 @@ def choose_d19_pack_cas_transition(classification: Mapping[str, Any]) -> str | l
         item["classification"] in {"INCOMPATIBLE", "PARTIAL/CORRUPT"} for item in classifications
     ):
         return D19_PACK_CAS_RECOVERY_PLAN_TASK_ID
-    return [task.task_id for task in D19_PACK_SIDE_BUILD_TASKS.values()]
+    return [
+        *(
+            task.task_id
+            for identity, task in D19_PACK_SIDE_BUILD_TASKS.items()
+            if identity[0] != "SWE-bench Verified"
+        ),
+        *(task.task_id for task in D19_SWE_PACK_SIDE_SHARD_TASKS.values()),
+    ]
 
 
 def _validated_d19_pack_cas_classifications(
@@ -1798,15 +1822,230 @@ D19_PACK_SIDE_IDENTITIES = tuple(
     for side in ("baseline", "candidate")
 )
 D19_PACK_SIDE_BUILD_TASKS: dict[tuple[str, str], BoundedKubernetesJobOperator] = {}
+D19_SWE_PACK_SIDE_SHARD_TASKS: dict[tuple[str, int], BoundedKubernetesJobOperator] = {}
 D19_DUAL_GPU_CRITICAL_PAIR = frozenset(
     {("SWE-bench Verified", "baseline"), ("CodeRAG-Bench", "candidate")}
 )
 D19_PACK_BUILDER_RETRIES = 2
 D19_SWE_PACK_BUILDER_RETRIES = 8
+D19_SWE_PACK_SHARD_RETRIES = 3
 for suite_id, side in D19_PACK_SIDE_IDENTITIES:
     suite_slug = suite_id.casefold().replace(" ", "_").replace("-", "_")
     artifact_slug = suite_id.casefold().replace(" ", "-").replace("_", "-")
     task_id = f"build_pack_side_{suite_slug}_{side}"
+    if suite_id == "SWE-bench Verified":
+        shard_result_uris = [
+            (
+                "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan')"
+                "['artifact_paths']['benchmark_pack_build_result'] }}.work-shards/"
+                + artifact_slug
+                + "/"
+                + side
+                + f"/shard-{shard_index:02d}.json"
+            )
+            for shard_index in range(D19_SWE_PACK_WORK_SHARD_COUNT)
+        ]
+        for shard_index, shard_result_uri in enumerate(shard_result_uris):
+            shard_task_id = f"{task_id}_shard_{shard_index:02d}"
+            D19_SWE_PACK_SIDE_SHARD_TASKS[(side, shard_index)] = BoundedKubernetesJobOperator(
+                task_id=shard_task_id,
+                name=f"serp-d19-{shard_task_id.replace('_', '-')}",
+                namespace=conf.get("kubernetes_executor", "namespace"),
+                image=current_airflow_runtime_image(),
+                cmds=[
+                    "python",
+                    "-m",
+                    "adapstory_serp_pipeline.registry.bc21_benchmark_pack_lifecycle_cli",
+                ],
+                arguments=[
+                    "build-pack-side-shard",
+                    "--suite",
+                    suite_id,
+                    "--side",
+                    side,
+                    "--shard-index",
+                    str(shard_index),
+                    "--shard-count",
+                    str(D19_SWE_PACK_WORK_SHARD_COUNT),
+                    "--benchmark-catalog",
+                    (
+                        "{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog')"
+                        "['artifactPath'] }}"
+                    ),
+                    "--benchmark-catalog-version-id",
+                    (
+                        "{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog')"
+                        "['artifactVersionId'] }}"
+                    ),
+                    "--benchmark-catalog-sha256",
+                    (
+                        "sha256:{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog')"
+                        "['artifactSha256'] }}"
+                    ),
+                    "--promotion",
+                    (
+                        "{{ ti.xcom_pull(task_ids='load_model_catalog_promotion')"
+                        "['promotionEvidence']['s3Uri'] }}"
+                    ),
+                    "--promotion-version-id",
+                    (
+                        "{{ ti.xcom_pull(task_ids='load_model_catalog_promotion')"
+                        "['promotionEvidence']['versionId'] }}"
+                    ),
+                    "--promotion-sha256",
+                    (
+                        "{{ ti.xcom_pull(task_ids='load_model_catalog_promotion')"
+                        "['promotionEvidence']['sha256'] }}"
+                    ),
+                    "--result-output",
+                    shard_result_uri,
+                ],
+                env_vars=d19_builder_env_vars(),
+                service_account_name=D19_BUILDER_WORKLOAD_SERVICE_ACCOUNT,
+                automount_service_account_token=False,
+                volumes=D19_SWE_SHARD_VOLUMES,
+                volume_mounts=D19_BUILDER_VOLUME_MOUNTS,
+                labels={
+                    **D19_BUILDER_WORKLOAD_LABELS,
+                    "adapstory.com/serp-pack-suite": artifact_slug,
+                    "adapstory.com/serp-pack-side": side,
+                    "adapstory.com/serp-pack-shard": f"{shard_index:02d}",
+                },
+                container_resources=D19_SWE_PACK_SHARD_RESOURCES,
+                pool=D19_PACK_BUILDER_POOL,
+                pool_slots=1,
+                priority_weight=1000,
+                weight_rule="absolute",
+                node_selector=None,
+                affinity=D19_SWE_PACK_SHARD_AFFINITY,
+                tolerations=D19_REMOTE_COMPUTE_TOLERATIONS,
+                security_context=hardened_runtime_pod_security_context(),
+                container_security_context=hardened_runtime_container_security_context(),
+                do_xcom_push=False,
+                get_logs=True,
+                log_events_on_failure=True,
+                random_name_suffix=True,
+                reattach_on_restart=True,
+                on_kill_action="delete_pod",
+                on_finish_action="delete_pod",
+                backoff_limit=1,
+                pod_failure_policy=D19_PACK_BUILDER_POD_FAILURE_POLICY,
+                ttl_seconds_after_finished=300,
+                wait_until_job_complete=True,
+                pod_discovery_timeout_seconds=DEFAULT_JOB_POD_DISCOVERY_TIMEOUT_SECONDS,
+                pod_discovery_poll_interval_seconds=1,
+                retries=D19_SWE_PACK_SHARD_RETRIES,
+                retry_delay=timedelta(minutes=1),
+                retry_exponential_backoff=True,
+                max_retry_delay=timedelta(minutes=2),
+                executor_config=kubernetes_pod_launcher_executor_config(),
+                dag=dag,
+            )
+        D19_PACK_SIDE_BUILD_TASKS[(suite_id, side)] = BoundedKubernetesJobOperator(
+            task_id=task_id,
+            name=f"serp-d19-{task_id.replace('_', '-')}",
+            namespace=conf.get("kubernetes_executor", "namespace"),
+            image=current_airflow_runtime_image(),
+            cmds=[
+                "python",
+                "-m",
+                "adapstory_serp_pipeline.registry.bc21_benchmark_pack_lifecycle_cli",
+            ],
+            arguments=[
+                "merge-pack-side-shards",
+                "--suite",
+                suite_id,
+                "--side",
+                side,
+                "--benchmark-catalog",
+                (
+                    "{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog')"
+                    "['artifactPath'] }}"
+                ),
+                "--benchmark-catalog-version-id",
+                (
+                    "{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog')"
+                    "['artifactVersionId'] }}"
+                ),
+                "--benchmark-catalog-sha256",
+                (
+                    "sha256:{{ ti.xcom_pull(task_ids='load_materialized_benchmark_catalog')"
+                    "['artifactSha256'] }}"
+                ),
+                "--promotion",
+                (
+                    "{{ ti.xcom_pull(task_ids='load_model_catalog_promotion')"
+                    "['promotionEvidence']['s3Uri'] }}"
+                ),
+                "--promotion-version-id",
+                (
+                    "{{ ti.xcom_pull(task_ids='load_model_catalog_promotion')"
+                    "['promotionEvidence']['versionId'] }}"
+                ),
+                "--promotion-sha256",
+                (
+                    "{{ ti.xcom_pull(task_ids='load_model_catalog_promotion')"
+                    "['promotionEvidence']['sha256'] }}"
+                ),
+                "--shared-output-prefix",
+                (
+                    "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan')"
+                    "['artifact_paths']['benchmark_pack_build_result'] }}.shared/" + artifact_slug
+                ),
+                "--shard-result-uris-json",
+                json.dumps(shard_result_uris, ensure_ascii=True, separators=(",", ":")),
+                "--result-output",
+                (
+                    "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan')"
+                    "['artifact_paths']['benchmark_pack_build_result'] }}.sides/"
+                    + artifact_slug
+                    + "-"
+                    + side
+                    + ".json"
+                ),
+            ],
+            env_vars=d19_builder_env_vars(),
+            service_account_name=D19_BUILDER_WORKLOAD_SERVICE_ACCOUNT,
+            automount_service_account_token=False,
+            volumes=D19_SWE_BUILDER_VOLUMES,
+            volume_mounts=D19_BUILDER_VOLUME_MOUNTS,
+            labels={
+                **D19_BUILDER_WORKLOAD_LABELS,
+                "adapstory.com/serp-pack-suite": artifact_slug,
+                "adapstory.com/serp-pack-side": side,
+                "adapstory.com/serp-pack-stage": "merge",
+            },
+            container_resources=D19_SWE_PACK_BUILDER_RESOURCES,
+            pool=D19_PACK_BUILDER_POOL,
+            pool_slots=1,
+            priority_weight=1000,
+            weight_rule="absolute",
+            node_selector=None,
+            affinity=D19_SWE_PACK_SHARD_AFFINITY,
+            tolerations=D19_REMOTE_COMPUTE_TOLERATIONS,
+            security_context=hardened_runtime_pod_security_context(),
+            container_security_context=hardened_runtime_container_security_context(),
+            do_xcom_push=False,
+            get_logs=True,
+            log_events_on_failure=True,
+            random_name_suffix=True,
+            reattach_on_restart=True,
+            on_kill_action="delete_pod",
+            on_finish_action="delete_pod",
+            backoff_limit=1,
+            pod_failure_policy=D19_PACK_BUILDER_POD_FAILURE_POLICY,
+            ttl_seconds_after_finished=300,
+            wait_until_job_complete=True,
+            pod_discovery_timeout_seconds=DEFAULT_JOB_POD_DISCOVERY_TIMEOUT_SECONDS,
+            pod_discovery_poll_interval_seconds=1,
+            retries=D19_PACK_BUILDER_RETRIES,
+            retry_delay=timedelta(minutes=1),
+            retry_exponential_backoff=True,
+            max_retry_delay=timedelta(minutes=2),
+            executor_config=kubernetes_pod_launcher_executor_config(),
+            dag=dag,
+        )
+        continue
     D19_PACK_SIDE_BUILD_TASKS[(suite_id, side)] = BoundedKubernetesJobOperator(
         task_id=task_id,
         name=f"serp-d19-{task_id.replace('_', '-')}",
@@ -2806,7 +3045,12 @@ pack_cas_readiness_gate >> plan_pack_cas_migration_rebuild_task
 plan_pack_cas_migration_rebuild_task >> pack_cas_migration_rebuild_required
 for suite_id, side in D19_PACK_SIDE_IDENTITIES:
     side_task = D19_PACK_SIDE_BUILD_TASKS[(suite_id, side)]
-    pack_cas_readiness_gate >> side_task
+    if suite_id == "SWE-bench Verified":
+        for shard_index in range(D19_SWE_PACK_WORK_SHARD_COUNT):
+            shard_task = D19_SWE_PACK_SIDE_SHARD_TASKS[(side, shard_index)]
+            pack_cas_readiness_gate >> shard_task >> side_task
+    else:
+        pack_cas_readiness_gate >> side_task
     side_task >> aggregate_exact_nine_benchmark_packs
 # Context: immutable baseline/candidate routes now terminate on different GPU
 # endpoints and write distinct semantic CAS identities.

@@ -9628,7 +9628,11 @@ def test_d19_blocked_catalog_terminates_before_pack_fanout(
         "blockingSuiteIds": ["SWE-bench Verified"],
     }
     ready = {"catalogStatus": "ready", "blockingSuiteIds": []}
-    builder_task_ids = {task.task_id for task in module.D19_PACK_SIDE_BUILD_TASKS.values()}
+    builder_task_ids = {
+        task.task_id
+        for identity, task in module.D19_PACK_SIDE_BUILD_TASKS.items()
+        if identity[0] != "SWE-bench Verified"
+    } | {task.task_id for task in module.D19_SWE_PACK_SIDE_SHARD_TASKS.values()}
 
     assert module.choose_d19_catalog_readiness_transition(blocked) == (
         module.D19_CATALOG_BLOCKER_TASK_ID
@@ -9639,7 +9643,7 @@ def test_d19_blocked_catalog_terminates_before_pack_fanout(
     ):
         module.fail_d19_blocked_catalog(blocked)
     assert module.choose_d19_catalog_readiness_transition(ready) == "classify_pack_cas"
-    assert len(builder_task_ids) == 18
+    assert len(builder_task_ids) == 48
     assert module.load_catalog.downstream_task_ids == {
         module.catalog_readiness_gate.task_id,
     }
@@ -9666,7 +9670,11 @@ def test_d19_pack_cas_classifier_routes_deterministic_failures_to_no_retry_recov
         monkeypatch.setenv(name, value)
     module = importlib.import_module("dags.serp_benchmark_improvement_wave")
     module = importlib.reload(module)
-    builder_task_ids = {task.task_id for task in module.D19_PACK_SIDE_BUILD_TASKS.values()}
+    builder_task_ids = {
+        task.task_id
+        for identity, task in module.D19_PACK_SIDE_BUILD_TASKS.items()
+        if identity[0] != "SWE-bench Verified"
+    } | {task.task_id for task in module.D19_SWE_PACK_SIDE_SHARD_TASKS.values()}
     admitted = {
         "schema": "BC21PackCasClassification/v1",
         "sideCount": 18,
@@ -9773,10 +9781,11 @@ def test_d19_pack_lifecycle_limits_retries_to_checkpoint_aware_builders(
     assert {
         identity: task.kwargs["retries"]
         for identity, task in module.D19_PACK_SIDE_BUILD_TASKS.items()
-    } == {
-        identity: (8 if identity[0] == "SWE-bench Verified" else 2)
-        for identity in module.D19_PACK_SIDE_BUILD_TASKS
-    }
+    } == {identity: 2 for identity in module.D19_PACK_SIDE_BUILD_TASKS}
+    assert {
+        identity: task.kwargs["retries"]
+        for identity, task in module.D19_SWE_PACK_SIDE_SHARD_TASKS.items()
+    } == {identity: 3 for identity in module.D19_SWE_PACK_SIDE_SHARD_TASKS}
     assert module.aggregate_exact_nine_benchmark_packs.kwargs["retries"] == 0
 
 
@@ -9823,18 +9832,24 @@ def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_reque
     for (suite_id, side), builder_task in builders.items():
         arguments = builder_task.kwargs["arguments"]
         assert builder_task.kwargs["do_xcom_push"] is False
-        assert arguments[0] == "build-pack-side"
+        assert arguments[0] == (
+            "merge-pack-side-shards" if suite_id == "SWE-bench Verified" else "build-pack-side"
+        )
         assert arguments[arguments.index("--suite") + 1] == suite_id
         assert arguments[arguments.index("--side") + 1] == side
         assert "--shared-output-prefix" in arguments
-        assert arguments[arguments.index("--content-addressed-cache-prefix") + 1] == (
-            "s3://airflow-serp-evidence/serp-evals/benchmark-cas/v4"
-        )
-        assert builder_task.kwargs["retries"] == (8 if suite_id == "SWE-bench Verified" else 2)
+        if suite_id == "SWE-bench Verified":
+            assert "--shard-result-uris-json" in arguments
+            assert "--content-addressed-cache-prefix" not in arguments
+        else:
+            assert arguments[arguments.index("--content-addressed-cache-prefix") + 1] == (
+                "s3://airflow-serp-evidence/serp-evals/benchmark-cas/v4"
+            )
+        assert builder_task.kwargs["retries"] == 2
         expected_priority = (
             1000
-            if (suite_id, side)
-            in {("SWE-bench Verified", "baseline"), ("CodeRAG-Bench", "candidate")}
+            if suite_id == "SWE-bench Verified"
+            or (suite_id, side) == ("CodeRAG-Bench", "candidate")
             else 1
         )
         assert builder_task.kwargs["priority_weight"] == expected_priority
@@ -9853,6 +9868,29 @@ def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_reque
             assert scratch.kwargs["empty_dir"].kwargs["size_limit"] == "24Gi"
             assert resources["requests"]["ephemeral-storage"] == "8Gi"
             assert resources["limits"]["ephemeral-storage"] == "28Gi"
+    shards = module.D19_SWE_PACK_SIDE_SHARD_TASKS
+    assert len(shards) == 32
+    assert tuple(shards) == tuple(
+        (side, shard_index) for side in ("baseline", "candidate") for shard_index in range(16)
+    )
+    for (side, shard_index), shard_task in shards.items():
+        arguments = shard_task.kwargs["arguments"]
+        assert arguments[0] == "build-pack-side-shard"
+        assert arguments[arguments.index("--side") + 1] == side
+        assert arguments[arguments.index("--shard-index") + 1] == str(shard_index)
+        assert arguments[arguments.index("--shard-count") + 1] == "16"
+        assert ".work-shards/" in arguments[arguments.index("--result-output") + 1]
+        assert shard_task.kwargs["retries"] == 3
+        assert shard_task.kwargs["pool_slots"] == 1
+        scratch = next(
+            item
+            for item in shard_task.kwargs["volumes"]
+            if item.kwargs["name"] == "d19-pack-builder-scratch"
+        )
+        assert scratch.kwargs["empty_dir"].kwargs["size_limit"] == "24Gi"
+        resources = shard_task.kwargs["container_resources"].kwargs
+        assert resources["requests"]["memory"] == "2Gi"
+        assert resources["limits"]["memory"] == "6Gi"
     assert aggregator["arguments"][0] == "aggregate-exact-nine"
     assert "--side-result-uris-json" in aggregator["arguments"]
     assert aggregator["do_xcom_push"] is True

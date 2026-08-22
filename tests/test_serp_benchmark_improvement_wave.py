@@ -21,7 +21,7 @@ def test_d19_supervisors_stay_home_while_controller_owned_work_runs_remote() -> 
 
     assert "def d19_remote_kubernetes_pod_launcher_executor_config()" not in source
     assert "executor_config=d19_remote_kubernetes_pod_launcher_executor_config()," not in source
-    assert source.count("executor_config=kubernetes_pod_launcher_executor_config(),") == 13
+    assert source.count("executor_config=kubernetes_pod_launcher_executor_config(),") == 15
 
     classifier = source.split("classify_pack_cas =", maxsplit=1)[1].split(
         "pack_cas_readiness_gate =", maxsplit=1
@@ -96,3 +96,19 @@ def test_swe_pack_sides_prefer_parallel_placement_across_both_compute_nodes() ->
     )
     assert 'topology_key="kubernetes.io/hostname"' in source
     assert 'values=["swe-bench-verified"]' in source
+
+
+def test_swe_pack_materialization_uses_independently_retryable_bounded_shards() -> None:
+    source = (Path(__file__).parents[1] / "dags" / "serp_benchmark_improvement_wave.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "D19_SWE_PACK_WORK_SHARD_COUNT = 16" in source
+    assert "D19_SWE_PACK_SIDE_SHARD_TASKS" in source
+    assert '"build-pack-side-shard"' in source
+    assert '"--shard-index"' in source
+    assert '"--shard-count"' in source
+    assert '"merge-pack-side-shards"' in source
+    assert ".work-shards/" in source
+    assert "D19_SWE_PACK_SHARD_RESOURCES" in source
+    assert "D19_SWE_PACK_SHARD_AFFINITY" in source
