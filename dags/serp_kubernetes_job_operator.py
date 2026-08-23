@@ -232,6 +232,7 @@ class BoundedKubernetesJobOperator(_TerminationReceiptCleanupMixin, KubernetesJo
 
     def create_job(self, job_request_obj: k8s.V1Job) -> k8s.V1Job:
         """Adopt an active prior-attempt Job instead of duplicating its worker."""
+        self._normalize_container_process_argv(job_request_obj)
         self._harden_remote_xcom_sidecar(job_request_obj)
         if self.pod_failure_policy is not None:
             job_request_obj.spec.pod_failure_policy = self.pod_failure_policy
@@ -244,6 +245,45 @@ class BoundedKubernetesJobOperator(_TerminationReceiptCleanupMixin, KubernetesJo
             )
             return prior_job
         return super().create_job(job_request_obj)
+
+    @classmethod
+    def _normalize_container_process_argv(cls, job_request_obj: k8s.V1Job) -> None:
+        """Restore the Kubernetes string contract after native Jinja rendering."""
+
+        job_spec = getattr(job_request_obj, "spec", None)
+        template = getattr(job_spec, "template", None)
+        pod_spec = getattr(template, "spec", None)
+        if pod_spec is None:
+            return
+        containers = [*(pod_spec.init_containers or []), *(pod_spec.containers or [])]
+        for container in containers:
+            container.command = cls._normalize_argv(
+                container.command,
+                container_name=container.name,
+                field_name="command",
+            )
+            container.args = cls._normalize_argv(
+                container.args,
+                container_name=container.name,
+                field_name="args",
+            )
+
+    @staticmethod
+    def _normalize_argv(
+        values: Sequence[Any] | None,
+        *,
+        container_name: str,
+        field_name: str,
+    ) -> list[str] | None:
+        if values is None:
+            return None
+        for value in values:
+            if value is None or not isinstance(value, str | bool | int | float):
+                raise AirflowException(
+                    f"container {container_name!r} {field_name} contains a non-scalar value: "
+                    f"{type(value).__name__}"
+                )
+        return [str(value) for value in values]
 
     @staticmethod
     def _harden_remote_xcom_sidecar(job_request_obj: k8s.V1Job) -> None:
