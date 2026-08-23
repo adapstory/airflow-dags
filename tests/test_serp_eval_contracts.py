@@ -9879,6 +9879,9 @@ def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_reque
         assert arguments[arguments.index("--side") + 1] == side
         assert arguments[arguments.index("--shard-index") + 1] == str(shard_index)
         assert arguments[arguments.index("--shard-count") + 1] == "16"
+        assert shard_task.kwargs["labels"]["adapstory.com/serp-pack-shard"] == (
+            f"shard-{shard_index:02d}"
+        )
         assert ".work-shards/" in arguments[arguments.index("--result-output") + 1]
         assert shard_task.kwargs["retries"] == 3
         assert shard_task.kwargs["pool_slots"] == 1

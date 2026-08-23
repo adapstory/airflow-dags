@@ -1909,7 +1909,7 @@ for suite_id, side in D19_PACK_SIDE_IDENTITIES:
                     **D19_BUILDER_WORKLOAD_LABELS,
                     "adapstory.com/serp-pack-suite": artifact_slug,
                     "adapstory.com/serp-pack-side": side,
-                    "adapstory.com/serp-pack-shard": f"{shard_index:02d}",
+                    "adapstory.com/serp-pack-shard": f"shard-{shard_index:02d}",
                 },
                 container_resources=D19_SWE_PACK_SHARD_RESOURCES,
                 pool=D19_PACK_BUILDER_POOL,
