@@ -9572,7 +9572,7 @@ def test_d19_serializes_runs_and_caps_expensive_parallelism() -> None:
         and isinstance(keyword.value.value, int)
     }
 
-    assert integer_keywords == {"max_active_runs": 1, "max_active_tasks": 2}
+    assert integer_keywords == {"max_active_runs": 1, "max_active_tasks": 4}
 
     pool_assignment = next(
         node
