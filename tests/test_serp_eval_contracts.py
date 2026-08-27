@@ -9295,9 +9295,12 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_ENDPOINT",
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_PATH_STYLE",
         "ADAPSTORY_AIRFLOW_ARTIFACT_S3_REGION",
+        "ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST",
         "ADAPSTORY_SERP_EMBEDDING_BATCH_SIZE",
         "ADAPSTORY_SERP_EMBEDDING_DIMENSION",
         "ADAPSTORY_SERP_EMBEDDING_PROFILE_VERSION",
+        "ADAPSTORY_SERP_ISOLATED_INDEX_EMBEDDING_REQUEST_MAX_INPUTS",
+        "ADAPSTORY_SERP_BC21_BASE_URL",
         "ADAPSTORY_SERP_NEO4J_HTTP_URL",
         "ADAPSTORY_SERP_NEO4J_MUTATION_BATCH_SIZE",
         "ADAPSTORY_SERP_NEO4J_TIMEOUT_SECONDS",
@@ -9314,7 +9317,12 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         "ADAPSTORY_SERP_SOURCE_FETCH_TIMEOUT_SECONDS",
         "ADAPSTORY_SERP_SOURCE_PROXY_URL",
     ):
-        monkeypatch.setenv(name, "test")
+        value = "test"
+        if name == "ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST":
+            value = "sha256:" + "d" * 64
+        elif name == "ADAPSTORY_SERP_BC21_BASE_URL":
+            value = "http://serp-context-platform.serp.svc.cluster.local:8080/api/bc-21/serp/v1"
+        monkeypatch.setenv(name, value)
 
     modules = {
         "airflow": types.ModuleType("airflow"),
@@ -9585,6 +9593,19 @@ def test_d19_serializes_runs_and_caps_expensive_parallelism() -> None:
     )
     assert ast.literal_eval(pool_assignment.value) == "serp_d19_pack_builders"
 
+    builder_env_assignment = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "_D19_BUILDER_ENV_NAMES"
+            for target in node.targets
+        )
+    )
+    assert "ADAPSTORY_SERP_ISOLATED_INDEX_EMBEDDING_REQUEST_MAX_INPUTS" in ast.literal_eval(
+        builder_env_assignment.value
+    )
+
     builder_job = next(
         node
         for node in ast.walk(tree)
@@ -9604,6 +9625,23 @@ def test_d19_serializes_runs_and_caps_expensive_parallelism() -> None:
     # Baseline and candidate have immutable route/model identities and distinct
     # CAS namespaces; serializing them defeats the dedicated dual-GPU topology.
     assert 'if side == "candidate":' not in source
+
+
+def test_d19_builder_projects_the_runtime_embedding_request_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    monkeypatch.setenv("ADAPSTORY_SERP_ISOLATED_INDEX_EMBEDDING_REQUEST_MAX_INPUTS", "12")
+    module = importlib.import_module("dags.serp_benchmark_improvement_wave")
+    module = importlib.reload(module)
+
+    env = {
+        item.kwargs["name"]: item.kwargs["value"]
+        for item in module.d19_builder_env_vars()
+        if "value" in item.kwargs
+    }
+
+    assert env["ADAPSTORY_SERP_ISOLATED_INDEX_EMBEDDING_REQUEST_MAX_INPUTS"] == '"12"'
 
 
 def test_d19_blocked_catalog_terminates_before_pack_fanout(
