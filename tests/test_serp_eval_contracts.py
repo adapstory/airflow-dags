@@ -9036,6 +9036,11 @@ def test_serp_public_docs_dag_overlays_partial_run_conf_on_default_seed_registry
 
     client = FakeS3Client()
     monkeypatch.setattr(serp_eval_contracts_module, "_s3_client", lambda *_paths: client)
+    monkeypatch.setattr(
+        serp_eval_contracts_module,
+        "_bc21_json_request",
+        lambda *_args, **_kwargs: None,
+    )
 
     class DagRun:
         def __init__(self) -> None:
@@ -9877,7 +9882,9 @@ def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_reque
         assert arguments[arguments.index("--side") + 1] == side
         assert "--shared-output-prefix" in arguments
         if suite_id == "SWE-bench Verified":
-            assert "--shard-result-uris-json" in arguments
+            assert "--shard-result-uris-json" not in arguments
+            assert arguments.count("--shard-result-uri") == 16
+            assert all(isinstance(argument, str) for argument in arguments)
             assert "--content-addressed-cache-prefix" not in arguments
         else:
             assert arguments[arguments.index("--content-addressed-cache-prefix") + 1] == (
@@ -9933,7 +9940,9 @@ def test_d19_builds_18_idempotent_pack_sides_and_aggregates_handles_before_reque
         assert resources["requests"]["memory"] == "2Gi"
         assert resources["limits"]["memory"] == "6Gi"
     assert aggregator["arguments"][0] == "aggregate-exact-nine"
-    assert "--side-result-uris-json" in aggregator["arguments"]
+    assert "--side-result-uris-json" not in aggregator["arguments"]
+    assert aggregator["arguments"].count("--side-result-uri") == 18
+    assert all(isinstance(argument, str) for argument in aggregator["arguments"])
     assert aggregator["do_xcom_push"] is True
     assert aggregator["retries"] == 0
     assert registrar["arguments"][0] == "register-binding"

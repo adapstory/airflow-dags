@@ -1993,8 +1993,7 @@ for suite_id, side in D19_PACK_SIDE_IDENTITIES:
                     "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan')"
                     "['artifact_paths']['benchmark_pack_build_result'] }}.shared/" + artifact_slug
                 ),
-                "--shard-result-uris-json",
-                json.dumps(shard_result_uris, ensure_ascii=True, separators=(",", ":")),
+                *[item for uri in shard_result_uris for item in ("--shard-result-uri", uri)],
                 "--result-output",
                 (
                     "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan')"
@@ -2160,21 +2159,17 @@ for suite_id, side in D19_PACK_SIDE_IDENTITIES:
         dag=dag,
     )
 
-_D19_PACK_SIDE_RESULT_URIS_JSON = json.dumps(
-    [
-        (
-            "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan')"
-            "['artifact_paths']['benchmark_pack_build_result'] }}.sides/"
-            + suite_id.casefold().replace(" ", "-").replace("_", "-")
-            + "-"
-            + side
-            + ".json"
-        )
-        for suite_id, side in D19_PACK_SIDE_IDENTITIES
-    ],
-    ensure_ascii=True,
-    separators=(",", ":"),
-)
+_D19_PACK_SIDE_RESULT_URIS = [
+    (
+        "{{ ti.xcom_pull(task_ids='validate_benchmark_improvement_wave_plan')"
+        "['artifact_paths']['benchmark_pack_build_result'] }}.sides/"
+        + suite_id.casefold().replace(" ", "-").replace("_", "-")
+        + "-"
+        + side
+        + ".json"
+    )
+    for suite_id, side in D19_PACK_SIDE_IDENTITIES
+]
 aggregate_exact_nine_benchmark_packs = ReceiptKubernetesPodOperator(
     task_id="aggregate_exact_nine_benchmark_packs",
     name="serp-d19-aggregate-exact-nine-benchmark-packs",
@@ -2211,8 +2206,7 @@ aggregate_exact_nine_benchmark_packs = ReceiptKubernetesPodOperator(
             "{{ ti.xcom_pull(task_ids='load_model_catalog_promotion')"
             "['promotionEvidence']['sha256'] }}"
         ),
-        "--side-result-uris-json",
-        _D19_PACK_SIDE_RESULT_URIS_JSON,
+        *[item for uri in _D19_PACK_SIDE_RESULT_URIS for item in ("--side-result-uri", uri)],
         "--xcom-output",
         "/airflow/xcom/return.json",
         "--result-output",
