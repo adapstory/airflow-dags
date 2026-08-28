@@ -122,6 +122,11 @@ def _isolated_airflow_logging_module() -> Iterator[tuple[ModuleType, ModuleType]
                 return stream, output_metadata
             raise TypeError(f"Invalid log stream type: {type(stream).__name__}")
 
+        def emit(self, record: logging.LogRecord) -> None:
+            if self.handler is None:
+                raise RuntimeError("task log handler has no local file")
+            self.handler.emit(record)
+
         def close(self) -> None:
             if self.handler is not None:
                 self.handler.close()
@@ -440,6 +445,43 @@ def test_minio_sts_task_handler_uploads_complete_log_on_close(
                 b"root cause survives pod deletion"
             )
         }
+
+
+def test_minio_sts_task_handler_periodically_mirrors_before_close(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    with _isolated_airflow_logging_module() as (logging_module, task_logging):
+        client = _S3(task_logging.TASK_LOG_BUCKET)
+        monkeypatch.setattr(task_logging, "task_log_s3_client", lambda: client)
+        now = [100.0]
+        monkeypatch.setattr(logging_module, "monotonic", lambda: now[0])
+        base_log_folder = tmp_path / "logs"
+        relative_path = Path("dag_id=d19/task_id=pack/attempt=4.log")
+        local_log = base_log_folder / relative_path
+        local_log.parent.mkdir(parents=True)
+
+        handler = logging_module.MinioStsTaskHandler(
+            base_log_folder=str(base_log_folder),
+            remote_base_log_folder="s3://airflow-serp-artifacts/airflow-task-logs",
+            flush_interval_seconds=5.0,
+        )
+        handler.handler = logging.FileHandler(local_log)
+        handler.log_relative_path = relative_path.as_posix()
+        handler.ti = object()
+        handler.upload_on_close = True
+
+        handler.emit(logging.makeLogRecord({"msg": "checkpoint restored"}))
+        assert client.objects == {}
+        now[0] += 5.0
+        handler.emit(logging.makeLogRecord({"msg": "provider outcome unknown"}))
+
+        assert client.objects == {
+            "airflow-task-logs/dag_id=d19/task_id=pack/attempt=4.log": (
+                b"checkpoint restored\nprovider outcome unknown\n"
+            )
+        }
+        # Deliberately do not call close(): this assertion models a worker that
+        # is killed after the periodic durable snapshot.
 
 
 def test_minio_sts_task_handler_adapts_airflow_paged_islice_to_supported_generator(
