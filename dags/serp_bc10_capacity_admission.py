@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
@@ -17,6 +19,8 @@ _REQUIRED_METRICS = (
     "bc10_ledger_cold_wave_required_bytes",
     "bc10_ledger_legacy_payload_records",
 )
+
+_CAPACITY_RETRY_DELAYS_SECONDS = (0.25, 1.0)
 
 
 def validate_bc10_capacity_metrics(metrics_text: str) -> dict[str, object]:
@@ -96,19 +100,37 @@ def verify_bc10_ledger_capacity_admission() -> dict[str, object]:
     parsed = urlsplit(gateway_url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.fragment:
         raise ValueError("ADAPSTORY_BC10_GATEWAY_URL is unavailable or invalid")
-    with urlopen(
-        Request(
-            f"{gateway_url}/api/v1/capacity",
-            headers={"Accept": "application/json"},
-        ),
-        timeout=10,
-    ) as response:
-        if response.status != 200:
-            raise RuntimeError("BC-10 capacity telemetry request was not successful")
+    request = Request(
+        f"{gateway_url}/api/v1/capacity",
+        headers={"Accept": "application/json"},
+    )
+    body: object | None = None
+    for attempt in range(len(_CAPACITY_RETRY_DELAYS_SECONDS) + 1):
         try:
-            body = json.loads(response.read())
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ValueError("BC-10 capacity admission response is invalid JSON") from exc
+            with urlopen(request, timeout=10) as response:
+                if response.status != 200:
+                    raise RuntimeError(
+                        "BC-10 capacity telemetry request was not successful"
+                    )
+                try:
+                    body = json.loads(response.read())
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ValueError(
+                        "BC-10 capacity admission response is invalid JSON"
+                    ) from exc
+            break
+        except HTTPError:
+            # An HTTP response proves the request reached BC-10; its rejection
+            # is authoritative and must not be hidden by transport retries.
+            raise
+        except (TimeoutError, URLError, OSError) as exc:
+            if attempt >= len(_CAPACITY_RETRY_DELAYS_SECONDS):
+                raise RuntimeError(
+                    "BC-10 capacity telemetry transport remained unavailable"
+                ) from exc
+            # GET is side-effect free. Reuse the exact Request object so a
+            # transient pre-response failure cannot create a new identity.
+            time.sleep(_CAPACITY_RETRY_DELAYS_SECONDS[attempt])
     if not isinstance(body, dict):
         raise ValueError("BC-10 capacity admission response must be an object")
     return validate_bc10_capacity_admission(body)

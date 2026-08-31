@@ -16,6 +16,7 @@ from adapstory_serp_pipeline.registry.evaluation_release_contract import (
 )
 
 import dags.serp_eval_contracts as serp_eval_contracts
+import dags.serp_bc10_capacity_admission as bc10_capacity_admission
 from dags.serp_bc10_capacity_admission import (
     validate_bc10_capacity_admission,
     validate_bc10_capacity_metrics,
@@ -869,6 +870,56 @@ bc10_ledger_legacy_payload_records 1
                     "activeRecords": malformed_counter,
                 }
             )
+
+
+def test_d19_bc10_capacity_admission_retries_one_transient_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "schema": "Bc10LedgerCapacityAdmission/v1",
+        "admitted": True,
+        "blockers": [],
+        "activeRecords": 500_000,
+        "relationBytes": 20_000_000_000,
+        "recordHeadroom": 4_000_000,
+        "storageHeadroomBytes": 141_061_273_600,
+        "observedAt": "2026-08-31T09:57:00+00:00",
+    }
+
+    class Response:
+        status = 200
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(payload).encode()
+
+    requests: list[object] = []
+
+    def open_request(request: object, *, timeout: int) -> Response:
+        assert timeout == 10
+        requests.append(request)
+        if len(requests) == 1:
+            raise TimeoutError("timed out")
+        return Response()
+
+    sleeps: list[float] = []
+    monkeypatch.setenv(
+        "ADAPSTORY_BC10_GATEWAY_URL",
+        "http://prod-bc10-model-gateway-svc.env-prod.svc.cluster.local:8000",
+    )
+    monkeypatch.setattr(bc10_capacity_admission, "urlopen", open_request)
+    monkeypatch.setattr(bc10_capacity_admission.time, "sleep", sleeps.append)
+
+    admitted = bc10_capacity_admission.verify_bc10_ledger_capacity_admission()
+
+    assert admitted["admitted"] is True
+    assert requests[0] is requests[1]
+    assert sleeps == [0.25]
 
 
 def test_d19_bc10_capacity_gate_precedes_catalog_and_pack_work() -> None:
