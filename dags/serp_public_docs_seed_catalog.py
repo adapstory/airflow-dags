@@ -11,6 +11,69 @@ PUBLIC_DOCS_NIGHTLY_SOURCE_CATALOG_PATH = "docs/reports/serp/public-docs-seed-ca
 STACK_INVENTORY_SOURCE_PATH = "docs/reports/serp/stack-inventory-2026-07-02.md"
 PUBLIC_DOCS_SOURCE_REGISTRY_VERSION = "public-docs-source-registry/v2"
 
+GOLDEN_RETRIEVAL_SCOPE_BY_SEED_ID: Mapping[str, Mapping[str, Any]] = {
+    "apache-airflow-docs": {
+        "library_id": "/apache/airflow",
+        "library_name": "Apache Airflow",
+        "product_versions": ("3.0.0",),
+    },
+    "argo-cd-docs": {
+        "library_id": "/argoproj/argo-cd",
+        "library_name": "Argo CD",
+        "product_versions": ("2.0.0",),
+    },
+    "junit-jupiter-docs": {
+        "library_id": "/junit-team/junit5",
+        "library_name": "JUnit Jupiter",
+        "product_versions": ("5.11.0",),
+    },
+    "k3s-docs": {
+        "library_id": "/k3s-io/docs",
+        "library_name": "K3s",
+        "product_versions": ("1.30.0",),
+    },
+    "keycloak-docs": {
+        "library_id": "/keycloak/keycloak",
+        "library_name": "Keycloak",
+        "product_versions": ("26.0.0",),
+    },
+    "langfuse-docs": {
+        "library_id": "/langfuse/langfuse",
+        "library_name": "Langfuse",
+        "product_versions": ("3.0.0",),
+    },
+    "nextjs-docs": {
+        "library_id": "/vercel/next.js",
+        "library_name": "Next.js",
+        "product_versions": ("16.2.2",),
+    },
+    "ollama-docs": {
+        "library_id": "/ollama/ollama",
+        "library_name": "Ollama",
+        "product_versions": ("0.6.0",),
+    },
+    "opentelemetry-docs": {
+        "library_id": "/open-telemetry/opentelemetry-collector",
+        "library_name": "OpenTelemetry Collector",
+        "product_versions": ("0.120.0",),
+    },
+    "qdrant-docs": {
+        "library_id": "/qdrant/qdrant-client",
+        "library_name": "Qdrant",
+        "product_versions": ("1.14.0",),
+    },
+    "ragas-docs": {
+        "library_id": "/explodinggradients/ragas",
+        "library_name": "Ragas",
+        "product_versions": ("0.2.0",),
+    },
+    "spring-boot-docs": {
+        "library_id": "/spring-projects/spring-boot",
+        "library_name": "Spring Boot",
+        "product_versions": ("3.0.0",),
+    },
+}
+
 WEBSITE_GIT_RELEASE_NOTES_INGEST_MODES = ("website", "git", "release-notes")
 OPENAPI_INGEST_MODES = ("openapi",)
 
@@ -28,6 +91,7 @@ def _source(
     suggested_ingest_modes: Sequence[str] = WEBSITE_GIT_RELEASE_NOTES_INGEST_MODES,
     version: str | None = None,
     priority: str = "P0",
+    crawl_max_pages: int | None = None,
 ) -> Mapping[str, Any]:
     freshness_warning_hours = 24 if priority == "P0" else 72
     freshness_hard_limit_hours = 72 if priority == "P0" else 168
@@ -64,6 +128,11 @@ def _source(
         source["frontier_urls"] = tuple(frontier_urls)
     if version is not None:
         source["version"] = version
+    if crawl_max_pages is not None:
+        source["crawl_max_pages"] = crawl_max_pages
+    retrieval_scope = GOLDEN_RETRIEVAL_SCOPE_BY_SEED_ID.get(seed_id)
+    if retrieval_scope is not None:
+        source.update(retrieval_scope)
     return source
 
 
@@ -373,6 +442,47 @@ GOVERNED_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
         repo_url="https://github.com/spring-projects/spring-boot",
         releases_url="https://github.com/spring-projects/spring-boot/releases",
         seed_id="spring-boot-docs",
+        priority="P1",
+    ),
+    _source(
+        component="Next.js",
+        docs_url="https://nextjs.org/docs/",
+        repo_url="https://github.com/vercel/next.js",
+        releases_url="https://github.com/vercel/next.js/releases",
+        seed_id="nextjs-docs",
+        version="16.2.2",
+        priority="P1",
+    ),
+    _source(
+        component="JUnit Jupiter",
+        docs_url="https://docs.junit.org/5.11.0/user-guide/",
+        repo_url="https://github.com/junit-team/junit5",
+        releases_url="https://github.com/junit-team/junit5/releases",
+        seed_id="junit-jupiter-docs",
+        version="5.11.0",
+        priority="P1",
+        # The 5.11 guide is a single-page document whose generated navigation
+        # contains historical split-page links that return 404. Crawl the
+        # canonical guide once instead of quarantining valid evidence because
+        # those non-canonical navigation targets are unavailable.
+        crawl_max_pages=1,
+    ),
+    _source(
+        component="Langfuse",
+        docs_url="https://langfuse.com/docs/",
+        repo_url="https://github.com/langfuse/langfuse",
+        releases_url="https://github.com/langfuse/langfuse/releases",
+        seed_id="langfuse-docs",
+        version="3.0.0",
+        priority="P1",
+    ),
+    _source(
+        component="Ragas",
+        docs_url="https://docs.ragas.io/en/stable/",
+        repo_url="https://github.com/explodinggradients/ragas",
+        releases_url="https://github.com/explodinggradients/ragas/releases",
+        seed_id="ragas-docs",
+        version="0.2.0",
         priority="P1",
     ),
     _source(

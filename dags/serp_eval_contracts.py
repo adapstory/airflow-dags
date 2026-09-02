@@ -13110,8 +13110,9 @@ def _public_docs_seed_registry(
 
 
 def _default_public_docs_seed_registry() -> list[dict[str, Any]]:
-    return [
-        _default_public_docs_seed(
+    seeds: list[dict[str, Any]] = []
+    for source in governed_public_docs_sources():
+        seed = _default_public_docs_seed(
             str(source["seed_id"]),
             str(source.get("source_type", "website")),
             str(source["docs_url"]),
@@ -13125,9 +13126,14 @@ def _default_public_docs_seed_registry() -> list[dict[str, Any]]:
             source_policy=_default_public_docs_source_policy(source),
             suggested_ingest_modes=tuple(str(value) for value in source["suggested_ingest_modes"]),
             version=str(source.get("version", "catalog@2026-07-08")),
+            max_pages=int(source.get("crawl_max_pages", 25)),
         )
-        for source in governed_public_docs_sources()
-    ]
+        for field in ("library_id", "library_name", "product_versions"):
+            value = source.get(field)
+            if value is not None:
+                seed["metadata"][field] = list(value) if field == "product_versions" else value
+        seeds.append(seed)
+    return seeds
 
 
 def _default_public_docs_seed(
@@ -13145,6 +13151,7 @@ def _default_public_docs_seed(
     version: str,
     frontier_urls: Sequence[str] = (),
     priority: str = "P0",
+    max_pages: int = 25,
 ) -> dict[str, Any]:
     parsed = urlparse(source_uri)
     allowed_domain = parsed.hostname or "opt.adapstory"
@@ -13168,7 +13175,7 @@ def _default_public_docs_seed(
             "deny_patterns": ["/login", "/admin"],
             "frontier_urls": list(frontier_urls),
             "max_depth": 2,
-            "max_pages": 25,
+            "max_pages": max_pages,
             "respect_robots_txt": True,
             "robots_cache_max_hours": robots_cache_max_hours,
             "sitemap_discovery": True,

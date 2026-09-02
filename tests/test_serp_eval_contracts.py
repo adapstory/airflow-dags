@@ -82,6 +82,7 @@ from dags.serp_eval_contracts import (
     write_scheduled_d6_regression_receipt,
 )
 from dags.serp_public_docs_seed_catalog import (
+    GOLDEN_RETRIEVAL_SCOPE_BY_SEED_ID,
     GOVERNED_PUBLIC_DOCS_SOURCES,
     PUBLIC_DOCS_NIGHTLY_SOURCE_CATALOG_PATH,
     STACK_INVENTORY_SOURCE_PATH,
@@ -7662,6 +7663,23 @@ def test_default_public_docs_seed_refresh_conf_materializes_autonomous_d20_plan(
     assert {
         seed["metadata"]["source_registry_version"] for seed in plan.payload["seed_registry"]
     } == {"public-docs-source-registry/v2"}
+    golden_seed_metadata = {
+        seed["seed_id"]: seed["metadata"]
+        for seed in plan.payload["seed_registry"]
+        if seed["seed_id"] in GOLDEN_RETRIEVAL_SCOPE_BY_SEED_ID
+    }
+    assert set(golden_seed_metadata) == set(GOLDEN_RETRIEVAL_SCOPE_BY_SEED_ID)
+    for seed_id, expected in GOLDEN_RETRIEVAL_SCOPE_BY_SEED_ID.items():
+        assert golden_seed_metadata[seed_id]["library_id"] == expected["library_id"]
+        assert golden_seed_metadata[seed_id]["library_name"] == expected["library_name"]
+        assert tuple(golden_seed_metadata[seed_id]["product_versions"]) == tuple(
+            expected["product_versions"]
+        )
+    junit_seed = next(
+        seed for seed in plan.payload["seed_registry"] if seed["seed_id"] == "junit-jupiter-docs"
+    )
+    assert junit_seed["source_uri"] == "https://docs.junit.org/5.11.0/user-guide/"
+    assert junit_seed["crawl_policy"]["max_pages"] == 1
     assert {seed["source_policy"]["schema"] for seed in plan.payload["seed_registry"]} == {
         "PublicDocsSourcePolicy/v1"
     }

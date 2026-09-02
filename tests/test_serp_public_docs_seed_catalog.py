@@ -5,6 +5,7 @@ from urllib.parse import urlparse
 import pytest
 
 from dags.serp_public_docs_seed_catalog import (
+    GOLDEN_RETRIEVAL_SCOPE_BY_SEED_ID,
     GOVERNED_PUBLIC_DOCS_SOURCES,
     PUBLIC_DOCS_SOURCE_REGISTRY_VERSION,
     QUARANTINED_PUBLIC_DOCS_CANDIDATES,
@@ -90,3 +91,36 @@ def test_uncertain_candidates_remain_quarantined_and_non_executable() -> None:
     assert active_ids.isdisjoint(
         candidate["seed_id"] for candidate in QUARANTINED_PUBLIC_DOCS_CANDIDATES
     )
+
+
+def test_experience_golden_domains_have_canonical_retrieval_scope_metadata() -> None:
+    expected = {
+        "apache-airflow-docs": "/apache/airflow",
+        "argo-cd-docs": "/argoproj/argo-cd",
+        "junit-jupiter-docs": "/junit-team/junit5",
+        "k3s-docs": "/k3s-io/docs",
+        "keycloak-docs": "/keycloak/keycloak",
+        "langfuse-docs": "/langfuse/langfuse",
+        "nextjs-docs": "/vercel/next.js",
+        "ollama-docs": "/ollama/ollama",
+        "opentelemetry-docs": "/open-telemetry/opentelemetry-collector",
+        "qdrant-docs": "/qdrant/qdrant-client",
+        "ragas-docs": "/explodinggradients/ragas",
+        "spring-boot-docs": "/spring-projects/spring-boot",
+    }
+
+    assert {
+        seed_id: metadata["library_id"]
+        for seed_id, metadata in GOLDEN_RETRIEVAL_SCOPE_BY_SEED_ID.items()
+    } == expected
+
+    sources = {source["seed_id"]: source for source in governed_public_docs_sources()}
+    for seed_id, library_id in expected.items():
+        source = sources[seed_id]
+        assert source["library_id"] == library_id
+        assert source["library_name"]
+        assert source["product_versions"]
+
+    junit = sources["junit-jupiter-docs"]
+    assert junit["docs_url"] == "https://docs.junit.org/5.11.0/user-guide/"
+    assert junit["crawl_max_pages"] == 1
