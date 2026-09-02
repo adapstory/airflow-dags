@@ -9140,6 +9140,27 @@ def test_public_docs_pipeline_runner_env_contract_survives_native_template_rende
     assert "ADAPSTORY_SERP_PIPELINE_CLI_SPEC_JSON" not in values
 
 
+def test_public_docs_pipeline_runner_receives_qdrant_write_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_airflow_import_stubs(monkeypatch)
+    module = importlib.import_module("dags.serp_web_seed_crawl_refresh")
+    module = importlib.reload(module)
+
+    env_vars = module.pipeline_runner_runtime_env_vars()
+    qdrant_api_key = next(
+        env_var
+        for env_var in env_vars
+        if env_var.kwargs["name"] == "ADAPSTORY_SERP_QDRANT_API_KEY"
+    )
+    secret_key_ref = qdrant_api_key.kwargs["value_from"].kwargs["secret_key_ref"]
+
+    assert secret_key_ref.kwargs == {
+        "name": "qdrant-prod-write-client",
+        "key": "api-key",
+    }
+
+
 @pytest.mark.parametrize("value", ("900", "0.5", "-7", "1e-3"))
 def test_native_template_safe_env_value_preserves_every_numeric_literal_as_a_string(
     monkeypatch: pytest.MonkeyPatch,

@@ -126,6 +126,15 @@ def pipeline_runner_runtime_env_vars() -> list[k8s.V1EnvVar]:
     values.extend(
         (
             k8s.V1EnvVar(
+                name="ADAPSTORY_SERP_QDRANT_API_KEY",
+                value_from=k8s.V1EnvVarSource(
+                    secret_key_ref=k8s.V1SecretKeySelector(
+                        name="qdrant-prod-write-client",
+                        key="api-key",
+                    )
+                ),
+            ),
+            k8s.V1EnvVar(
                 name="ADAPSTORY_SERP_NEO4J_PASSWORD",
                 value_from=k8s.V1EnvVarSource(
                     secret_key_ref=k8s.V1SecretKeySelector(
