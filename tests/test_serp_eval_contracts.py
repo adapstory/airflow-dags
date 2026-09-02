@@ -6373,11 +6373,36 @@ def test_public_docs_seed_refresh_dispatches_live_index_mode(tmp_path: Path) -> 
     assert refresh_plan_artifact["payload"]["embedding_mode"] == "bc10"
     assert cli_spec["argv"][cli_spec["argv"].index("--index-mode") + 1] == "live"
     assert cli_spec["argv"][cli_spec["argv"].index("--embedding-mode") + 1] == "bc10"
+    assert cli_spec["argv"][cli_spec["argv"].index("--embedding-dimension") + 1] == "1024"
     assert (
         cli_spec["argv"][cli_spec["argv"].index("--qdrant-collection") + 1] == "serp_vectors_prod"
     )
     assert cli_spec["argv"][cli_spec["argv"].index("--opensearch-index") + 1] == "serp_lexical_prod"
     assert cli_spec["argv"][cli_spec["argv"].index("--neo4j-database") + 1] == "neo4j"
+
+
+def test_public_docs_seed_refresh_snapshots_configured_embedding_dimension(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ADAPSTORY_SERP_EMBEDDING_DIMENSION", "768")
+    conf = _public_docs_seed_refresh_conf()
+    conf["artifact_root_path"] = str(tmp_path)
+
+    plan = build_public_docs_seed_refresh_plan(conf)
+    cli_spec = dispatch_public_docs_seed_refresh_handoff(plan.to_canonical_json())
+
+    assert plan.payload["embedding_dimension"] == 768
+    assert cli_spec["embedding_dimension"] == 768
+    assert cli_spec["argv"][cli_spec["argv"].index("--embedding-dimension") + 1] == "768"
+
+
+def test_public_docs_seed_refresh_rejects_invalid_embedding_dimension(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ADAPSTORY_SERP_EMBEDDING_DIMENSION", "3.0")
+
+    with pytest.raises(ValueError, match="embedding_dimension must be a positive integer"):
+        build_public_docs_seed_refresh_plan(_public_docs_seed_refresh_conf())
 
 
 def test_public_docs_seed_refresh_noops_when_no_seed_is_due(tmp_path: Path) -> None:
@@ -9364,6 +9389,8 @@ def _install_airflow_import_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         value = "test"
         if name == "ADAPSTORY_AIRFLOW_RUNTIME_IMAGE_DIGEST":
             value = "sha256:" + "d" * 64
+        elif name == "ADAPSTORY_SERP_EMBEDDING_DIMENSION":
+            value = "1024"
         elif name == "ADAPSTORY_SERP_BC21_BASE_URL":
             value = "http://serp-context-platform.serp.svc.cluster.local:8080/api/bc-21/serp/v1"
         monkeypatch.setenv(name, value)

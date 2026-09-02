@@ -405,6 +405,9 @@ _PUBLIC_DOCS_SEARCH_SERVE_DEFAULT_BASE_URL = (
 )
 _PUBLIC_DOCS_INDEX_MODE_ENV = "ADAPSTORY_SERP_PUBLIC_DOCS_INDEX_MODE"
 _PUBLIC_DOCS_EMBEDDING_MODE_ENV = "ADAPSTORY_SERP_PUBLIC_DOCS_EMBEDDING_MODE"
+_PUBLIC_DOCS_EMBEDDING_DIMENSION_ENV = "ADAPSTORY_SERP_EMBEDDING_DIMENSION"
+_PUBLIC_DOCS_DEFAULT_BC10_EMBEDDING_DIMENSION = 1024
+_PUBLIC_DOCS_DEFAULT_DEV_EMBEDDING_DIMENSION = 3
 _PUBLIC_DOCS_QDRANT_COLLECTION_ENV = "ADAPSTORY_SERP_PUBLIC_DOCS_QDRANT_COLLECTION"
 _PUBLIC_DOCS_OPENSEARCH_INDEX_ENV = "ADAPSTORY_SERP_PUBLIC_DOCS_OPENSEARCH_INDEX"
 _PUBLIC_DOCS_NEO4J_DATABASE_ENV = "ADAPSTORY_SERP_PUBLIC_DOCS_NEO4J_DATABASE"
@@ -4696,6 +4699,7 @@ def build_public_docs_seed_refresh_plan(
     )
     index_mode = _public_docs_index_mode(payload)
     embedding_mode = _public_docs_embedding_mode(payload, index_mode)
+    embedding_dimension = _public_docs_embedding_dimension(payload, embedding_mode)
     qdrant_collection = _public_docs_store_name(
         payload,
         "qdrant_collection",
@@ -4743,6 +4747,7 @@ def build_public_docs_seed_refresh_plan(
         _canonical_json(crawl_state_recovery) if crawl_state_recovery is not None else "",
         index_mode,
         embedding_mode,
+        embedding_dimension,
         bc21_base_url or "",
         refresh_mode,
         refresh_reason or "",
@@ -4791,6 +4796,7 @@ def build_public_docs_seed_refresh_plan(
         "crawler_discovery_workers": crawler_discovery_workers,
         "dag_id": "serp_web_seed_crawl_refresh",
         "generated_at": generated_at,
+        "embedding_dimension": embedding_dimension,
         "embedding_mode": embedding_mode,
         "frontier_budget": frontier_budget,
         "index_mode": index_mode,
@@ -10831,6 +10837,8 @@ def dispatch_public_docs_seed_refresh_handoff(plan_json: str) -> dict[str, Any]:
         _required_datetime_string(plan, "generated_at"),
         "--embedding-mode",
         _required_str(plan, "embedding_mode"),
+        "--embedding-dimension",
+        str(_required_positive_int(plan, "embedding_dimension")),
         "--index-mode",
         _required_str(plan, "index_mode"),
         "--tenant-id",
@@ -10867,6 +10875,7 @@ def dispatch_public_docs_seed_refresh_handoff(plan_json: str) -> dict[str, Any]:
         "task_id": "public_docs_seed_refresh_pipeline",
         "tenant_id": _required_str(plan, "tenant_id"),
         "index_mode": _required_str(plan, "index_mode"),
+        "embedding_dimension": _required_positive_int(plan, "embedding_dimension"),
         "embedding_mode": _required_str(plan, "embedding_mode"),
         "qdrant_collection": _required_str(plan, "qdrant_collection"),
         "opensearch_index": _required_str(plan, "opensearch_index"),
@@ -12012,6 +12021,7 @@ def _public_docs_seed_refresh_payload(plan: Mapping[str, Any]) -> dict[str, Any]
         "contract_version": _EVAL_CONTRACT_VERSION,
         "d4_dispatch_target": "serp_scan_parse_index",
         "dag_id": "serp_web_seed_crawl_refresh",
+        "embedding_dimension": _required_positive_int(plan, "embedding_dimension"),
         "embedding_mode": _required_str(plan, "embedding_mode"),
         "frontier_budget": dict(_required_mapping(plan, "frontier_budget")),
         "generated_at": generated_at,
@@ -13943,6 +13953,29 @@ def _public_docs_embedding_mode(payload: Mapping[str, Any], index_mode: str) -> 
         raise ValueError("embedding_mode is unsupported")
     if index_mode == "live" and value != "bc10":
         raise ValueError("live index mode requires bc10 embedding mode")
+    return value
+
+
+def _public_docs_embedding_dimension(
+    payload: Mapping[str, Any], embedding_mode: str
+) -> int:
+    default = (
+        _PUBLIC_DOCS_DEFAULT_BC10_EMBEDDING_DIMENSION
+        if embedding_mode == "bc10"
+        else _PUBLIC_DOCS_DEFAULT_DEV_EMBEDDING_DIMENSION
+    )
+    value = payload.get(
+        "embedding_dimension",
+        os.environ.get(_PUBLIC_DOCS_EMBEDDING_DIMENSION_ENV, default),
+    )
+    if isinstance(value, bool) or not isinstance(value, int | str):
+        raise ValueError("embedding_dimension must be a positive integer")
+    if isinstance(value, str):
+        if not value.strip().isdigit():
+            raise ValueError("embedding_dimension must be a positive integer")
+        value = int(value.strip())
+    if value <= 0:
+        raise ValueError("embedding_dimension must be a positive integer")
     return value
 
 
