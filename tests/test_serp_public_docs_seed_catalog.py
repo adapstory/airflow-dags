@@ -124,3 +124,9 @@ def test_experience_golden_domains_have_canonical_retrieval_scope_metadata() -> 
     junit = sources["junit-jupiter-docs"]
     assert junit["docs_url"] == "https://docs.junit.org/5.11.0/user-guide/"
     assert junit["crawl_max_pages"] == 1
+
+
+def test_trivy_docs_use_live_canonical_entrypoint() -> None:
+    sources = {source["seed_id"]: source for source in governed_public_docs_sources()}
+
+    assert sources["trivy-docs"]["docs_url"] == "https://trivy.dev/docs/"

@@ -422,7 +422,7 @@ GOVERNED_PUBLIC_DOCS_SOURCES: tuple[Mapping[str, Any], ...] = (
     ),
     _source(
         component="Trivy",
-        docs_url="https://trivy.dev/latest/",
+        docs_url="https://trivy.dev/docs/",
         repo_url="https://github.com/aquasecurity/trivy",
         releases_url="https://github.com/aquasecurity/trivy/releases",
         seed_id="trivy-docs",
