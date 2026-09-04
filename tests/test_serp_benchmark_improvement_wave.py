@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+
+pytestmark = pytest.mark.unit
+
 
 def test_bc10_capacity_admission_precedes_expensive_d19_work() -> None:
     source = (Path(__file__).parents[1] / "dags" / "serp_benchmark_improvement_wave.py").read_text(

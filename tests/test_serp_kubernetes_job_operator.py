@@ -7,6 +7,8 @@ from typing import Any
 
 import pytest
 
+pytestmark = pytest.mark.unit
+
 
 def test_remote_xcom_sidecar_admission_contract_is_fail_closed() -> None:
     source = (Path(__file__).parents[1] / "dags" / "serp_kubernetes_job_operator.py").read_text(
